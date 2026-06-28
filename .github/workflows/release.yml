@@ -1,0 +1,112 @@
+name: Build distributions
+
+# Build native installers for Windows, macOS and Linux.
+#
+# - Push a tag like `v0.1.0`  -> builds all installers AND publishes a GitHub Release with them.
+# - Run manually (Actions tab -> "Build distributions" -> Run workflow) -> builds + uploads
+#   the installers as workflow artifacts (no release).
+#
+# jpackage cannot cross-compile, so each OS is built on its own runner.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create the Release and upload assets
+
+jobs:
+  build:
+    name: ${{ matrix.type }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            type: msi
+            pattern: dist/*.msi
+          - os: macos-latest
+            type: dmg
+            pattern: dist/*.dmg
+          - os: ubuntu-latest
+            type: deb
+            pattern: dist/*.deb
+          - os: ubuntu-latest
+            type: rpm
+            pattern: dist/*.rpm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Determine app version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF#refs/tags/v}"
+          else
+            V="0.1.0"
+          fi
+          echo "APP_VERSION=$V" >> "$GITHUB_ENV"
+          echo "Building version $V"
+
+      # --- platform-specific packaging prerequisites ---
+
+      - name: Install WiX (Windows, for .msi)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install wixtoolset --no-progress -y
+          $wix = (Get-ChildItem "C:\Program Files (x86)\WiX Toolset*\bin\candle.exe" -ErrorAction SilentlyContinue |
+                  Select-Object -First 1).DirectoryName
+          if ($wix) { Add-Content -Path $env:GITHUB_PATH -Value $wix }
+
+      - name: Install packaging tools (Linux, for .deb/.rpm)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fakeroot binutils rpm
+
+      # --- build the installer using the repo's packaging scripts ---
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/package.ps1 -Type ${{ matrix.type }} -AppVersion "$env:APP_VERSION"
+
+      - name: Package (macOS / Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          chmod +x scripts/package.sh
+          ./scripts/package.sh ${{ matrix.type }} "$APP_VERSION"
+
+      - name: List output
+        shell: bash
+        run: ls -la dist
+
+      # --- publish ---
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubedesk-${{ matrix.type }}
+          path: ${{ matrix.pattern }}
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.pattern }}
+          draft: false
+          generate_release_notes: true

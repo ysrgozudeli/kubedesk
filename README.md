@@ -122,6 +122,32 @@ Drop a platform icon and the scripts pick it up automatically:
 - To shrink the bundle, a custom `jlink` runtime (only the modules KubeDesk uses) can roughly halve
   the size — verify TLS/auth still work afterward.
 
+## Releases (CI)
+
+A GitHub Actions workflow (`.github/workflows/release.yml`) builds the native installers for all
+three platforms on their own runners (jpackage can't cross-compile):
+
+| Platform | Artifact            |
+|----------|---------------------|
+| Windows  | `.msi` (WiX)        |
+| macOS    | `.dmg`              |
+| Linux    | `.deb` and `.rpm`   |
+
+**Cut a release:**
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Pushing a `v*` tag builds every installer and publishes a **GitHub Release** with them attached
+(with auto-generated release notes). You can also trigger the workflow manually from the **Actions**
+tab ("Build distributions" → *Run workflow*); manual runs upload the installers as **workflow
+artifacts** instead of creating a release.
+
+> macOS builds are unsigned, so Gatekeeper will warn end users until the app is signed/notarized
+> with an Apple Developer ID. Add `--mac-sign ...` options (and the signing secrets) to enable that.
+
 ## License
 
 [MIT](LICENSE) © Yasar Gozudeli
