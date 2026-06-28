@@ -1,0 +1,9 @@
+target/
+staging/
+dist/
+dependency-reduced-pom.xml
+*.class
+.idea/
+*.iml
+.vscode/
+.DS_Store
