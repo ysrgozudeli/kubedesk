@@ -1,0 +1,4 @@
+# Keep shell scripts LF so they run on macOS/Linux regardless of checkout OS.
+*.sh text eol=lf
+# Windows scripts stay CRLF.
+*.ps1 text eol=crlf

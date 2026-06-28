@@ -48,25 +48,83 @@ java -jar target/kubedesk.jar
 
 ## Package a native app (jpackage)
 
-Produces a self-contained app that **bundles its own Java runtime** — end users do not need
-Java installed.
+KubeDesk ships as a self-contained app that **bundles its own Java runtime** — end users do **not**
+need Java installed. Packaging uses the JDK's `jpackage` tool, so you need a **JDK 17+** (we use 21)
+with `JAVA_HOME` set.
+
+> Important: `jpackage` **cannot cross-compile**. You must build each platform's package **on that
+> platform** (Windows builds `.exe`/`.msi`, macOS builds `.dmg`/`.pkg`, Linux builds `.deb`/`.rpm`).
+> The recommended way to produce all three is a CI matrix (see below).
+
+There are convenience scripts: **`scripts/package.ps1`** (Windows) and **`scripts/package.sh`**
+(macOS/Linux). Both build the fat jar, stage it, and invoke `jpackage`.
+
+### Windows (`.exe` / `.msi`)
 
 ```powershell
-# Self-contained app folder (no extra tooling needed) -> dist\KubeDesk\KubeDesk.exe
+# 1) Self-contained app folder — no extra tooling. -> dist\KubeDesk\KubeDesk.exe
 ./scripts/package.ps1
 
-# Windows installer (requires the WiX Toolset v3 on PATH) -> dist\KubeDesk-0.1.0.msi
-./scripts/package.ps1 -Type msi
+# 2) Installer (.exe or .msi) — requires the WiX Toolset v3 on PATH.
+./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-0.1.0.exe
+./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-0.1.0.msi
 ```
 
-- **app-image** (~174 MB) works out of the box; zip `dist\KubeDesk\` to distribute.
-- **msi/exe** installers need [WiX v3](https://wixtoolset.org/) on the PATH; they add a
-  Start-menu entry, desktop shortcut, and an install-location chooser.
-- Drop a `src/main/resources/icons/kubedesk.ico` to brand the launcher; the script picks it up
-  automatically.
+Installers (`exe`/`msi`) need the **[WiX Toolset v3](https://wixtoolset.org/)** on the `PATH`
+(jpackage shells out to it). Install it, e.g.:
 
-On macOS/Linux the same `jpackage` invocation produces `.dmg`/`.pkg` and `.deb`/`.rpm`
-respectively (run jpackage on that OS).
+```powershell
+winget install --id WiXToolset.WiXToolset    # or download the v3 installer from wixtoolset.org
+```
+
+The installer adds a Start-menu entry, a desktop shortcut, and an install-location chooser.
+
+### macOS (`.dmg` / `.pkg`)
+
+```bash
+chmod +x scripts/package.sh          # once
+./scripts/package.sh                  # app-image -> dist/KubeDesk.app
+./scripts/package.sh dmg              # -> dist/KubeDesk-0.1.0.dmg
+./scripts/package.sh pkg              # -> dist/KubeDesk-0.1.0.pkg
+```
+
+Needs **Xcode Command Line Tools** (`xcode-select --install`). For distribution *outside* your own
+machines, macOS requires the app to be **code-signed and notarized** with an Apple Developer ID
+(unsigned apps trigger Gatekeeper warnings). Pass signing options to jpackage
+(`--mac-sign --mac-signing-key-user-name ...`) once you have a certificate.
+
+### Linux (`.deb` / `.rpm`)
+
+```bash
+chmod +x scripts/package.sh          # once
+./scripts/package.sh                  # app-image -> dist/KubeDesk/
+./scripts/package.sh deb              # -> dist/kubedesk_0.1.0_amd64.deb   (needs dpkg + fakeroot)
+./scripts/package.sh rpm              # -> dist/kubedesk-0.1.0.x86_64.rpm  (needs rpmbuild)
+```
+
+- `.deb` needs `dpkg-deb` + `fakeroot` (`sudo apt install fakeroot`).
+- `.rpm` needs `rpmbuild` (`sudo dnf install rpm-build`).
+
+### App icon (optional, per OS)
+
+Drop a platform icon and the scripts pick it up automatically:
+
+| OS      | File                                          |
+|---------|-----------------------------------------------|
+| Windows | `src/main/resources/icons/kubedesk.ico`       |
+| macOS   | `src/main/resources/icons/kubedesk.icns`      |
+| Linux   | `src/main/resources/icons/kubedesk.png`       |
+
+### Notes
+
+- The **app-image** is the simplest artifact (~174 MB, bundles the JRE). Zip `dist/KubeDesk/` to
+  hand someone a runnable app with no installer.
+- To shrink the bundle, a custom `jlink` runtime (only the modules KubeDesk uses) can roughly halve
+  the size — verify TLS/auth still work afterward.
+
+## License
+
+[MIT](LICENSE) © Yasar Gozudeli
 
 ## Roadmap
 
