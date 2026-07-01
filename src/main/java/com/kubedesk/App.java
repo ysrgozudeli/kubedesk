@@ -5,6 +5,7 @@ import com.kubedesk.ui.MainView;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
+import javafx.scene.image.Image;
 import javafx.stage.Stage;
 
 import java.util.Objects;
@@ -25,6 +26,10 @@ public class App extends Application {
                 Objects.requireNonNull(getClass().getResource("/styles/app.css")).toExternalForm());
 
         stage.setTitle("KubeDesk");
+        var iconStream = getClass().getResourceAsStream("/icons/kubedesk.png");
+        if (iconStream != null) {
+            stage.getIcons().add(new Image(iconStream));
+        }
         stage.setScene(scene);
         stage.setMinWidth(900);
         stage.setMinHeight(600);

@@ -18,9 +18,11 @@ import javafx.util.Duration;
 import javafx.scene.chart.PieChart;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
+import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
@@ -262,6 +264,17 @@ public class MainView extends BorderPane {
             });
             nav.getChildren().add(btn);
         }
+
+        // Pin the global "+ Create" action to the bottom of the sidebar (it applies any kind).
+        Region grow = new Region();
+        VBox.setVgrow(grow, Priority.ALWAYS);
+        Button createBtn = new Button("+ Create");
+        createBtn.getStyleClass().add("accent-button");
+        createBtn.setMaxWidth(Double.MAX_VALUE);
+        createBtn.setOnAction(e -> openCreateDialog());
+        VBox createBox = new VBox(createBtn);
+        createBox.setPadding(new Insets(10, 4, 0, 4));
+        nav.getChildren().addAll(grow, createBox);
         return nav;
     }
 
@@ -842,6 +855,98 @@ public class MainView extends BorderPane {
             }
         }
         return null;
+    }
+
+    /** The global "+ Create" action: a blank editor to paste/open manifests and apply them. */
+    private void openCreateDialog() {
+        if (contextBox.getValue() == null) {
+            status("Select a context first.");
+            return;
+        }
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Create / Apply YAML");
+        if (getScene() != null) {
+            dialog.initOwner(getScene().getWindow());
+        }
+        ButtonType applyType = new ButtonType("Apply", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(applyType, ButtonType.CANCEL);
+
+        TextArea editor = new TextArea();
+        editor.setPromptText("Paste or write Kubernetes manifests here.\n"
+                + "Multiple documents separated by --- are supported.");
+        editor.getStyleClass().add("yaml-area");
+        editor.setPrefColumnCount(90);
+        editor.setPrefRowCount(26);
+        VBox.setVgrow(editor, Priority.ALWAYS);
+
+        Button openFile = new Button("Open file…");
+        openFile.setOnAction(e -> {
+            FileChooser fc = new FileChooser();
+            fc.setTitle("Open manifest");
+            fc.getExtensionFilters().addAll(
+                    new FileChooser.ExtensionFilter("YAML (*.yaml, *.yml)", "*.yaml", "*.yml"),
+                    new FileChooser.ExtensionFilter("All files", "*.*"));
+            File f = fc.showOpenDialog(dialog.getOwner());
+            if (f != null) {
+                try {
+                    editor.setText(Files.readString(f.toPath()));
+                } catch (Exception ex) {
+                    editor.setText("# could not read file: " + ex.getMessage());
+                }
+            }
+        });
+
+        String ns = namespaceBox.getValue();
+        Label hint = new Label("Server-side apply · resources without a namespace go to: "
+                + (ns != null ? ns : "(context default)"));
+        hint.getStyleClass().add("muted");
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox top = new HBox(8, openFile, spacer, hint);
+        top.setAlignment(Pos.CENTER_LEFT);
+
+        VBox content = new VBox(8, top, editor);
+        content.setPrefSize(780, 560);
+        dialog.getDialogPane().setContent(content);
+
+        Optional<ButtonType> result = dialog.showAndWait();
+        if (result.isPresent() && result.get() == applyType) {
+            applyManifestText(editor.getText());
+        }
+    }
+
+    private void applyManifestText(String yaml) {
+        if (yaml == null || yaml.isBlank()) {
+            status("Nothing to apply.");
+            return;
+        }
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String ns = namespaceBox.getValue();
+        status("Applying manifests…");
+        runAsync(() -> service.applyManifests(ctx.name(), ns, yaml), summary -> {
+            showReport("Apply result", summary);
+            status("Apply complete.");
+            refreshContent();
+        });
+    }
+
+    /** Show a multi-line, read-only report (e.g. the result of applying manifests). */
+    private void showReport(String header, String text) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("KubeDesk");
+        alert.setHeaderText(header);
+        if (getScene() != null) {
+            alert.initOwner(getScene().getWindow());
+        }
+        TextArea area = new TextArea(text);
+        area.setEditable(false);
+        area.setWrapText(true);
+        area.setPrefSize(540, 280);
+        alert.getDialogPane().setContent(area);
+        alert.showAndWait();
     }
 
     /** Confirm dialog returning true if the user accepted. */

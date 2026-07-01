@@ -78,8 +78,17 @@ public interface ClusterService {
     /** Scale a Deployment to the given replica count. */
     void scaleDeployment(String context, String namespace, String name, int replicas);
 
-    /** Apply an edited manifest (YAML) back to the cluster, replacing the existing resource. */
+    /** Apply an edited manifest (YAML) back to the cluster via server-side apply. */
     void applyYaml(String context, String namespace, String yaml);
+
+    /**
+     * Create or update one or more resources from a (possibly multi-document) YAML manifest, via
+     * server-side apply — like {@code kubectl apply -f}, but over the API (no kubectl).
+     *
+     * @param defaultNamespace namespace for documents that don't specify one
+     * @return a human-readable per-resource summary of what was applied / what failed
+     */
+    String applyManifests(String context, String defaultNamespace, String yaml);
 
     /**
      * Open an interactive shell ({@code /bin/sh}) into a pod container.

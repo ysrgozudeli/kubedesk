@@ -29,11 +29,14 @@ import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
 import io.fabric8.kubernetes.client.dsl.ExecListener;
 import io.fabric8.kubernetes.client.dsl.ExecWatch;
+import io.fabric8.kubernetes.client.dsl.base.PatchContext;
+import io.fabric8.kubernetes.client.dsl.base.PatchType;
 import io.fabric8.kubernetes.client.Watch;
 import io.fabric8.kubernetes.client.Watcher;
 import io.fabric8.kubernetes.client.WatcherException;
 import io.fabric8.kubernetes.client.internal.KubeConfigUtils;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -394,10 +397,74 @@ public class Fabric8ClusterService implements ClusterService {
     public void applyYaml(String context, String namespace, String yaml) {
         try (KubernetesClient client = clientFor(context)) {
             HasMetadata obj = (HasMetadata) io.fabric8.kubernetes.client.utils.Serialization.unmarshal(yaml);
-            client.resource(obj).inNamespace(namespace).update();
+            serverSideApply(client, obj, namespace);
         } catch (Exception e) {
             throw new ClusterException("Could not apply changes: " + rootMessage(e), e);
         }
+    }
+
+    @Override
+    public String applyManifests(String context, String defaultNamespace, String yaml) {
+        try (KubernetesClient client = clientFor(context)) {
+            List<HasMetadata> items = client.load(
+                    new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8))).items();
+            if (items.isEmpty()) {
+                throw new ClusterException("No Kubernetes resources found in the YAML.", null);
+            }
+            StringBuilder sb = new StringBuilder();
+            int ok = 0;
+            int failed = 0;
+            for (HasMetadata item : items) {
+                String kind = item.getKind() != null ? item.getKind() : "Resource";
+                String name = item.getMetadata() != null ? item.getMetadata().getName() : "?";
+                try {
+                    HasMetadata result = serverSideApply(client, item, defaultNamespace);
+                    String ns = result.getMetadata() != null ? result.getMetadata().getNamespace() : null;
+                    sb.append("✓ ").append(kind).append('/').append(name)
+                            .append(ns != null ? " (namespace " + ns + ")" : "")
+                            .append(" applied\n");
+                    ok++;
+                } catch (Exception e) {
+                    sb.append("✗ ").append(kind).append('/').append(name)
+                            .append(": ").append(rootMessage(e)).append('\n');
+                    failed++;
+                }
+            }
+            String header = "Applied " + ok + " of " + items.size() + " resource(s)"
+                    + (failed > 0 ? ", " + failed + " failed" : "") + ".\n\n";
+            return header + sb;
+        } catch (ClusterException ce) {
+            throw ce;
+        } catch (Exception e) {
+            throw new ClusterException("Could not apply manifests: " + rootMessage(e), e);
+        }
+    }
+
+    /**
+     * Create-or-update a single resource via server-side apply. Strips server-managed metadata
+     * (managedFields, resourceVersion, uid, creationTimestamp) so a manifest copied from the YAML
+     * view applies cleanly. Uses the resource's own namespace, falling back to {@code defaultNamespace}.
+     */
+    private HasMetadata serverSideApply(KubernetesClient client, HasMetadata item, String defaultNamespace) {
+        if (item.getMetadata() != null) {
+            item.getMetadata().setManagedFields(null);
+            item.getMetadata().setResourceVersion(null);
+            item.getMetadata().setUid(null);
+            item.getMetadata().setCreationTimestamp(null);
+        }
+        String ns = item.getMetadata() != null && item.getMetadata().getNamespace() != null
+                ? item.getMetadata().getNamespace() : defaultNamespace;
+
+        PatchContext ctx = new PatchContext.Builder()
+                .withPatchType(PatchType.SERVER_SIDE_APPLY)
+                .withFieldManager("kubedesk")
+                .withForce(true)
+                .build();
+
+        // fabric8 ignores the namespace for cluster-scoped kinds, so this is safe for both.
+        return ns != null
+                ? client.resource(item).inNamespace(ns).patch(ctx)
+                : client.resource(item).patch(ctx);
     }
 
     @Override
