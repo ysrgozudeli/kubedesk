@@ -6,6 +6,8 @@ package com.kubedesk.service;
  */
 public interface PortForward extends AutoCloseable {
 
+    String context();
+
     String namespace();
 
     String pod();

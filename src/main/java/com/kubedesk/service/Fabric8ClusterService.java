@@ -241,6 +241,7 @@ public class Fabric8ClusterService implements ClusterService {
                         + " may be in use).", null);
             }
             return new PortForward() {
+                @Override public String context() { return context; }
                 @Override public String namespace() { return namespace; }
                 @Override public String pod() { return pod; }
                 @Override public int remotePort() { return remotePort; }

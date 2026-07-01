@@ -4,6 +4,8 @@ import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.prefs.Settings;
+import com.kubedesk.prefs.SettingsStore;
 import com.kubedesk.util.YamlLint;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
@@ -62,6 +64,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -79,6 +82,11 @@ import java.util.function.Supplier;
 public class MainView extends BorderPane {
 
     private final ClusterService service = new Fabric8ClusterService();
+
+    // Persisted preferences
+    private final SettingsStore settingsStore = new SettingsStore();
+    private final Settings settings = settingsStore.load();
+    private boolean forwardsRestored = false;
 
     // Top bar controls
     private final Label kubeConfigLabel = new Label("(default ~/.kube/config)");
@@ -147,6 +155,7 @@ public class MainView extends BorderPane {
 
     public MainView() {
         getStyleClass().add("root-pane");
+        restoreHiddenColumns();
         buildDetails(); // builds detailsPane (added to the split only when shown)
         centerSplit.getItems().setAll(buildContent());
         setTop(buildTopBar());
@@ -159,7 +168,83 @@ public class MainView extends BorderPane {
     public void init() {
         // When a burst of watch events settles, re-list the current view once.
         autoRefreshPause.setOnFinished(e -> refreshContent());
+        applySavedKubeConfig();
         loadContexts();
+    }
+
+    // --- preferences ------------------------------------------------------------------------
+
+    private void restoreHiddenColumns() {
+        settings.hiddenColumns.forEach((kindName, cols) -> {
+            try {
+                hiddenColumns.put(ResourceKind.valueOf(kindName), new HashSet<>(cols));
+            } catch (IllegalArgumentException ignore) {
+                // unknown kind name in old prefs — skip
+            }
+        });
+    }
+
+    private void applySavedKubeConfig() {
+        if (settings.kubeConfigPath != null && !settings.kubeConfigPath.isBlank()) {
+            File f = new File(settings.kubeConfigPath);
+            if (f.exists()) {
+                ((Fabric8ClusterService) service).setKubeConfigFile(f);
+                kubeConfigLabel.setText(f.getName());
+            }
+        }
+    }
+
+    /** Persist settings off the FX thread (best-effort). */
+    private void saveSettings() {
+        pool.submit(() -> settingsStore.save(settings));
+    }
+
+    private void persistHiddenColumns() {
+        Map<String, List<String>> map = new HashMap<>();
+        hiddenColumns.forEach((k, set) -> {
+            if (!set.isEmpty()) {
+                map.put(k.name(), new ArrayList<>(set));
+            }
+        });
+        settings.hiddenColumns = map;
+        saveSettings();
+    }
+
+    private void persistPortForwards() {
+        List<Settings.PortForwardPref> prefs = new ArrayList<>();
+        for (PortForward pf : portForwards) {
+            prefs.add(new Settings.PortForwardPref(pf.context(), pf.namespace(), pf.pod(),
+                    pf.remotePort(), pf.localPort()));
+        }
+        settings.portForwards = prefs;
+        saveSettings();
+    }
+
+    /** Offer to re-open the port-forwards that were active at last exit (once, on startup). */
+    private void restoreForwardsOnce() {
+        if (forwardsRestored) {
+            return;
+        }
+        forwardsRestored = true;
+        List<Settings.PortForwardPref> saved = new ArrayList<>(settings.portForwards);
+        if (saved.isEmpty()) {
+            return;
+        }
+        boolean yes = confirm("Restore port-forwards?",
+                "Re-open " + saved.size() + " port-forward(s) from your last session?");
+        if (!yes) {
+            settings.portForwards = new ArrayList<>();
+            saveSettings();
+            return;
+        }
+        for (Settings.PortForwardPref p : saved) {
+            runAsync(() -> service.startPortForward(p.context(), p.namespace(), p.pod(),
+                    p.remotePort(), p.localPort()), pf -> {
+                portForwards.add(pf);
+                updatePfButton();
+                persistPortForwards();
+            });
+        }
     }
 
     // --- top bar ----------------------------------------------------------------------------
@@ -239,6 +324,8 @@ public class MainView extends BorderPane {
         if (chosen != null) {
             ((Fabric8ClusterService) service).setKubeConfigFile(chosen);
             kubeConfigLabel.setText(chosen.getName());
+            settings.kubeConfigPath = chosen.getAbsolutePath();
+            saveSettings();
             status("Loaded kube.conf: " + chosen.getAbsolutePath());
             loadContexts();
         }
@@ -1091,6 +1178,7 @@ public class MainView extends BorderPane {
         runAsync(() -> service.startPortForward(ctx.name(), ns, pod, remote, local), pf -> {
             portForwards.add(pf);
             updatePfButton();
+            persistPortForwards();
             showReport("Port-forward started",
                     "Forwarding " + ns + "/" + pod + " :" + pf.remotePort()
                             + "  →  localhost:" + pf.localPort()
@@ -1173,6 +1261,7 @@ public class MainView extends BorderPane {
         }
         portForwards.remove(pf);
         updatePfButton();
+        persistPortForwards();
     }
 
     private void openInBrowser(String url) {
@@ -1252,8 +1341,17 @@ public class MainView extends BorderPane {
     private void loadContexts() {
         status("Reading kube.conf…");
         runAsync(service::listContexts, contexts -> {
-            ContextInfo current = contexts.stream().filter(ContextInfo::current).findFirst()
-                    .orElse(contexts.isEmpty() ? null : contexts.get(0));
+            // Prefer the last-used context, else the kube.conf's current-context.
+            ContextInfo preferred = null;
+            if (settings.lastContext != null) {
+                preferred = contexts.stream().filter(c -> c.name().equals(settings.lastContext))
+                        .findFirst().orElse(null);
+            }
+            if (preferred == null) {
+                preferred = contexts.stream().filter(ContextInfo::current).findFirst()
+                        .orElse(contexts.isEmpty() ? null : contexts.get(0));
+            }
+            final ContextInfo current = preferred;
             // Set the value with the handler detached so we drive the load exactly once below.
             contextBox.setOnAction(null);
             contextBox.setItems(FXCollections.observableArrayList(contexts));
@@ -1264,6 +1362,7 @@ public class MainView extends BorderPane {
             } else {
                 status("No contexts found in kube.conf.");
             }
+            restoreForwardsOnce();
         });
     }
 
@@ -1271,7 +1370,10 @@ public class MainView extends BorderPane {
         status("Loading namespaces for " + context.name() + "…");
         runAsync(() -> service.listNamespaces(context.name()), namespaces -> {
             String chosen;
-            if (namespaces.contains(context.namespace())) {
+            if (context.name().equals(settings.lastContext) && settings.lastNamespace != null
+                    && namespaces.contains(settings.lastNamespace)) {
+                chosen = settings.lastNamespace;
+            } else if (namespaces.contains(context.namespace())) {
                 chosen = context.namespace();
             } else if (namespaces.contains("default")) {
                 chosen = "default";
@@ -1315,6 +1417,10 @@ public class MainView extends BorderPane {
 
     /** Called when the user changes context/namespace/kind: reload data and (re)start the watch. */
     private void onSelectionChanged() {
+        ContextInfo c = contextBox.getValue();
+        settings.lastContext = c != null ? c.name() : null;
+        settings.lastNamespace = namespaceBox.getValue();
+        saveSettings();
         refreshContent();
         if (paused) {
             updateLiveUi();
@@ -1456,6 +1562,7 @@ public class MainView extends BorderPane {
                 } else {
                     hidden.add(name);
                 }
+                persistHiddenColumns();
             });
             table.getColumns().add(col);
         }

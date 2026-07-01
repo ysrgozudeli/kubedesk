@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - **YAML linting on the Create / Apply screen**: a live client-side syntax check (with line/column)
   updates as you type, plus a **Validate (dry-run)** button that runs a server-side dry-run apply to
   check documents against the cluster's real schema and admission — over the API, no kubectl.
+- **Preferences persisted across restarts** (`~/.kubedesk/prefs.json`): remembers your custom
+  kube.conf path, last context and namespace, and hidden table columns.
+- **Persisted port-forwards**: active tunnels are saved on exit, and KubeDesk offers to re-open them
+  on the next launch.
 
 ## [1.0.1] - 2026-07-01
 
