@@ -27,6 +27,7 @@ import io.fabric8.kubernetes.api.model.networking.v1.IngressRule;
 import io.fabric8.kubernetes.client.Config;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
+import io.fabric8.kubernetes.client.LocalPortForward;
 import io.fabric8.kubernetes.client.dsl.ExecListener;
 import io.fabric8.kubernetes.client.dsl.ExecWatch;
 import io.fabric8.kubernetes.client.dsl.base.PatchContext;
@@ -198,6 +199,70 @@ public class Fabric8ClusterService implements ClusterService {
             return io.fabric8.kubernetes.client.utils.Serialization.asYaml(obj);
         } catch (Exception e) {
             throw new ClusterException("Could not load YAML for " + name + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public List<Integer> listPodPorts(String context, String namespace, String pod) {
+        try (KubernetesClient client = clientFor(context)) {
+            Pod p = client.pods().inNamespace(namespace).withName(pod).get();
+            if (p == null || p.getSpec() == null || p.getSpec().getContainers() == null) {
+                return List.of();
+            }
+            return p.getSpec().getContainers().stream()
+                    .filter(c -> c.getPorts() != null)
+                    .flatMap(c -> c.getPorts().stream())
+                    .map(port -> port.getContainerPort())
+                    .filter(port -> port != null)
+                    .distinct()
+                    .sorted()
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            throw new ClusterException("Could not read ports for " + pod + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public PortForward startPortForward(String context, String namespace, String pod,
+                                        int remotePort, int localPort) {
+        // Long-lived client keeps the tunnel open; both close together via the handle.
+        KubernetesClient client = clientFor(context);
+        try {
+            LocalPortForward lpf = localPort > 0
+                    ? client.pods().inNamespace(namespace).withName(pod).portForward(remotePort, localPort)
+                    : client.pods().inNamespace(namespace).withName(pod).portForward(remotePort);
+            if (!lpf.isAlive()) {
+                try {
+                    lpf.close();
+                } catch (Exception ignore) {
+                    // ignore
+                }
+                throw new ClusterException("Tunnel did not start (port " + localPort
+                        + " may be in use).", null);
+            }
+            return new PortForward() {
+                @Override public String namespace() { return namespace; }
+                @Override public String pod() { return pod; }
+                @Override public int remotePort() { return remotePort; }
+                @Override public int localPort() { return lpf.getLocalPort(); }
+                @Override public boolean isAlive() { return lpf.isAlive(); }
+                @Override public void close() {
+                    try {
+                        lpf.close();
+                    } catch (Exception ignore) {
+                        // best-effort
+                    } finally {
+                        client.close();
+                    }
+                }
+            };
+        } catch (ClusterException ce) {
+            client.close();
+            throw ce;
+        } catch (Exception e) {
+            client.close();
+            throw new ClusterException("Could not start port-forward for " + pod + ": "
+                    + rootMessage(e), e);
         }
     }
 

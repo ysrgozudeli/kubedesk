@@ -2,6 +2,7 @@ package com.kubedesk.ui;
 
 import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
+import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
@@ -43,6 +44,7 @@ import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -51,10 +53,13 @@ import javafx.scene.layout.VBox;
 import javafx.scene.shape.Circle;
 import javafx.stage.FileChooser;
 
+import java.awt.Desktop;
 import java.io.File;
+import java.net.URI;
 import java.nio.file.Files;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.List;
@@ -123,6 +128,10 @@ public class MainView extends BorderPane {
     /** Per-kind set of column names the user has hidden via the table's column menu. */
     private final Map<ResourceKind, Set<String>> hiddenColumns = new EnumMap<>(ResourceKind.class);
 
+    // Port-forwards (global, long-lived)
+    private final List<PortForward> portForwards = new ArrayList<>();
+    private final Button pfButton = new Button("Port-forwards");
+
     // Live updates
     private final Label liveLabel = new Label("● Live");
     private final Button pauseButton = new Button("⏸");
@@ -186,6 +195,11 @@ public class MainView extends BorderPane {
         refresh.getStyleClass().add("icon-button");
         refresh.setOnAction(e -> refreshContent());
 
+        pfButton.getStyleClass().add("icon-button");
+        pfButton.setOnAction(e -> openForwardsManager());
+        pfButton.setVisible(false);
+        pfButton.setManaged(false);
+
         liveLabel.getStyleClass().add("live-indicator");
         pauseButton.getStyleClass().add("live-toggle");
         pauseButton.setOnAction(e -> togglePause());
@@ -206,7 +220,7 @@ public class MainView extends BorderPane {
                 liveBox,
                 new Label("Context:"), contextBox,
                 new Label("Namespace:"), namespaceBox,
-                searchField, refresh);
+                searchField, refresh, pfButton);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(10, 16, 10, 16));
         bar.getStyleClass().add("top-bar");
@@ -326,6 +340,9 @@ public class MainView extends BorderPane {
         MenuItem logs = new MenuItem("View logs");
         logs.setOnAction(e -> showDetails(row.getItem(), logsTab));
 
+        MenuItem portForward = new MenuItem("Port forward…");
+        portForward.setOnAction(e -> openPortForwardDialog(row.getItem()));
+
         MenuItem copyName = new MenuItem("Copy name");
         copyName.setOnAction(e -> copyToClipboard(resourceName(row.getItem())));
 
@@ -343,12 +360,14 @@ public class MainView extends BorderPane {
         delete.getStyleClass().add("danger-item");
         delete.setOnAction(e -> deleteAction(row.getItem()));
 
-        ContextMenu menu = new ContextMenu(details, yaml, events, logs,
+        ContextMenu menu = new ContextMenu(details, yaml, events, logs, portForward,
                 new SeparatorMenuItem(), copyName, copyYaml,
                 new SeparatorMenuItem(), restart, scale, delete);
         menu.setOnShowing(e -> {
             // Tailor the menu to the resource kind: hide (not just disable) what doesn't apply.
-            logs.setVisible(currentKind == ResourceKind.PODS);
+            boolean isPod = currentKind == ResourceKind.PODS;
+            logs.setVisible(isPod);
+            portForward.setVisible(isPod);
             events.setVisible(kindHasEvents(currentKind));
             boolean isDeployment = currentKind == ResourceKind.DEPLOYMENTS;
             restart.setVisible(isDeployment);
@@ -949,6 +968,197 @@ public class MainView extends BorderPane {
         alert.showAndWait();
     }
 
+    // --- port forwarding --------------------------------------------------------------------
+
+    private void openPortForwardDialog(List<String> row) {
+        if (row == null) {
+            return;
+        }
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String pod = resourceName(row);
+        String ns = namespaceBox.getValue();
+        status("Reading ports for " + pod + "…");
+        runAsync(() -> service.listPodPorts(ctx.name(), ns, pod),
+                ports -> showForwardConfig(ctx, ns, pod, ports));
+    }
+
+    private void showForwardConfig(ContextInfo ctx, String ns, String pod, List<Integer> ports) {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Port forward");
+        if (getScene() != null) {
+            dialog.initOwner(getScene().getWindow());
+        }
+        ButtonType startType = new ButtonType("Start", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(startType, ButtonType.CANCEL);
+
+        ComboBox<String> remoteBox = new ComboBox<>();
+        remoteBox.setEditable(true);
+        remoteBox.setPromptText("pod port");
+        for (Integer p : ports) {
+            remoteBox.getItems().add(String.valueOf(p));
+        }
+        TextField localField = new TextField();
+        localField.setPromptText("local port");
+        if (!ports.isEmpty()) {
+            remoteBox.setValue(String.valueOf(ports.get(0)));
+            localField.setText(String.valueOf(ports.get(0)));
+        }
+
+        Label hint = new Label(ports.isEmpty()
+                ? "This pod declares no container ports — type the port you want to reach."
+                : "Pick or type the pod port, and the local port to bind.");
+        hint.getStyleClass().add("muted");
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(6, 4, 4, 4));
+        grid.add(new Label("Pod:"), 0, 0);
+        grid.add(new Label(ns + "/" + pod), 1, 0);
+        grid.add(new Label("Pod port:"), 0, 1);
+        grid.add(remoteBox, 1, 1);
+        grid.add(new Label("Local port:"), 0, 2);
+        grid.add(localField, 1, 2);
+        dialog.getDialogPane().setContent(new VBox(8, grid, hint));
+
+        Optional<ButtonType> res = dialog.showAndWait();
+        if (res.isEmpty() || res.get() != startType) {
+            return;
+        }
+        Integer remote = parsePort(remoteBox.getValue());
+        if (remote == null) {
+            status("Port-forward cancelled — invalid pod port.");
+            return;
+        }
+        int local = 0;
+        if (!localField.getText().isBlank()) {
+            Integer lp = parsePort(localField.getText());
+            if (lp == null) {
+                status("Port-forward cancelled — invalid local port.");
+                return;
+            }
+            local = lp;
+        }
+        startForward(ctx, ns, pod, remote, local);
+    }
+
+    private Integer parsePort(String s) {
+        if (s == null) {
+            return null;
+        }
+        try {
+            int p = Integer.parseInt(s.trim());
+            return (p > 0 && p <= 65535) ? p : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private void startForward(ContextInfo ctx, String ns, String pod, int remote, int local) {
+        status("Starting port-forward " + pod + " :" + remote + " …");
+        runAsync(() -> service.startPortForward(ctx.name(), ns, pod, remote, local), pf -> {
+            portForwards.add(pf);
+            updatePfButton();
+            showReport("Port-forward started",
+                    "Forwarding " + ns + "/" + pod + " :" + pf.remotePort()
+                            + "  →  localhost:" + pf.localPort()
+                            + "\n\nManage active forwards from the “Port-forwards” button "
+                            + "in the toolbar.");
+        });
+    }
+
+    private void updatePfButton() {
+        int n = portForwards.size();
+        pfButton.setText("Port-forwards (" + n + ")");
+        pfButton.setVisible(n > 0);
+        pfButton.setManaged(n > 0);
+    }
+
+    private void openForwardsManager() {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Active port-forwards");
+        if (getScene() != null) {
+            dialog.initOwner(getScene().getWindow());
+        }
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        VBox list = new VBox(8);
+        list.setPadding(new Insets(6));
+        list.setMinWidth(480);
+        rebuildForwardsList(list);
+        dialog.getDialogPane().setContent(list);
+        dialog.showAndWait();
+    }
+
+    private void rebuildForwardsList(VBox list) {
+        list.getChildren().clear();
+        if (portForwards.isEmpty()) {
+            list.getChildren().add(new Label("No active port-forwards."));
+            return;
+        }
+        for (PortForward pf : new ArrayList<>(portForwards)) {
+            Circle dot = new Circle(5);
+            dot.setStyle("-fx-fill: " + (pf.isAlive() ? "#16a34a" : "#dc2626") + ";");
+
+            String address = pf.namespace() + "/" + pf.pod() + "  :" + pf.remotePort()
+                    + "  →  localhost:" + pf.localPort();
+            Label label = new Label(address);
+            label.setTooltip(new Tooltip(address));
+            // The long address is the flexible part — let it ellipsize, not the buttons.
+            label.setMaxWidth(Double.MAX_VALUE);
+            HBox.setHgrow(label, Priority.ALWAYS);
+
+            Button copy = new Button("Copy");
+            copy.setTooltip(new Tooltip("Copy localhost:" + pf.localPort() + " to the clipboard"));
+            copy.setOnAction(e -> copyToClipboard("localhost:" + pf.localPort()));
+
+            Button open = new Button("Open");
+            open.setTooltip(new Tooltip("Open http://localhost:" + pf.localPort() + " in your browser"));
+            open.setOnAction(e -> openInBrowser("http://localhost:" + pf.localPort()));
+
+            Button stop = new Button("Stop");
+            stop.setTooltip(new Tooltip("Stop this port-forward"));
+            stop.setOnAction(e -> {
+                closeForward(pf);
+                rebuildForwardsList(list);
+            });
+
+            // Keep buttons at their natural size so their labels never collapse to "…".
+            for (Button b : new Button[]{copy, open, stop}) {
+                b.setMinWidth(Region.USE_PREF_SIZE);
+            }
+
+            HBox rowBox = new HBox(8, dot, label, copy, open, stop);
+            rowBox.setAlignment(Pos.CENTER_LEFT);
+            list.getChildren().add(rowBox);
+        }
+    }
+
+    private void closeForward(PortForward pf) {
+        try {
+            pf.close();
+        } catch (Exception ignore) {
+            // best-effort
+        }
+        portForwards.remove(pf);
+        updatePfButton();
+    }
+
+    private void openInBrowser(String url) {
+        try {
+            if (Desktop.isDesktopSupported()
+                    && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+                Desktop.getDesktop().browse(new URI(url));
+            } else {
+                status("Can't open a browser here. URL: " + url);
+            }
+        } catch (Exception e) {
+            status("Could not open browser: " + e.getMessage());
+        }
+    }
+
     /** Confirm dialog returning true if the user accepted. */
     private boolean confirm(String header, String body) {
         Alert alert = new Alert(Alert.AlertType.CONFIRMATION, body, ButtonType.CANCEL, ButtonType.OK);
@@ -1172,6 +1382,14 @@ public class MainView extends BorderPane {
     /** Release the watch and worker threads on shutdown so the JVM can exit cleanly. */
     public void shutdown() {
         closeExec();
+        for (PortForward pf : new ArrayList<>(portForwards)) {
+            try {
+                pf.close();
+            } catch (Exception ignore) {
+                // best-effort
+            }
+        }
+        portForwards.clear();
         stopWatch();
         pool.shutdownNow();
     }

@@ -99,4 +99,15 @@ public interface ClusterService {
      */
     ExecSession exec(String context, String namespace, String pod, String container,
                      Consumer<String> onOutput, Runnable onClosed);
+
+    /** The container ports declared by a pod (to pre-fill the port-forward dialog). */
+    List<Integer> listPodPorts(String context, String namespace, String pod);
+
+    /**
+     * Start a port-forward from a local port to a pod port, over the API (no kubectl).
+     *
+     * @param localPort the local port to bind, or {@code <= 0} to auto-pick a free one
+     */
+    PortForward startPortForward(String context, String namespace, String pod,
+                                 int remotePort, int localPort);
 }
