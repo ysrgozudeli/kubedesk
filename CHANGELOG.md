@@ -3,6 +3,13 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **YAML linting on the Create / Apply screen**: a live client-side syntax check (with line/column)
+  updates as you type, plus a **Validate (dry-run)** button that runs a server-side dry-run apply to
+  check documents against the cluster's real schema and admission — over the API, no kubectl.
+
 ## [1.0.1] - 2026-07-01
 
 ### Added

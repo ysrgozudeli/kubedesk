@@ -91,6 +91,14 @@ public interface ClusterService {
     String applyManifests(String context, String defaultNamespace, String yaml);
 
     /**
+     * Validate manifests without changing anything, via a server-side dry-run apply. This checks the
+     * documents against the cluster's real schema and admission — over the API, no kubectl.
+     *
+     * @return a human-readable per-resource summary of what is valid / what failed
+     */
+    String validateManifests(String context, String defaultNamespace, String yaml);
+
+    /**
      * Open an interactive shell ({@code /bin/sh}) into a pod container.
      *
      * @param onOutput receives stdout/stderr text chunks (on a background thread)

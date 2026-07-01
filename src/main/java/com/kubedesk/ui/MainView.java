@@ -4,6 +4,7 @@ import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.util.YamlLint;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.Fabric8ClusterService;
@@ -915,16 +916,44 @@ public class MainView extends BorderPane {
             }
         });
 
+        ContextInfo ctx = contextBox.getValue();
+        Button validateBtn = new Button("Validate (dry-run)");
+        validateBtn.setTooltip(new Tooltip("Server-side dry-run: check against the cluster's "
+                + "schema and admission without applying"));
+        validateBtn.setOnAction(e -> {
+            String text = editor.getText();
+            if (text == null || text.isBlank()) {
+                status("Nothing to validate.");
+                return;
+            }
+            status("Validating (server dry-run)…");
+            runAsync(() -> service.validateManifests(ctx.name(), namespaceBox.getValue(), text),
+                    summary -> showReport("Validation (dry-run)", summary));
+        });
+
         String ns = namespaceBox.getValue();
         Label hint = new Label("Server-side apply · resources without a namespace go to: "
                 + (ns != null ? ns : "(context default)"));
         hint.getStyleClass().add("muted");
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox top = new HBox(8, openFile, spacer, hint);
+        HBox top = new HBox(8, openFile, validateBtn, spacer, hint);
         top.setAlignment(Pos.CENTER_LEFT);
 
-        VBox content = new VBox(8, top, editor);
+        // Live YAML syntax lint under the editor (client-side, debounced as you type).
+        Label lintLabel = new Label();
+        Runnable doLint = () -> {
+            YamlLint.LintResult r = YamlLint.check(editor.getText());
+            lintLabel.setText((r.ok() ? "✓ " : "✗ ") + r.message());
+            lintLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: "
+                    + (r.ok() ? "#15803d" : "#b91c1c") + ";");
+        };
+        PauseTransition lintPause = new PauseTransition(Duration.millis(350));
+        lintPause.setOnFinished(e -> doLint.run());
+        editor.textProperty().addListener((o, a, b) -> lintPause.playFromStart());
+        doLint.run();
+
+        VBox content = new VBox(8, top, editor, lintLabel);
         content.setPrefSize(780, 560);
         dialog.getDialogPane().setContent(content);
 

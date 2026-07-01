@@ -465,7 +465,7 @@ public class Fabric8ClusterService implements ClusterService {
     public void applyYaml(String context, String namespace, String yaml) {
         try (KubernetesClient client = clientFor(context)) {
             HasMetadata obj = (HasMetadata) io.fabric8.kubernetes.client.utils.Serialization.unmarshal(yaml);
-            serverSideApply(client, obj, namespace);
+            serverSideApply(client, obj, namespace, false);
         } catch (Exception e) {
             throw new ClusterException("Could not apply changes: " + rootMessage(e), e);
         }
@@ -473,12 +473,22 @@ public class Fabric8ClusterService implements ClusterService {
 
     @Override
     public String applyManifests(String context, String defaultNamespace, String yaml) {
+        return applyOrValidate(context, defaultNamespace, yaml, false);
+    }
+
+    @Override
+    public String validateManifests(String context, String defaultNamespace, String yaml) {
+        return applyOrValidate(context, defaultNamespace, yaml, true);
+    }
+
+    private String applyOrValidate(String context, String defaultNamespace, String yaml, boolean dryRun) {
         try (KubernetesClient client = clientFor(context)) {
             List<HasMetadata> items = client.load(
                     new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8))).items();
             if (items.isEmpty()) {
                 throw new ClusterException("No Kubernetes resources found in the YAML.", null);
             }
+            String verb = dryRun ? "is valid" : "applied";
             StringBuilder sb = new StringBuilder();
             int ok = 0;
             int failed = 0;
@@ -486,11 +496,11 @@ public class Fabric8ClusterService implements ClusterService {
                 String kind = item.getKind() != null ? item.getKind() : "Resource";
                 String name = item.getMetadata() != null ? item.getMetadata().getName() : "?";
                 try {
-                    HasMetadata result = serverSideApply(client, item, defaultNamespace);
+                    HasMetadata result = serverSideApply(client, item, defaultNamespace, dryRun);
                     String ns = result.getMetadata() != null ? result.getMetadata().getNamespace() : null;
                     sb.append("✓ ").append(kind).append('/').append(name)
                             .append(ns != null ? " (namespace " + ns + ")" : "")
-                            .append(" applied\n");
+                            .append(' ').append(verb).append('\n');
                     ok++;
                 } catch (Exception e) {
                     sb.append("✗ ").append(kind).append('/').append(name)
@@ -498,22 +508,25 @@ public class Fabric8ClusterService implements ClusterService {
                     failed++;
                 }
             }
-            String header = "Applied " + ok + " of " + items.size() + " resource(s)"
+            String action = dryRun ? "Validated " : "Applied ";
+            String header = action + ok + " of " + items.size() + " resource(s)"
                     + (failed > 0 ? ", " + failed + " failed" : "") + ".\n\n";
             return header + sb;
         } catch (ClusterException ce) {
             throw ce;
         } catch (Exception e) {
-            throw new ClusterException("Could not apply manifests: " + rootMessage(e), e);
+            throw new ClusterException("Could not process manifests: " + rootMessage(e), e);
         }
     }
 
     /**
-     * Create-or-update a single resource via server-side apply. Strips server-managed metadata
-     * (managedFields, resourceVersion, uid, creationTimestamp) so a manifest copied from the YAML
-     * view applies cleanly. Uses the resource's own namespace, falling back to {@code defaultNamespace}.
+     * Create-or-update a single resource via server-side apply (or dry-run validate). Strips
+     * server-managed metadata (managedFields, resourceVersion, uid, creationTimestamp) so a manifest
+     * copied from the YAML view applies cleanly. Uses the resource's own namespace, falling back to
+     * {@code defaultNamespace}.
      */
-    private HasMetadata serverSideApply(KubernetesClient client, HasMetadata item, String defaultNamespace) {
+    private HasMetadata serverSideApply(KubernetesClient client, HasMetadata item,
+                                        String defaultNamespace, boolean dryRun) {
         if (item.getMetadata() != null) {
             item.getMetadata().setManagedFields(null);
             item.getMetadata().setResourceVersion(null);
@@ -530,9 +543,13 @@ public class Fabric8ClusterService implements ClusterService {
                 .build();
 
         // fabric8 ignores the namespace for cluster-scoped kinds, so this is safe for both.
-        return ns != null
-                ? client.resource(item).inNamespace(ns).patch(ctx)
-                : client.resource(item).patch(ctx);
+        if (ns != null) {
+            var r = client.resource(item).inNamespace(ns);
+            return dryRun ? r.dryRun(true).patch(ctx) : r.patch(ctx);
+        } else {
+            var r = client.resource(item);
+            return dryRun ? r.dryRun(true).patch(ctx) : r.patch(ctx);
+        }
     }
 
     @Override
