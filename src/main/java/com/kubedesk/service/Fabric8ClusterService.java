@@ -44,8 +44,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Duration;
 import java.time.Instant;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -630,7 +633,9 @@ public class Fabric8ClusterService implements ClusterService {
     // --- per-kind table builders ------------------------------------------------------------
 
     private ResourceData pods(KubernetesClient client, String namespace) {
-        List<String> columns = List.of("Name", "Ready", "Status", "Restarts", "Image", "Node", "Age");
+        List<String> columns = List.of("Name", "Ready", "Status", "Restarts", "CPU", "Memory",
+                "Image", "Node", "Age");
+        Map<String, String[]> usage = podUsage(client, namespace);
         List<List<String>> rows = new ArrayList<>();
         for (Pod p : client.pods().inNamespace(namespace).list().getItems()) {
             int ready = 0, totalC = 0, restarts = 0;
@@ -648,16 +653,70 @@ public class Fabric8ClusterService implements ClusterService {
             String node = p.getSpec() != null && p.getSpec().getNodeName() != null
                     ? p.getSpec().getNodeName() : "-";
             String images = p.getSpec() != null ? imagesOf(p.getSpec().getContainers()) : "-";
+            String[] u = usage.getOrDefault(p.getMetadata().getName(), new String[]{"-", "-"});
             rows.add(List.of(
                     p.getMetadata().getName(),
                     ready + "/" + totalC,
                     podStatus(p),
                     String.valueOf(restarts),
+                    u[0],
+                    u[1],
                     images,
                     node,
                     age(p.getMetadata().getCreationTimestamp())));
         }
         return new ResourceData(columns, rows);
+    }
+
+    /**
+     * Live CPU/memory usage per pod from the Metrics API (metrics.k8s.io). Returns podName -> [cpu, mem].
+     * If metrics-server isn't installed, returns an empty map and the columns fall back to "-".
+     */
+    private Map<String, String[]> podUsage(KubernetesClient client, String namespace) {
+        Map<String, String[]> map = new HashMap<>();
+        try {
+            var list = client.top().pods().metrics(namespace);
+            if (list == null || list.getItems() == null) {
+                return map;
+            }
+            for (var pm : list.getItems()) {
+                BigDecimal cpu = BigDecimal.ZERO;
+                BigDecimal mem = BigDecimal.ZERO;
+                if (pm.getContainers() != null) {
+                    for (var c : pm.getContainers()) {
+                        if (c.getUsage() != null) {
+                            Quantity cq = c.getUsage().get("cpu");
+                            Quantity mq = c.getUsage().get("memory");
+                            if (cq != null) {
+                                cpu = cpu.add(Quantity.getAmountInBytes(cq));
+                            }
+                            if (mq != null) {
+                                mem = mem.add(Quantity.getAmountInBytes(mq));
+                            }
+                        }
+                    }
+                }
+                if (pm.getMetadata() != null && pm.getMetadata().getName() != null) {
+                    map.put(pm.getMetadata().getName(),
+                            new String[]{formatCpu(cpu), formatMem(mem)});
+                }
+            }
+        } catch (Exception e) {
+            // Metrics API unavailable (metrics-server not installed) — leave usage blank.
+        }
+        return map;
+    }
+
+    /** CPU cores -> millicores string, e.g. 0.012 -> "12m". */
+    private String formatCpu(BigDecimal cores) {
+        return cores.multiply(BigDecimal.valueOf(1000)).setScale(0, RoundingMode.HALF_UP)
+                .toPlainString() + "m";
+    }
+
+    /** Memory bytes -> mebibytes string, e.g. 47185920 -> "45Mi". */
+    private String formatMem(BigDecimal bytes) {
+        return bytes.divide(BigDecimal.valueOf(1024L * 1024L), 0, RoundingMode.HALF_UP)
+                .toPlainString() + "Mi";
     }
 
     /**

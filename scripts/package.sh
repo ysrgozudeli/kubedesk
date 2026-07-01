@@ -28,7 +28,7 @@ fi
 [ -n "$JPACKAGE" ] || { echo "jpackage not found (need a JDK 17+); set JAVA_HOME." >&2; exit 1; }
 
 echo "==> Building fat jar (mvn package)..."
-mvn -q package
+mvn -B package
 
 echo "==> Staging jar..."
 rm -rf staging dist
@@ -52,6 +52,22 @@ case "$(uname -s)" in
   Darwin) ICON="src/main/resources/icons/kubedesk.icns" ;;
   *)      ICON="src/main/resources/icons/kubedesk.png" ;;
 esac
+
+# On macOS, derive an .icns from the PNG (best-effort) so the app is branded.
+if [ "$(uname -s)" = "Darwin" ] && [ ! -f "$ICON" ] && [ -f src/main/resources/icons/kubedesk.png ]; then
+  ICONSET="$(mktemp -d)/kubedesk.iconset"
+  mkdir -p "$ICONSET"
+  ok=1
+  for sz in 16 32 128 256 512; do
+    sips -z "$sz" "$sz" src/main/resources/icons/kubedesk.png --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null 2>&1 || ok=0
+    d=$((sz * 2))
+    sips -z "$d" "$d" src/main/resources/icons/kubedesk.png --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null 2>&1 || ok=0
+  done
+  if [ "$ok" = "1" ] && iconutil -c icns "$ICONSET" -o src/main/resources/icons/kubedesk.icns >/dev/null 2>&1; then
+    ICON="src/main/resources/icons/kubedesk.icns"
+  fi
+fi
+
 [ -f "$ICON" ] && ARGS+=(--icon "$ICON")
 
 # Linux installers get a desktop entry.

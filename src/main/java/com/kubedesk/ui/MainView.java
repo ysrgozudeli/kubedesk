@@ -1230,8 +1230,8 @@ public class MainView extends BorderPane {
             case "Roles", "Version", "Cluster-IP", "StorageClass", "Last Schedule", "Access Modes" -> 140;
             case "Status", "Type", "Class" -> 120;
             case "Up-to-date", "Completions" -> 100;
-            case "Available", "Restarts", "Ready", "Desired", "Active", "Capacity" -> 90;
-            case "Suspend", "Data" -> 80;
+            case "Available", "Restarts", "Ready", "Desired", "Active", "Capacity", "Memory" -> 90;
+            case "Suspend", "Data", "CPU" -> 80;
             case "Age" -> 70;
             default -> 130;
         };
@@ -1256,7 +1256,7 @@ public class MainView extends BorderPane {
         return switch (name) {
             case "Name" -> 260;
             case "Status", "Type" -> 140;
-            case "Ready", "Up-to-date", "Available", "Restarts" -> 110;
+            case "Ready", "Up-to-date", "Available", "Restarts", "CPU", "Memory" -> 110;
             case "Age" -> 90;
             default -> Double.MAX_VALUE;
         };
@@ -1266,7 +1266,8 @@ public class MainView extends BorderPane {
     private boolean isCenteredColumn(String name) {
         return switch (name) {
             case "Ready", "Up-to-date", "Available", "Restarts", "Age", "Type", "Version",
-                 "Desired", "Completions", "Active", "Suspend", "Data", "Capacity", "Last Schedule" -> true;
+                 "Desired", "Completions", "Active", "Suspend", "Data", "Capacity", "Last Schedule",
+                 "CPU", "Memory" -> true;
             default -> false;
         };
     }
