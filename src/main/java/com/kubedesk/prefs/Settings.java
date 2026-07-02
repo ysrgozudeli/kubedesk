@@ -21,6 +21,9 @@ public class Settings {
     /** Hidden table columns, keyed by ResourceKind name -> list of hidden column headers. */
     public Map<String, List<String>> hiddenColumns = new HashMap<>();
 
+    /** Whether first-run column defaults (e.g. hide verbose pod columns) have been seeded. */
+    public boolean columnDefaultsApplied = false;
+
     /** Port-forwards active at last exit, offered for restore on launch. */
     public List<PortForwardPref> portForwards = new ArrayList<>();
 

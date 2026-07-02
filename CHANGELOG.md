@@ -13,6 +13,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   kube.conf path, last context and namespace, and hidden table columns.
 - **Persisted port-forwards**: active tunnels are saved on exit, and KubeDesk offers to re-open them
   on the next launch.
+- **More pod columns**: **IP**, **QoS class** (eviction-risk indicator), and **Controlled By**
+  (owning controller) — hidden by default, toggleable via the column menu.
 
 ## [1.0.1] - 2026-07-01
 

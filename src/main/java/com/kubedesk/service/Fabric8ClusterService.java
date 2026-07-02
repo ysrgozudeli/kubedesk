@@ -717,7 +717,7 @@ public class Fabric8ClusterService implements ClusterService {
 
     private ResourceData pods(KubernetesClient client, String namespace) {
         List<String> columns = List.of("Name", "Ready", "Status", "Restarts", "CPU", "Memory",
-                "Image", "Node", "Age");
+                "Image", "Node", "IP", "QoS", "Controlled By", "Age");
         Map<String, String[]> usage = podUsage(client, namespace);
         List<List<String>> rows = new ArrayList<>();
         for (Pod p : client.pods().inNamespace(namespace).list().getItems()) {
@@ -737,6 +737,10 @@ public class Fabric8ClusterService implements ClusterService {
                     ? p.getSpec().getNodeName() : "-";
             String images = p.getSpec() != null ? imagesOf(p.getSpec().getContainers()) : "-";
             String[] u = usage.getOrDefault(p.getMetadata().getName(), new String[]{"-", "-"});
+            String ip = p.getStatus() != null && p.getStatus().getPodIP() != null
+                    ? p.getStatus().getPodIP() : "-";
+            String qos = p.getStatus() != null && p.getStatus().getQosClass() != null
+                    ? p.getStatus().getQosClass() : "-";
             rows.add(List.of(
                     p.getMetadata().getName(),
                     ready + "/" + totalC,
@@ -746,9 +750,25 @@ public class Fabric8ClusterService implements ClusterService {
                     u[1],
                     images,
                     node,
+                    ip,
+                    qos,
+                    controlledBy(p),
                     age(p.getMetadata().getCreationTimestamp())));
         }
         return new ResourceData(columns, rows);
+    }
+
+    /** The owning controller as "Kind/name" (e.g. ReplicaSet/foo-abc123), or "-" for a bare pod. */
+    private String controlledBy(Pod p) {
+        var refs = p.getMetadata() != null ? p.getMetadata().getOwnerReferences() : null;
+        if (refs == null || refs.isEmpty()) {
+            return "-";
+        }
+        var ctrl = refs.stream()
+                .filter(r -> Boolean.TRUE.equals(r.getController()))
+                .findFirst()
+                .orElse(refs.get(0));
+        return ctrl.getKind() + "/" + ctrl.getName();
     }
 
     /**

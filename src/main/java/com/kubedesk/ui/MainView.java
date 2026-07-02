@@ -156,6 +156,7 @@ public class MainView extends BorderPane {
     public MainView() {
         getStyleClass().add("root-pane");
         restoreHiddenColumns();
+        applyColumnDefaults();
         buildDetails(); // builds detailsPane (added to the split only when shown)
         centerSplit.getItems().setAll(buildContent());
         setTop(buildTopBar());
@@ -182,6 +183,17 @@ public class MainView extends BorderPane {
                 // unknown kind name in old prefs — skip
             }
         });
+    }
+
+    /** Seed first-run defaults once: hide the more verbose pod columns (user can re-enable them). */
+    private void applyColumnDefaults() {
+        if (settings.columnDefaultsApplied) {
+            return;
+        }
+        hiddenColumns.computeIfAbsent(ResourceKind.PODS, k -> new HashSet<>())
+                .addAll(List.of("IP", "QoS", "Controlled By"));
+        settings.columnDefaultsApplied = true;
+        persistHiddenColumns();
     }
 
     private void applySavedKubeConfig() {
@@ -1578,12 +1590,12 @@ public class MainView extends BorderPane {
         return switch (name) {
             case "Image" -> 260;
             case "Name" -> 220;
-            case "Node", "Hosts", "Volume" -> 200;
+            case "Node", "Hosts", "Volume", "Controlled By" -> 200;
             case "Ports" -> 170;
             case "Address", "Schedule" -> 150;
             case "Roles", "Version", "Cluster-IP", "StorageClass", "Last Schedule", "Access Modes" -> 140;
-            case "Status", "Type", "Class" -> 120;
-            case "Up-to-date", "Completions" -> 100;
+            case "Status", "Type", "Class", "IP" -> 120;
+            case "Up-to-date", "Completions", "QoS" -> 100;
             case "Available", "Restarts", "Ready", "Desired", "Active", "Capacity", "Memory" -> 90;
             case "Suspend", "Data", "CPU" -> 80;
             case "Age" -> 70;
@@ -1596,7 +1608,8 @@ public class MainView extends BorderPane {
         return switch (name) {
             case "Name" -> 160;
             case "Image" -> 140;
-            case "Node", "Ports", "Cluster-IP", "Roles", "Version", "Hosts", "Address" -> 100;
+            case "Node", "Ports", "Cluster-IP", "Roles", "Version", "Hosts", "Address",
+                 "Controlled By", "IP" -> 100;
             case "Age" -> 56;
             default -> 70;
         };
@@ -1610,6 +1623,8 @@ public class MainView extends BorderPane {
         return switch (name) {
             case "Name" -> 260;
             case "Status", "Type" -> 140;
+            case "IP" -> 170;
+            case "QoS" -> 130;
             case "Ready", "Up-to-date", "Available", "Restarts", "CPU", "Memory" -> 110;
             case "Age" -> 90;
             default -> Double.MAX_VALUE;
