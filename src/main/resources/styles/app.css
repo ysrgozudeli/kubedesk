@@ -232,6 +232,59 @@
     -fx-background-radius: 0;
 }
 
+/* ---- topology view ---- */
+.topology {
+    -fx-background-color: #f5f6f8;
+    -fx-background: #f5f6f8;
+    -fx-border-color: #e3e6ea;
+    -fx-border-width: 1;
+    -fx-border-radius: 10;
+    -fx-background-radius: 10;
+}
+
+.topo-node {
+    -fx-background-color: white;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-border-width: 1 1 1 4;
+    -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #9ca3af;
+    -fx-padding: 6 12 6 12;
+    -fx-cursor: hand;
+}
+
+.topo-node:hover {
+    -fx-border-color: #326ce5;
+    -fx-background-color: #f7faff;
+}
+
+.topo-ingress     { -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #8b5cf6; }
+.topo-service     { -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #326ce5; }
+.topo-deployment  { -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #16a34a; }
+.topo-statefulset { -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #0891b2; }
+.topo-daemonset   { -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #d97706; }
+
+.topo-kind {
+    -fx-font-size: 10px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #9ca3af;
+}
+
+.topo-name {
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #1f2937;
+}
+
+.topo-sub {
+    -fx-font-size: 11px;
+    -fx-text-fill: #6b7280;
+}
+
+.topo-edge {
+    -fx-stroke: #b6c0cf;
+    -fx-stroke-width: 2;
+}
+
 /* ---- status bar ---- */
 .status-bar {
     -fx-background-color: white;

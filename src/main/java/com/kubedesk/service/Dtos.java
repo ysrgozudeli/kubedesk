@@ -28,4 +28,16 @@ public final class Dtos {
     /** Pod phase counts used to draw the health ring (e.g. Running=10, Pending=1, Failed=0). */
     public record HealthSummary(Map<String, Integer> phaseCounts, int total) {
     }
+
+    /** A node in the namespace topology graph. Tier: 0=Ingress, 1=Service, 2=Workload. */
+    public record TopoNode(String id, String kind, String name, int tier, String subtitle) {
+    }
+
+    /** A directed edge (from -> to) between two topology nodes, referenced by id. */
+    public record TopoEdge(String from, String to) {
+    }
+
+    /** The full namespace topology: nodes plus the edges connecting them. */
+    public record TopologyData(List<TopoNode> nodes, List<TopoEdge> edges) {
+    }
 }

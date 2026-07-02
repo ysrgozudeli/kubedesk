@@ -3,6 +3,7 @@ package com.kubedesk.service;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
+import com.kubedesk.service.Dtos.TopologyData;
 
 import java.util.List;
 import java.util.function.Consumer;
@@ -32,6 +33,12 @@ public interface ClusterService {
 
     /** Summarise pod phases in a namespace for the dashboard health ring. */
     HealthSummary podHealth(String context, String namespace);
+
+    /**
+     * Build a service topology for a namespace: Ingress -> Service -> Workload, derived from ingress
+     * backends and label selectors.
+     */
+    TopologyData getTopology(String context, String namespace);
 
     /**
      * Fetch a single resource and render its full manifest as YAML (for the details panel).

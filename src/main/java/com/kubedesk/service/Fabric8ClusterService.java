@@ -3,6 +3,9 @@ package com.kubedesk.service;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
+import com.kubedesk.service.Dtos.TopoEdge;
+import com.kubedesk.service.Dtos.TopoNode;
+import com.kubedesk.service.Dtos.TopologyData;
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.ContainerStatus;
 import io.fabric8.kubernetes.api.model.Event;
@@ -711,6 +714,133 @@ public class Fabric8ClusterService implements ClusterService {
             case PVCS -> "PersistentVolumeClaim";
             case NODES -> "Node";
         };
+    }
+
+    @Override
+    public TopologyData getTopology(String context, String namespace) {
+        try (KubernetesClient client = clientFor(context)) {
+            List<TopoNode> nodes = new ArrayList<>();
+            List<TopoEdge> edges = new ArrayList<>();
+            java.util.Set<String> nodeIds = new java.util.HashSet<>();
+
+            // Services (tier 1) — remember each selector so we can match workloads.
+            Map<String, Map<String, String>> serviceSelectors = new LinkedHashMap<>();
+            for (Service s : client.services().inNamespace(namespace).list().getItems()) {
+                String id = "Service/" + s.getMetadata().getName();
+                String type = s.getSpec() != null && s.getSpec().getType() != null
+                        ? s.getSpec().getType() : "";
+                nodes.add(new TopoNode(id, "Service", s.getMetadata().getName(), 1, type));
+                nodeIds.add(id);
+                serviceSelectors.put(id, s.getSpec() != null && s.getSpec().getSelector() != null
+                        ? s.getSpec().getSelector() : Map.of());
+            }
+
+            // Ingresses (tier 0) — edge to each backend service that exists in this namespace.
+            for (Ingress ing : client.network().v1().ingresses().inNamespace(namespace).list().getItems()) {
+                String id = "Ingress/" + ing.getMetadata().getName();
+                nodes.add(new TopoNode(id, "Ingress", ing.getMetadata().getName(), 0, ingressHosts(ing)));
+                for (String svc : ingressBackendServices(ing)) {
+                    String sid = "Service/" + svc;
+                    if (nodeIds.contains(sid)) {
+                        edges.add(new TopoEdge(id, sid));
+                    }
+                }
+            }
+
+            // Workloads (tier 2) — Deployment / StatefulSet / DaemonSet.
+            client.apps().deployments().inNamespace(namespace).list().getItems().forEach(d ->
+                    addWorkload(nodes, edges, serviceSelectors, "Deployment", d.getMetadata().getName(),
+                            d.getSpec() != null && d.getSpec().getTemplate() != null
+                                    && d.getSpec().getTemplate().getMetadata() != null
+                                    ? d.getSpec().getTemplate().getMetadata().getLabels() : null,
+                            readyText(d.getStatus() != null ? d.getStatus().getReadyReplicas() : null,
+                                    d.getSpec() != null ? d.getSpec().getReplicas() : null)));
+
+            client.apps().statefulSets().inNamespace(namespace).list().getItems().forEach(s ->
+                    addWorkload(nodes, edges, serviceSelectors, "StatefulSet", s.getMetadata().getName(),
+                            s.getSpec() != null && s.getSpec().getTemplate() != null
+                                    && s.getSpec().getTemplate().getMetadata() != null
+                                    ? s.getSpec().getTemplate().getMetadata().getLabels() : null,
+                            readyText(s.getStatus() != null ? s.getStatus().getReadyReplicas() : null,
+                                    s.getSpec() != null ? s.getSpec().getReplicas() : null)));
+
+            client.apps().daemonSets().inNamespace(namespace).list().getItems().forEach(ds ->
+                    addWorkload(nodes, edges, serviceSelectors, "DaemonSet", ds.getMetadata().getName(),
+                            ds.getSpec() != null && ds.getSpec().getTemplate() != null
+                                    && ds.getSpec().getTemplate().getMetadata() != null
+                                    ? ds.getSpec().getTemplate().getMetadata().getLabels() : null,
+                            readyText(ds.getStatus() != null ? ds.getStatus().getNumberReady() : null,
+                                    ds.getStatus() != null ? ds.getStatus().getDesiredNumberScheduled() : null)));
+
+            return new TopologyData(nodes, edges);
+        } catch (Exception e) {
+            throw new ClusterException("Could not build topology: " + rootMessage(e), e);
+        }
+    }
+
+    private void addWorkload(List<TopoNode> nodes, List<TopoEdge> edges,
+                             Map<String, Map<String, String>> serviceSelectors,
+                             String kind, String name, Map<String, String> templateLabels, String subtitle) {
+        String id = kind + "/" + name;
+        nodes.add(new TopoNode(id, kind, name, 2, subtitle));
+        // A service targets this workload when its selector is a subset of the pod template labels.
+        serviceSelectors.forEach((sid, selector) -> {
+            if (selectorMatches(selector, templateLabels)) {
+                edges.add(new TopoEdge(sid, id));
+            }
+        });
+    }
+
+    /** True when every selector entry is present with an equal value in the labels. */
+    private boolean selectorMatches(Map<String, String> selector, Map<String, String> labels) {
+        if (selector == null || selector.isEmpty() || labels == null) {
+            return false;
+        }
+        for (Map.Entry<String, String> e : selector.entrySet()) {
+            if (!e.getValue().equals(labels.get(e.getKey()))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String readyText(Integer ready, Integer desired) {
+        return (ready != null ? ready : 0) + "/" + (desired != null ? desired : 0) + " ready";
+    }
+
+    private String ingressHosts(Ingress ing) {
+        if (ing.getSpec() == null || ing.getSpec().getRules() == null || ing.getSpec().getRules().isEmpty()) {
+            return "*";
+        }
+        String hosts = ing.getSpec().getRules().stream()
+                .map(IngressRule::getHost)
+                .filter(h -> h != null && !h.isBlank())
+                .distinct()
+                .collect(Collectors.joining(", "));
+        return hosts.isBlank() ? "*" : hosts;
+    }
+
+    private java.util.Set<String> ingressBackendServices(Ingress ing) {
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        if (ing.getSpec() == null) {
+            return out;
+        }
+        if (ing.getSpec().getDefaultBackend() != null
+                && ing.getSpec().getDefaultBackend().getService() != null) {
+            out.add(ing.getSpec().getDefaultBackend().getService().getName());
+        }
+        if (ing.getSpec().getRules() != null) {
+            ing.getSpec().getRules().forEach(rule -> {
+                if (rule.getHttp() != null && rule.getHttp().getPaths() != null) {
+                    rule.getHttp().getPaths().forEach(path -> {
+                        if (path.getBackend() != null && path.getBackend().getService() != null) {
+                            out.add(path.getBackend().getService().getName());
+                        }
+                    });
+                }
+            });
+        }
+        return out;
     }
 
     // --- per-kind table builders ------------------------------------------------------------

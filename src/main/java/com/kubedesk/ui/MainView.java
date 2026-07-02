@@ -4,6 +4,7 @@ import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.TopoNode;
 import com.kubedesk.prefs.Settings;
 import com.kubedesk.prefs.SettingsStore;
 import com.kubedesk.util.YamlLint;
@@ -100,6 +101,12 @@ public class MainView extends BorderPane {
     private final HBox healthRing = new HBox();
     private final Label contentTitle = new Label("Pods");
     private final Label statusBar = new Label("Ready.");
+
+    // Topology view
+    private final TopologyView topologyView = new TopologyView();
+    private final Map<ResourceKind, ToggleButton> navButtons = new EnumMap<>(ResourceKind.class);
+    private final ToggleButton topologyToggle = new ToggleButton("›  Topology");
+    private boolean topologyMode = false;
 
     // Details panel (right side)
     private final VBox detailsPane = new VBox();
@@ -370,14 +377,26 @@ public class MainView extends BorderPane {
             }
             btn.setOnAction(e -> {
                 if (btn.isSelected()) {
-                    currentKind = kind;
-                    contentTitle.setText(kind.label());
-                    closeDetails();
-                    onSelectionChanged();
+                    selectKind(kind);
                 }
             });
+            navButtons.put(kind, btn);
             nav.getChildren().add(btn);
         }
+
+        // A non-resource "view": the namespace topology map.
+        Label viewsSection = new Label("VIEWS");
+        viewsSection.getStyleClass().add("nav-section");
+        nav.getChildren().add(viewsSection);
+        topologyToggle.setToggleGroup(group);
+        topologyToggle.setMaxWidth(Double.MAX_VALUE);
+        topologyToggle.getStyleClass().add("nav-item");
+        topologyToggle.setOnAction(e -> {
+            if (topologyToggle.isSelected()) {
+                enterTopology();
+            }
+        });
+        nav.getChildren().add(topologyToggle);
 
         // Pin the global "+ Create" action to the bottom of the sidebar (it applies any kind).
         Region grow = new Region();
@@ -408,7 +427,11 @@ public class MainView extends BorderPane {
         table.setTableMenuButtonVisible(true);
         VBox.setVgrow(table, Priority.ALWAYS);
 
-        VBox content = new VBox(12, contentTitle, healthRing, table);
+        topologyView.setVisible(false);
+        topologyView.setManaged(false);
+        VBox.setVgrow(topologyView, Priority.ALWAYS);
+
+        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView);
         content.setPadding(new Insets(16));
         content.getStyleClass().add("content");
         content.setMinWidth(320); // keep the table usable no matter how wide the details pane gets
@@ -1433,12 +1456,87 @@ public class MainView extends BorderPane {
         settings.lastContext = c != null ? c.name() : null;
         settings.lastNamespace = namespaceBox.getValue();
         saveSettings();
+        if (topologyMode) {
+            loadTopology();
+            return;
+        }
         refreshContent();
         if (paused) {
             updateLiveUi();
         } else {
             restartWatch();
         }
+    }
+
+    // --- topology view ----------------------------------------------------------------------
+
+    /** Switch to a resource-kind table view (also used by topology node clicks). */
+    private void selectKind(ResourceKind kind) {
+        currentKind = kind;
+        contentTitle.setText(kind.label());
+        ToggleButton btn = navButtons.get(kind);
+        if (btn != null) {
+            btn.setSelected(true);
+        }
+        setTopologyMode(false);
+        closeDetails();
+        onSelectionChanged();
+    }
+
+    private void enterTopology() {
+        setTopologyMode(true);
+        topologyToggle.setSelected(true);
+        closeDetails();
+        stopWatch();
+        loadTopology();
+    }
+
+    private void setTopologyMode(boolean on) {
+        topologyMode = on;
+        table.setVisible(!on);
+        table.setManaged(!on);
+        topologyView.setVisible(on);
+        topologyView.setManaged(on);
+        if (on) {
+            healthRing.getChildren().clear();
+        }
+        healthRing.setVisible(!on);
+        healthRing.setManaged(!on);
+    }
+
+    private void loadTopology() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String ns = namespaceBox.getValue();
+        contentTitle.setText("Topology · " + safeNamespace());
+        status("Building topology…");
+        topologyView.resetZoom();
+        runAsync(() -> service.getTopology(ctx.name(), ns), data -> {
+            topologyView.render(data, this::onTopoNodeClick);
+            status(data.nodes().size() + " nodes · " + data.edges().size() + " links."
+                    + "  (Ctrl+scroll to zoom, drag to pan, click a node to open it.)");
+        });
+    }
+
+    private void onTopoNodeClick(TopoNode node) {
+        ResourceKind kind = kindOf(node.kind());
+        if (kind != null) {
+            selectKind(kind);
+            status("Switched to " + kind.label() + " — look for " + node.name() + ".");
+        }
+    }
+
+    private ResourceKind kindOf(String topoKind) {
+        return switch (topoKind) {
+            case "Ingress" -> ResourceKind.INGRESSES;
+            case "Service" -> ResourceKind.SERVICES;
+            case "Deployment" -> ResourceKind.DEPLOYMENTS;
+            case "StatefulSet" -> ResourceKind.STATEFULSETS;
+            case "DaemonSet" -> ResourceKind.DAEMONSETS;
+            default -> null;
+        };
     }
 
     /** Toggle live updates on/off without losing your place. */

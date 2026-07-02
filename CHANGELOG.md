@@ -15,6 +15,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   on the next launch.
 - **More pod columns**: **IP**, **QoS class** (eviction-risk indicator), and **Controlled By**
   (owning controller) — hidden by default, toggleable via the column menu.
+- **Namespace topology view** (sidebar → VIEWS → Topology): a native, dependency-free
+  Ingress → Service → Workload map with clickable nodes (jump to the resource), drag-to-pan, and
+  Ctrl+scroll zoom.
 
 ## [1.0.1] - 2026-07-01
 
