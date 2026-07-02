@@ -3,7 +3,7 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0] - 2026-07-02
 
 ### Added
 - **Health scan** (sidebar → VIEWS → Health): a one-screen "what's wrong right now" — scans the
