@@ -285,6 +285,16 @@
     -fx-stroke-width: 2;
 }
 
+.topo-edge-selected {
+    -fx-stroke: #326ce5;
+    -fx-stroke-width: 3.5;
+}
+
+.topo-node-selected {
+    -fx-border-color: #326ce5;
+    -fx-effect: dropshadow(gaussian, rgba(50, 108, 229, 0.35), 10, 0, 0, 0);
+}
+
 /* ---- status bar ---- */
 .status-bar {
     -fx-background-color: white;
