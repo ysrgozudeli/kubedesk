@@ -1585,7 +1585,7 @@ public class MainView extends BorderPane {
         status("Building topology…");
         topologyView.resetZoom();
         runAsync(() -> service.getTopology(ctx.name(), ns), data -> {
-            topologyView.render(data, this::onTopoNodeClick);
+            topologyView.render(data, this::onTopoNodeClick, this::buildTopoNodeMenu);
             status(data.nodes().size() + " nodes · " + data.edges().size() + " links."
                     + "  (Ctrl+scroll to zoom, drag to pan, click a node to open it.)");
         });
@@ -1609,6 +1609,56 @@ public class MainView extends BorderPane {
             case "Pod" -> ResourceKind.PODS;
             default -> null;
         };
+    }
+
+    /** Right-click menu for a topology node — reuses the same (kind, name) handlers as the table. */
+    private ContextMenu buildTopoNodeMenu(TopoNode node) {
+        ResourceKind kind = kindOf(node.kind());
+        if (kind == null) {
+            return null;
+        }
+        String name = node.name();
+        ContextMenu menu = new ContextMenu();
+
+        MenuItem details = new MenuItem("View details");
+        details.setOnAction(e -> openDetails(kind, name, null, overviewTab));
+        MenuItem yaml = new MenuItem("View YAML");
+        yaml.setOnAction(e -> openDetails(kind, name, null, yamlTab));
+        menu.getItems().addAll(details, yaml);
+        if (kindHasEvents(kind)) {
+            MenuItem events = new MenuItem("View events");
+            events.setOnAction(e -> openDetails(kind, name, null, eventsTab));
+            menu.getItems().add(events);
+        }
+        if (kind == ResourceKind.PODS) {
+            MenuItem logs = new MenuItem("View logs");
+            logs.setOnAction(e -> openDetails(kind, name, null, logsTab));
+            menu.getItems().add(logs);
+        }
+        menu.getItems().add(new SeparatorMenuItem());
+
+        if (kind == ResourceKind.DEPLOYMENTS) {
+            MenuItem restart = new MenuItem("Restart (rollout)");
+            restart.setOnAction(e -> restartAction(name));
+            MenuItem scale = new MenuItem("Scale…");
+            scale.setOnAction(e -> scaleAction(name));
+            menu.getItems().addAll(restart, scale);
+        }
+        if (kind == ResourceKind.PODS) {
+            MenuItem portForward = new MenuItem("Port forward…");
+            portForward.setOnAction(e -> openPortForwardDialog(name));
+            menu.getItems().add(portForward);
+        }
+
+        MenuItem copyName = new MenuItem("Copy name");
+        copyName.setOnAction(e -> copyToClipboard(name));
+        MenuItem copyYaml = new MenuItem("Copy YAML");
+        copyYaml.setOnAction(e -> copyYaml(kind, name));
+        MenuItem delete = new MenuItem("Delete");
+        delete.getStyleClass().add("danger-item");
+        delete.setOnAction(e -> deleteAction(kind, name));
+        menu.getItems().addAll(copyName, copyYaml, new SeparatorMenuItem(), delete);
+        return menu;
     }
 
     /** Toggle live updates on/off without losing your place. */

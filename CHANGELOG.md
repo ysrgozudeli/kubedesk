@@ -23,6 +23,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   Deployments, Port-forward for Pods, Copy name/YAML, Delete) — so you can act on a resource opened
   from the topology *or* a table double-click, not only from the table's right-click menu. Scale now
   reads the current replica count live, so it prefills correctly from anywhere.
+- **Right-click on topology nodes**: the same view/act menu (details, YAML, events, logs, restart,
+  scale, port-forward, copy, delete) is available directly on a diagram node — reusing the shared
+  handlers, so the table, details panel, and topology behave identically.
 
 ## [1.0.1] - 2026-07-01
 

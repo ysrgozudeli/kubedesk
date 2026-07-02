@@ -4,8 +4,10 @@ import com.kubedesk.service.Dtos.TopoEdge;
 import com.kubedesk.service.Dtos.TopoNode;
 import com.kubedesk.service.Dtos.TopologyData;
 import javafx.scene.Group;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.input.MouseButton;
 import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.Pane;
 import javafx.scene.layout.VBox;
@@ -18,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * A lightweight, dependency-free topology renderer. Nodes are laid out in columns by tier
@@ -65,7 +68,8 @@ public class TopologyView extends ScrollPane {
         scale.setY(1);
     }
 
-    public void render(TopologyData data, Consumer<TopoNode> onNodeClick) {
+    public void render(TopologyData data, Consumer<TopoNode> onNodeClick,
+                       Function<TopoNode, ContextMenu> menuProvider) {
         canvas.getChildren().clear();
         nodeBoxes.clear();
         edges.clear();
@@ -126,7 +130,7 @@ public class TopologyView extends ScrollPane {
 
         for (TopoNode n : data.nodes()) {
             double[] p = pos.get(n.id());
-            VBox box = buildNode(n, onNodeClick);
+            VBox box = buildNode(n, onNodeClick, menuProvider);
             box.setLayoutX(p[0]);
             box.setLayoutY(p[1]);
             nodeBoxes.put(n.id(), box);
@@ -153,7 +157,8 @@ public class TopologyView extends ScrollPane {
         nodeBoxes.values().forEach(b -> b.getStyleClass().remove("topo-node-selected"));
     }
 
-    private VBox buildNode(TopoNode n, Consumer<TopoNode> onNodeClick) {
+    private VBox buildNode(TopoNode n, Consumer<TopoNode> onNodeClick,
+                           Function<TopoNode, ContextMenu> menuProvider) {
         Label kindLabel = new Label(n.kind().toUpperCase());
         kindLabel.getStyleClass().add("topo-kind");
         Label nameLabel = new Label(n.name());
@@ -170,8 +175,20 @@ public class TopologyView extends ScrollPane {
         box.setMaxSize(NODE_W, NODE_H);
         box.getStyleClass().addAll("topo-node", "topo-" + n.kind().toLowerCase());
         box.setOnMouseClicked(e -> {
+            if (e.getButton() != MouseButton.PRIMARY) {
+                return;              // right-click is handled by the context menu below
+            }
             focusNode(n.id());       // highlight this node + its connections in place
             onNodeClick.accept(n);   // let the app open its details panel
+            e.consume();
+        });
+        // Right-click → the same action menu the table and details panel use.
+        box.setOnContextMenuRequested(e -> {
+            ContextMenu menu = menuProvider != null ? menuProvider.apply(n) : null;
+            if (menu != null) {
+                focusNode(n.id());
+                menu.show(box, e.getScreenX(), e.getScreenY());
+            }
             e.consume();
         });
         return box;
