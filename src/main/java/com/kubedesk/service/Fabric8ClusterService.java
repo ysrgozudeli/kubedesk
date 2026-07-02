@@ -686,6 +686,27 @@ public class Fabric8ClusterService implements ClusterService {
         return s.toString();
     }
 
+    /**
+     * A short "why it last died" suffix built from the container's previous termination
+     * ({@code lastState.terminated}) — the same signal {@link #podDiagnostics} surfaces, so a
+     * CrashLoopBackOff finding explains the crash even after the cluster's events have expired.
+     * Returns "" when there's no prior termination to report.
+     */
+    private String crashDetail(ContainerStatus cs) {
+        if (cs.getLastState() == null || cs.getLastState().getTerminated() == null) {
+            return "";
+        }
+        var t = cs.getLastState().getTerminated();
+        StringBuilder s = new StringBuilder(" — last exit");
+        if (t.getExitCode() != null) {
+            s.append(' ').append(t.getExitCode()).append(exitCodeHint(t.getExitCode()));
+        }
+        if (t.getReason() != null && !t.getReason().isBlank()) {
+            s.append(" [").append(t.getReason()).append(']');
+        }
+        return s.toString();
+    }
+
     /** Human hint for common container exit codes. */
     private String exitCodeHint(int code) {
         return switch (code) {
@@ -866,6 +887,13 @@ public class Fabric8ClusterService implements ClusterService {
                             j.getMetadata().getName(), "Failed", "Job did not complete successfully"));
                 }
             }
+            for (CronJob cj : client.batch().v1().cronjobs().inNamespace(namespace).list().getItems()) {
+                if (cj.getSpec() != null && Boolean.TRUE.equals(cj.getSpec().getSuspend())) {
+                    f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.CRONJOBS,
+                            cj.getMetadata().getName(), "Suspended",
+                            "spec.suspend is true — no new jobs will be scheduled"));
+                }
+            }
             for (PersistentVolumeClaim pvc : client.persistentVolumeClaims().inNamespace(namespace)
                     .list().getItems()) {
                 String phase = pvc.getStatus() != null ? pvc.getStatus().getPhase() : null;
@@ -911,7 +939,8 @@ public class Fabric8ClusterService implements ClusterService {
                     String r = cs.getState().getWaiting().getReason();
                     if (r != null && BAD_WAITING.contains(r)) {
                         f.add(new HealthFinding(HealthSeverity.CRITICAL, ResourceKind.PODS, name, r,
-                                cs.getName() + ": " + nz(cs.getState().getWaiting().getMessage())));
+                                cs.getName() + ": " + nz(cs.getState().getWaiting().getMessage())
+                                        + crashDetail(cs)));
                         return;
                     }
                 }
@@ -933,6 +962,18 @@ public class Fabric8ClusterService implements ClusterService {
             f.add(new HealthFinding(HealthSeverity.CRITICAL, ResourceKind.PODS, name, "Failed",
                     nz(st.getReason())));
             return;
+        }
+        // Running, but a container process is up yet not Ready (e.g. a failing readiness probe): the
+        // pod is "up" but taking no traffic. Phase/restart checks miss this, so flag it explicitly.
+        if ("Running".equals(phase) && st.getContainerStatuses() != null) {
+            for (ContainerStatus cs : st.getContainerStatuses()) {
+                if (cs.getState() != null && cs.getState().getRunning() != null
+                        && !Boolean.TRUE.equals(cs.getReady())) {
+                    f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.PODS, name, "Not ready",
+                            cs.getName() + ": running but not Ready (readiness probe failing?)"));
+                    break;
+                }
+            }
         }
         int restarts = 0;
         if (st != null && st.getContainerStatuses() != null) {
