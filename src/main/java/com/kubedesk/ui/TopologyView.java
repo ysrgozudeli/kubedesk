@@ -35,9 +35,12 @@ public class TopologyView extends ScrollPane {
     private final Pane canvas = new Pane();
     private final Scale scale = new Scale(1, 1);
 
-    // For click-to-highlight of edges (and their endpoint nodes).
+    // For click-to-highlight of edges/nodes (and their endpoints/neighbours).
     private final Map<String, VBox> nodeBoxes = new HashMap<>();
-    private final List<CubicCurve> edgeVisuals = new ArrayList<>();
+    private final List<EdgeVisual> edges = new ArrayList<>();
+
+    private record EdgeVisual(CubicCurve curve, String from, String to) {
+    }
 
     public TopologyView() {
         canvas.getTransforms().add(scale);
@@ -65,8 +68,8 @@ public class TopologyView extends ScrollPane {
     public void render(TopologyData data, Consumer<TopoNode> onNodeClick) {
         canvas.getChildren().clear();
         nodeBoxes.clear();
-        edgeVisuals.clear();
-        // Click empty canvas to clear any edge highlight.
+        edges.clear();
+        // Click empty canvas to clear any highlight.
         canvas.setOnMouseClicked(e -> clearHighlight());
         if (data == null || data.nodes().isEmpty()) {
             Label empty = new Label("No Ingresses, Services or workloads in this namespace.");
@@ -117,7 +120,7 @@ public class TopologyView extends ScrollPane {
                 ev.consume();
             });
 
-            edgeVisuals.add(curve);
+            edges.add(new EdgeVisual(curve, fromId, toId));
             canvas.getChildren().addAll(curve, hit);
         }
 
@@ -146,7 +149,7 @@ public class TopologyView extends ScrollPane {
     }
 
     private void clearHighlight() {
-        edgeVisuals.forEach(c -> c.getStyleClass().remove("topo-edge-selected"));
+        edges.forEach(ev -> ev.curve().getStyleClass().remove("topo-edge-selected"));
         nodeBoxes.values().forEach(b -> b.getStyleClass().remove("topo-node-selected"));
     }
 
@@ -166,8 +169,31 @@ public class TopologyView extends ScrollPane {
         box.setMinSize(NODE_W, NODE_H);
         box.setMaxSize(NODE_W, NODE_H);
         box.getStyleClass().addAll("topo-node", "topo-" + n.kind().toLowerCase());
-        box.setOnMouseClicked(e -> onNodeClick.accept(n));
+        box.setOnMouseClicked(e -> {
+            focusNode(n.id());       // highlight this node + its connections in place
+            onNodeClick.accept(n);   // let the app open its details panel
+            e.consume();
+        });
         return box;
+    }
+
+    /** Highlight a node plus every edge touching it and each neighbour on the other end. */
+    public void focusNode(String nodeId) {
+        clearHighlight();
+        VBox node = nodeBoxes.get(nodeId);
+        if (node != null) {
+            node.getStyleClass().add("topo-node-selected");
+        }
+        for (EdgeVisual ev : edges) {
+            if (ev.from().equals(nodeId) || ev.to().equals(nodeId)) {
+                ev.curve().getStyleClass().add("topo-edge-selected");
+                String other = ev.from().equals(nodeId) ? ev.to() : ev.from();
+                VBox neighbour = nodeBoxes.get(other);
+                if (neighbour != null) {
+                    neighbour.getStyleClass().add("topo-node-selected");
+                }
+            }
+        }
     }
 
     private static double clamp(double v, double lo, double hi) {

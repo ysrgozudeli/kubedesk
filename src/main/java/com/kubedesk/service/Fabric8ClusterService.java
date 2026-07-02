@@ -747,48 +747,79 @@ public class Fabric8ClusterService implements ClusterService {
                 }
             }
 
-            // Workloads (tier 2) — Deployment / StatefulSet / DaemonSet.
-            client.apps().deployments().inNamespace(namespace).list().getItems().forEach(d ->
-                    addWorkload(nodes, edges, serviceSelectors, "Deployment", d.getMetadata().getName(),
-                            d.getSpec() != null && d.getSpec().getTemplate() != null
-                                    && d.getSpec().getTemplate().getMetadata() != null
-                                    ? d.getSpec().getTemplate().getMetadata().getLabels() : null,
-                            readyText(d.getStatus() != null ? d.getStatus().getReadyReplicas() : null,
-                                    d.getSpec() != null ? d.getSpec().getReplicas() : null)));
+            // Workloads (tier 2) — nodes only; their pods are connected below by ownership.
+            for (Deployment d : client.apps().deployments().inNamespace(namespace).list().getItems()) {
+                String id = "Deployment/" + d.getMetadata().getName();
+                nodes.add(new TopoNode(id, "Deployment", d.getMetadata().getName(), 2,
+                        readyText(d.getStatus() != null ? d.getStatus().getReadyReplicas() : null,
+                                d.getSpec() != null ? d.getSpec().getReplicas() : null)));
+                nodeIds.add(id);
+            }
+            for (StatefulSet s : client.apps().statefulSets().inNamespace(namespace).list().getItems()) {
+                String id = "StatefulSet/" + s.getMetadata().getName();
+                nodes.add(new TopoNode(id, "StatefulSet", s.getMetadata().getName(), 2,
+                        readyText(s.getStatus() != null ? s.getStatus().getReadyReplicas() : null,
+                                s.getSpec() != null ? s.getSpec().getReplicas() : null)));
+                nodeIds.add(id);
+            }
+            for (DaemonSet ds : client.apps().daemonSets().inNamespace(namespace).list().getItems()) {
+                String id = "DaemonSet/" + ds.getMetadata().getName();
+                nodes.add(new TopoNode(id, "DaemonSet", ds.getMetadata().getName(), 2,
+                        readyText(ds.getStatus() != null ? ds.getStatus().getNumberReady() : null,
+                                ds.getStatus() != null ? ds.getStatus().getDesiredNumberScheduled() : null)));
+                nodeIds.add(id);
+            }
 
-            client.apps().statefulSets().inNamespace(namespace).list().getItems().forEach(s ->
-                    addWorkload(nodes, edges, serviceSelectors, "StatefulSet", s.getMetadata().getName(),
-                            s.getSpec() != null && s.getSpec().getTemplate() != null
-                                    && s.getSpec().getTemplate().getMetadata() != null
-                                    ? s.getSpec().getTemplate().getMetadata().getLabels() : null,
-                            readyText(s.getStatus() != null ? s.getStatus().getReadyReplicas() : null,
-                                    s.getSpec() != null ? s.getSpec().getReplicas() : null)));
+            // ReplicaSet -> owning Deployment, so pods (owned by a ReplicaSet) map back to a Deployment.
+            Map<String, String> rsToDeployment = new HashMap<>();
+            for (var rs : client.apps().replicaSets().inNamespace(namespace).list().getItems()) {
+                if (rs.getMetadata().getOwnerReferences() != null) {
+                    rs.getMetadata().getOwnerReferences().stream()
+                            .filter(o -> "Deployment".equals(o.getKind()))
+                            .findFirst()
+                            .ifPresent(o -> rsToDeployment.put(rs.getMetadata().getName(), o.getName()));
+                }
+            }
 
-            client.apps().daemonSets().inNamespace(namespace).list().getItems().forEach(ds ->
-                    addWorkload(nodes, edges, serviceSelectors, "DaemonSet", ds.getMetadata().getName(),
-                            ds.getSpec() != null && ds.getSpec().getTemplate() != null
-                                    && ds.getSpec().getTemplate().getMetadata() != null
-                                    ? ds.getSpec().getTemplate().getMetadata().getLabels() : null,
-                            readyText(ds.getStatus() != null ? ds.getStatus().getNumberReady() : null,
-                                    ds.getStatus() != null ? ds.getStatus().getDesiredNumberScheduled() : null)));
+            // Pods (tier 3) with the TRUE edges:
+            //   Service -> Pod  (label selector), and  Workload -> Pod  (ownership).
+            for (Pod p : client.pods().inNamespace(namespace).list().getItems()) {
+                String podName = p.getMetadata().getName();
+                String pid = "Pod/" + podName;
+                String phase = p.getStatus() != null && p.getStatus().getPhase() != null
+                        ? p.getStatus().getPhase() : "";
+                nodes.add(new TopoNode(pid, "Pod", podName, 3, phase));
+
+                Map<String, String> labels = p.getMetadata().getLabels();
+                serviceSelectors.forEach((sid, selector) -> {
+                    if (selectorMatches(selector, labels)) {
+                        edges.add(new TopoEdge(sid, pid));
+                    }
+                });
+
+                if (p.getMetadata().getOwnerReferences() != null) {
+                    for (var owner : p.getMetadata().getOwnerReferences()) {
+                        String wid = null;
+                        if ("ReplicaSet".equals(owner.getKind())) {
+                            String dep = rsToDeployment.get(owner.getName());
+                            if (dep != null) {
+                                wid = "Deployment/" + dep;
+                            }
+                        } else if ("StatefulSet".equals(owner.getKind())
+                                || "DaemonSet".equals(owner.getKind())) {
+                            wid = owner.getKind() + "/" + owner.getName();
+                        }
+                        if (wid != null && nodeIds.contains(wid)) {
+                            edges.add(new TopoEdge(wid, pid));
+                        }
+                    }
+                }
+            }
 
             return new TopologyData(nodes, edges);
         } catch (Exception e) {
             throw new ClusterException("Could not build topology: " + rootMessage(e), e);
         }
-    }
-
-    private void addWorkload(List<TopoNode> nodes, List<TopoEdge> edges,
-                             Map<String, Map<String, String>> serviceSelectors,
-                             String kind, String name, Map<String, String> templateLabels, String subtitle) {
-        String id = kind + "/" + name;
-        nodes.add(new TopoNode(id, kind, name, 2, subtitle));
-        // A service targets this workload when its selector is a subset of the pod template labels.
-        serviceSelectors.forEach((sid, selector) -> {
-            if (selectorMatches(selector, templateLabels)) {
-                edges.add(new TopoEdge(sid, id));
-            }
-        });
     }
 
     /** True when every selector entry is present with an equal value in the labels. */

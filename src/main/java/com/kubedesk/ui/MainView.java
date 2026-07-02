@@ -135,8 +135,9 @@ public class MainView extends BorderPane {
     private final Button shellConnectBtn = new Button("Connect");
     private ExecSession execSession;
     private String shellPod;
-    /** Name of the resource currently shown in the details panel (for YAML reload/apply). */
+    /** Name + kind of the resource currently shown in the details panel (for YAML reload/logs). */
     private String currentDetailName;
+    private ResourceKind detailKind = ResourceKind.PODS;
 
     private ResourceKind currentKind = ResourceKind.PODS;
     private ResourceData currentData = new ResourceData(List.of(), List.of());
@@ -683,7 +684,7 @@ public class MainView extends BorderPane {
             return;
         }
         yamlArea.setText("Loading…");
-        runAsync(() -> service.describeYaml(ctx.name(), namespaceBox.getValue(), currentKind, currentDetailName),
+        runAsync(() -> service.describeYaml(ctx.name(), namespaceBox.getValue(), detailKind, currentDetailName),
                 yamlArea::setText);
     }
 
@@ -723,37 +724,63 @@ public class MainView extends BorderPane {
         return pane;
     }
 
-    /** Populate and reveal the details panel for the given row, selecting the given tab. */
+    /** Open details for a table row (uses the current kind and the row's cell values for Overview). */
     private void showDetails(List<String> row, Tab target) {
         if (row == null) {
             return;
         }
-        String name = resourceName(row);
+        openDetails(currentKind, resourceName(row), row, target);
+    }
+
+    /** Open details for a resource by kind + name (used by the topology view; row may be null). */
+    private void showDetailsFor(ResourceKind kind, String name) {
+        openDetails(kind, name, null, yamlTab);
+    }
+
+    /**
+     * Populate and reveal the details panel for a resource. When {@code row} is non-null its cell
+     * values populate the Overview; otherwise only the name is shown (YAML has the full picture).
+     */
+    private void openDetails(ResourceKind kind, String name, List<String> row, Tab target) {
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+        detailKind = kind;
         currentDetailName = name;
         detailsTitle.setText(name);
-        detailsSubtitle.setText(currentKind.label() + (currentKind.namespaced()
-                ? " · " + safeNamespace() : ""));
+        detailsSubtitle.setText(kind.label() + (kind.namespaced() ? " · " + safeNamespace() : ""));
 
-        // Overview: column → value pairs straight from the loaded row.
+        // Overview: from the row's cells when we have them, else just the name.
         overviewBox.getChildren().clear();
-        List<String> cols = currentData.columns();
-        for (int i = 0; i < cols.size(); i++) {
-            String value = i < row.size() ? row.get(i) : "";
-            Label key = new Label(cols.get(i));
+        if (row != null) {
+            List<String> cols = currentData.columns();
+            for (int i = 0; i < cols.size(); i++) {
+                String value = i < row.size() ? row.get(i) : "";
+                Label key = new Label(cols.get(i));
+                key.getStyleClass().add("kv-key");
+                key.setMinWidth(110);
+                Label val = new Label(value);
+                val.getStyleClass().add("kv-value");
+                val.setWrapText(true);
+                HBox line = new HBox(10, key, val);
+                line.setAlignment(Pos.TOP_LEFT);
+                overviewBox.getChildren().add(line);
+            }
+        } else {
+            Label key = new Label("Name");
             key.getStyleClass().add("kv-key");
             key.setMinWidth(110);
-            Label val = new Label(value);
+            Label val = new Label(name);
             val.getStyleClass().add("kv-value");
-            val.setWrapText(true);
-            HBox line = new HBox(10, key, val);
-            line.setAlignment(Pos.TOP_LEFT);
-            overviewBox.getChildren().add(line);
+            Label hint = new Label("See the YAML tab for full details.");
+            hint.getStyleClass().add("muted");
+            overviewBox.getChildren().addAll(new HBox(10, key, val), hint);
         }
 
         // Build the tab set for this kind: Overview + YAML always; Events when applicable; Logs for pods.
-        boolean isPod = currentKind == ResourceKind.PODS;
+        boolean isPod = kind == ResourceKind.PODS;
         detailsTabs.getTabs().setAll(overviewTab, yamlTab);
-        if (kindHasEvents(currentKind)) {
+        if (kindHasEvents(kind)) {
             detailsTabs.getTabs().add(eventsTab);
         }
         if (isPod) {
@@ -781,13 +808,13 @@ public class MainView extends BorderPane {
 
         // YAML: fetched lazily off the FX thread.
         yamlArea.setText("Loading…");
-        runAsync(() -> service.describeYaml(ctx.name(), namespaceBox.getValue(), currentKind, name),
+        runAsync(() -> service.describeYaml(ctx.name(), namespaceBox.getValue(), kind, name),
                 yamlArea::setText);
 
         // Events: the "why" behind a failing resource (skipped for kinds that don't emit events).
-        if (kindHasEvents(currentKind)) {
+        if (kindHasEvents(kind)) {
             eventsArea.setText("Loading…");
-            runAsync(() -> service.describeEvents(ctx.name(), namespaceBox.getValue(), currentKind, name),
+            runAsync(() -> service.describeEvents(ctx.name(), namespaceBox.getValue(), kind, name),
                     eventsArea::setText);
         }
 
@@ -818,7 +845,7 @@ public class MainView extends BorderPane {
 
     /** (Re)load the log tail for the currently shown pod + selected container. */
     private void loadLogs() {
-        if (currentKind != ResourceKind.PODS || currentLogPod == null) {
+        if (detailKind != ResourceKind.PODS || currentLogPod == null) {
             return;
         }
         ContextInfo ctx = contextBox.getValue();
@@ -1520,11 +1547,11 @@ public class MainView extends BorderPane {
         });
     }
 
+    /** Clicking a topology node opens its details in place (the topology view stays visible). */
     private void onTopoNodeClick(TopoNode node) {
         ResourceKind kind = kindOf(node.kind());
         if (kind != null) {
-            selectKind(kind);
-            status("Switched to " + kind.label() + " — look for " + node.name() + ".");
+            showDetailsFor(kind, node.name());
         }
     }
 
@@ -1535,6 +1562,7 @@ public class MainView extends BorderPane {
             case "Deployment" -> ResourceKind.DEPLOYMENTS;
             case "StatefulSet" -> ResourceKind.STATEFULSETS;
             case "DaemonSet" -> ResourceKind.DAEMONSETS;
+            case "Pod" -> ResourceKind.PODS;
             default -> null;
         };
     }

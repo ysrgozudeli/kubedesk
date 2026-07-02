@@ -262,6 +262,7 @@
 .topo-deployment  { -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #16a34a; }
 .topo-statefulset { -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #0891b2; }
 .topo-daemonset   { -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #d97706; }
+.topo-pod         { -fx-border-color: #e3e6ea #e3e6ea #e3e6ea #6b7280; }
 
 .topo-kind {
     -fx-font-size: 10px;

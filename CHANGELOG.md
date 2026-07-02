@@ -16,8 +16,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - **More pod columns**: **IP**, **QoS class** (eviction-risk indicator), and **Controlled By**
   (owning controller) — hidden by default, toggleable via the column menu.
 - **Namespace topology view** (sidebar → VIEWS → Topology): a native, dependency-free
-  Ingress → Service → Workload map with clickable nodes (jump to the resource), drag-to-pan, and
-  Ctrl+scroll zoom.
+  Ingress → Service → Workload → Pods map with the *real* edges (Service→Pod by label selector,
+  Deployment→Pod by ownership via ReplicaSet). Click a node to focus it and open its details in
+  place; click a line to trace a connection; drag to pan, Ctrl+scroll to zoom.
 
 ## [1.0.1] - 2026-07-01
 
