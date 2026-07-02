@@ -29,6 +29,7 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
@@ -112,6 +113,7 @@ public class MainView extends BorderPane {
     private final VBox detailsPane = new VBox();
     private final Label detailsTitle = new Label();
     private final Label detailsSubtitle = new Label();
+    private final MenuButton detailsActionsBtn = new MenuButton("Actions");
     private final VBox overviewBox = new VBox(6);
     private final TextArea yamlArea = new TextArea();
     private final TabPane detailsTabs = new TabPane();
@@ -465,24 +467,24 @@ public class MainView extends BorderPane {
         logs.setOnAction(e -> showDetails(row.getItem(), logsTab));
 
         MenuItem portForward = new MenuItem("Port forward…");
-        portForward.setOnAction(e -> openPortForwardDialog(row.getItem()));
+        portForward.setOnAction(e -> openPortForwardDialog(resourceName(row.getItem())));
 
         MenuItem copyName = new MenuItem("Copy name");
         copyName.setOnAction(e -> copyToClipboard(resourceName(row.getItem())));
 
         MenuItem copyYaml = new MenuItem("Copy YAML");
-        copyYaml.setOnAction(e -> copyYaml(row.getItem()));
+        copyYaml.setOnAction(e -> copyYaml(currentKind, resourceName(row.getItem())));
 
         // Mutating actions
         MenuItem restart = new MenuItem("Restart (rollout)");
-        restart.setOnAction(e -> restartAction(row.getItem()));
+        restart.setOnAction(e -> restartAction(resourceName(row.getItem())));
 
         MenuItem scale = new MenuItem("Scale…");
-        scale.setOnAction(e -> scaleAction(row.getItem()));
+        scale.setOnAction(e -> scaleAction(resourceName(row.getItem())));
 
         MenuItem delete = new MenuItem("Delete");
         delete.getStyleClass().add("danger-item");
-        delete.setOnAction(e -> deleteAction(row.getItem()));
+        delete.setOnAction(e -> deleteAction(currentKind, resourceName(row.getItem())));
 
         ContextMenu menu = new ContextMenu(details, yaml, events, logs, portForward,
                 new SeparatorMenuItem(), copyName, copyYaml,
@@ -522,10 +524,12 @@ public class MainView extends BorderPane {
         detailsTitle.getStyleClass().add("details-title");
         detailsSubtitle.getStyleClass().add("muted");
 
+        detailsActionsBtn.getStyleClass().add("accent-button");
+
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
         VBox titleBox = new VBox(2, detailsTitle, detailsSubtitle);
-        HBox header = new HBox(8, titleBox, spacer, close);
+        HBox header = new HBox(8, titleBox, spacer, detailsActionsBtn, close);
         header.setAlignment(Pos.TOP_LEFT);
         header.setPadding(new Insets(14, 14, 8, 16));
         header.getStyleClass().add("details-header");
@@ -749,6 +753,7 @@ public class MainView extends BorderPane {
         currentDetailName = name;
         detailsTitle.setText(name);
         detailsSubtitle.setText(kind.label() + (kind.namespaced() ? " · " + safeNamespace() : ""));
+        populateDetailsActions(kind, name);
 
         // Overview: from the row's cells when we have them, else just the name.
         overviewBox.getChildren().clear();
@@ -909,37 +914,77 @@ public class MainView extends BorderPane {
 
     // --- mutating actions -------------------------------------------------------------------
 
-    private void deleteAction(List<String> row) {
-        if (row == null) {
+    /** Build the details-panel "Actions" menu for the shown resource — same handlers as the table. */
+    private void populateDetailsActions(ResourceKind kind, String name) {
+        detailsActionsBtn.getItems().clear();
+
+        if (kind == ResourceKind.DEPLOYMENTS) {
+            MenuItem restart = new MenuItem("Restart (rollout)");
+            restart.setOnAction(e -> restartAction(name));
+            MenuItem scale = new MenuItem("Scale…");
+            scale.setOnAction(e -> scaleAction(name));
+            detailsActionsBtn.getItems().addAll(restart, scale);
+        }
+        if (kind == ResourceKind.PODS) {
+            MenuItem portForward = new MenuItem("Port forward…");
+            portForward.setOnAction(e -> openPortForwardDialog(name));
+            detailsActionsBtn.getItems().add(portForward);
+        }
+        if (!detailsActionsBtn.getItems().isEmpty()) {
+            detailsActionsBtn.getItems().add(new SeparatorMenuItem());
+        }
+
+        MenuItem copyName = new MenuItem("Copy name");
+        copyName.setOnAction(e -> copyToClipboard(name));
+        MenuItem copyYaml = new MenuItem("Copy YAML");
+        copyYaml.setOnAction(e -> copyYaml(kind, name));
+        MenuItem delete = new MenuItem("Delete");
+        delete.getStyleClass().add("danger-item");
+        delete.setOnAction(e -> deleteAction(kind, name));
+        detailsActionsBtn.getItems().addAll(copyName, copyYaml, new SeparatorMenuItem(), delete);
+    }
+
+    /** Refresh whatever view is showing after a mutation (topology or table). */
+    private void afterMutation() {
+        if (topologyMode) {
+            loadTopology();
+        } else {
+            refreshContent();
+        }
+    }
+
+    private void deleteAction(ResourceKind kind, String name) {
+        if (name == null || name.isEmpty()) {
             return;
         }
-        String name = resourceName(row);
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
             return;
         }
         String ns = namespaceBox.getValue();
-        boolean ok = confirm("Delete " + currentKind.label().toLowerCase() + "?",
+        boolean ok = confirm("Delete " + kind.label().toLowerCase() + "?",
                 "Delete \"" + name + "\""
-                        + (currentKind.namespaced() ? " in namespace \"" + ns + "\"" : "") + "?\n\n"
+                        + (kind.namespaced() ? " in namespace \"" + ns + "\"" : "") + "?\n\n"
                         + "This cannot be undone. (If it's managed by a controller, a replacement "
                         + "may be created automatically.)");
         if (!ok) {
             return;
         }
         status("Deleting " + name + "…");
-        runAsyncVoid(() -> service.deleteResource(ctx.name(), ns, currentKind, name),
+        runAsyncVoid(() -> service.deleteResource(ctx.name(), ns, kind, name),
                 () -> {
                     status("Deleted " + name + ".");
-                    refreshContent();
+                    if (name.equals(currentDetailName)) {
+                        closeDetails();
+                    }
+                    afterMutation();
                 });
     }
 
-    private void restartAction(List<String> row) {
-        if (row == null) {
+    private void restartAction(String name) {
+        if (name == null || name.isEmpty()) {
             return;
         }
-        String name = resourceName(row);
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
             return;
@@ -953,26 +998,37 @@ public class MainView extends BorderPane {
         }
         status("Restarting " + name + "…");
         runAsyncVoid(() -> service.restartDeployment(ctx.name(), ns, name),
-                () -> status("Rolling restart triggered for " + name + "."));
+                () -> {
+                    status("Rolling restart triggered for " + name + ".");
+                    afterMutation();
+                });
     }
 
-    private void scaleAction(List<String> row) {
-        if (row == null) {
+    private void scaleAction(String name) {
+        if (name == null || name.isEmpty()) {
             return;
         }
-        String name = resourceName(row);
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
             return;
         }
         String ns = namespaceBox.getValue();
+        // Fetch the current replica count so the dialog is prefilled accurately, regardless of
+        // whether we were invoked from a table row, the details panel, or the topology.
+        status("Reading current scale of " + name + "…");
+        runAsync(() -> service.getDeploymentReplicas(ctx.name(), ns, name),
+                current -> showScaleDialog(ctx, ns, name, current));
+    }
 
-        String current = currentReplicasFromRow(row);
-        TextInputDialog dialog = new TextInputDialog(current != null ? current : "");
+    private void showScaleDialog(ContextInfo ctx, String ns, String name, Integer current) {
+        TextInputDialog dialog = new TextInputDialog(current != null ? String.valueOf(current) : "");
         dialog.setTitle("Scale deployment");
         dialog.setHeaderText("Scale \"" + name + "\""
                 + (current != null ? "  (currently " + current + " replicas)" : ""));
         dialog.setContentText("Desired replicas:");
+        if (getScene() != null) {
+            dialog.initOwner(getScene().getWindow());
+        }
         Optional<String> answer = dialog.showAndWait();
         if (answer.isEmpty()) {
             return;
@@ -989,7 +1045,10 @@ public class MainView extends BorderPane {
         }
         status("Scaling " + name + " to " + replicas + "…");
         runAsyncVoid(() -> service.scaleDeployment(ctx.name(), ns, name, replicas),
-                () -> status("Scaled " + name + " to " + replicas + " replicas."));
+                () -> {
+                    status("Scaled " + name + " to " + replicas + " replicas.");
+                    afterMutation();
+                });
     }
 
     private void applyYamlAction() {
@@ -1009,21 +1068,8 @@ public class MainView extends BorderPane {
         runAsyncVoid(() -> service.applyYaml(ctx.name(), ns, yaml),
                 () -> {
                     status("Applied changes to " + currentDetailName + ".");
-                    refreshContent();
+                    afterMutation();
                 });
-    }
-
-    /** Pull the desired replica count from a deployment row's "Ready" cell (formatted "ready/desired"). */
-    private String currentReplicasFromRow(List<String> row) {
-        int idx = currentData.columns().indexOf("Ready");
-        if (idx >= 0 && idx < row.size()) {
-            String ready = row.get(idx);
-            int slash = ready.indexOf('/');
-            if (slash >= 0) {
-                return ready.substring(slash + 1).trim();
-            }
-        }
-        return null;
     }
 
     /** The global "+ Create" action: a blank editor to paste/open manifests and apply them. */
@@ -1148,15 +1194,14 @@ public class MainView extends BorderPane {
 
     // --- port forwarding --------------------------------------------------------------------
 
-    private void openPortForwardDialog(List<String> row) {
-        if (row == null) {
+    private void openPortForwardDialog(String pod) {
+        if (pod == null || pod.isEmpty()) {
             return;
         }
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
             return;
         }
-        String pod = resourceName(row);
         String ns = namespaceBox.getValue();
         status("Reading ports for " + pod + "…");
         runAsync(() -> service.listPodPorts(ctx.name(), ns, pod),
@@ -1350,17 +1395,16 @@ public class MainView extends BorderPane {
         return alert.showAndWait().filter(b -> b == ButtonType.OK).isPresent();
     }
 
-    private void copyYaml(List<String> row) {
-        if (row == null) {
+    private void copyYaml(ResourceKind kind, String name) {
+        if (name == null || name.isEmpty()) {
             return;
         }
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
             return;
         }
-        String name = resourceName(row);
         status("Copying YAML for " + name + "…");
-        runAsync(() -> service.describeYaml(ctx.name(), namespaceBox.getValue(), currentKind, name),
+        runAsync(() -> service.describeYaml(ctx.name(), namespaceBox.getValue(), kind, name),
                 yaml -> {
                     copyToClipboard(yaml);
                     status("Copied YAML for " + name + " to clipboard.");

@@ -466,6 +466,19 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     @Override
+    public Integer getDeploymentReplicas(String context, String namespace, String name) {
+        try (KubernetesClient client = clientFor(context)) {
+            Deployment d = client.apps().deployments().inNamespace(namespace).withName(name).get();
+            if (d == null || d.getSpec() == null) {
+                return null;
+            }
+            return d.getSpec().getReplicas();
+        } catch (Exception e) {
+            throw new ClusterException("Could not read replicas for " + name + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
     public void applyYaml(String context, String namespace, String yaml) {
         try (KubernetesClient client = clientFor(context)) {
             HasMetadata obj = (HasMetadata) io.fabric8.kubernetes.client.utils.Serialization.unmarshal(yaml);

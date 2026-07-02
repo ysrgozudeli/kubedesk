@@ -85,6 +85,9 @@ public interface ClusterService {
     /** Scale a Deployment to the given replica count. */
     void scaleDeployment(String context, String namespace, String name, int replicas);
 
+    /** The Deployment's current desired replica count (for pre-filling the scale dialog); null if unknown. */
+    Integer getDeploymentReplicas(String context, String namespace, String name);
+
     /** Apply an edited manifest (YAML) back to the cluster via server-side apply. */
     void applyYaml(String context, String namespace, String yaml);
 

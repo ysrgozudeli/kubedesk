@@ -19,6 +19,10 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   Ingress → Service → Workload → Pods map with the *real* edges (Service→Pod by label selector,
   Deployment→Pod by ownership via ReplicaSet). Click a node to focus it and open its details in
   place; click a line to trace a connection; drag to pan, Ctrl+scroll to zoom.
+- **Actions in the details panel**: an "Actions" menu in the details header (Restart/Scale for
+  Deployments, Port-forward for Pods, Copy name/YAML, Delete) — so you can act on a resource opened
+  from the topology *or* a table double-click, not only from the table's right-click menu. Scale now
+  reads the current replica count live, so it prefills correctly from anywhere.
 
 ## [1.0.1] - 2026-07-01
 
