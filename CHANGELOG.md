@@ -3,6 +3,21 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-07-02
+
+### Added
+- **Health scan: not-ready pods** — flags a `Running` pod whose container is up but not `Ready`
+  (e.g. a failing readiness probe): the pod is "up" but takes no traffic. Previously invisible to the
+  phase and restart checks.
+- **Health scan: suspended CronJobs** — flags CronJobs with `spec.suspend: true` (no new jobs will
+  be scheduled).
+
+### Changed
+- **Health scan explains *why* a pod crashed** — CrashLoop / image-pull findings now include the
+  container's last termination (exit code + reason, e.g. `last exit 137 (SIGKILL — often OOMKilled …)`),
+  reusing the same diagnostic the pod details panel shows, so the reason survives even after the
+  cluster's events have expired.
+
 ## [1.2.0] - 2026-07-02
 
 ### Added
