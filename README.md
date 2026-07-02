@@ -3,31 +3,72 @@
 A lightweight, cross-platform desktop client for managing Kubernetes clusters from a `kube.conf` file.
 
 KubeDesk talks **directly to the cluster API server** (via the [fabric8 Kubernetes client]) using
-your kubeconfig — **no `kubectl` binary is required**. The UI deliberately mirrors the official
-Kubernetes Dashboard so users coming from there feel at home.
+your kubeconfig — **no `kubectl` binary is required** for any operation. The UI deliberately mirrors
+the official Kubernetes Dashboard so users coming from there feel at home, positioned as a lighter
+alternative to Lens.
+
+> 📖 **New to Kubernetes?** Read
+> [**Kubernetes for Spring Boot Microservice Developers: From Pods to Production**](https://medium.com/@ysrgozudeli/kubernetes-for-spring-boot-microservice-developers-from-pods-to-production-f9890aa432af)
+> — a hands-on intro to Pods, Deployments, Services, and Ingress that uses KubeDesk to *see* it all running.
 
 ## Stack
 
-| Layer        | Choice                                             |
-|--------------|----------------------------------------------------|
-| Language     | Java 21 (LTS)                                       |
-| UI           | JavaFX + [AtlantaFX] theme (Dashboard-like look)   |
+| Layer        | Choice                                              |
+|--------------|-----------------------------------------------------|
+| Language     | Java 21 (LTS)                                        |
+| UI           | JavaFX + [AtlantaFX] theme (Dashboard-like look)    |
 | Kubernetes   | fabric8 `kubernetes-client` (direct API, no kubectl)|
-| Build        | Maven                                              |
-| Packaging    | `jpackage` (native installers — planned)           |
+| Build        | Maven                                               |
+| Packaging    | `jpackage` — native installers built by CI          |
 
-## MVP features
+## Features
 
+### Browse
 - Load **any** `kube.conf` file (file picker) — not just `~/.kube/config`.
 - Browse **contexts** and **namespaces** from the chosen config.
-- View **Pods, Deployments, Services, Nodes** in a Dashboard-style table with status chips.
-- **Pod-health ring** summarising pod phases per namespace.
-- Client-side **search/filter** across the current table.
+- **12 resource kinds** grouped in the sidebar: Pods, Deployments, StatefulSets, DaemonSets, Jobs,
+  CronJobs, Services, Ingresses, ConfigMaps, Secrets, PVCs, Nodes — in a Dashboard-style table with
+  status chips.
+- **Live updates** via watches, with **pause/resume**.
+- Client-side **search/filter**, and per-kind **column show/hide** (persisted).
+- Extra pod columns: **CPU / Memory** (from the Metrics API, degrades gracefully without
+  metrics-server), **IP**, **QoS class**, and **Controlled By**.
+
+### Inspect
+- **Details panel** with per-kind tabs: **Overview / YAML / Events / Logs / Shell**.
+- **Pod failure diagnostics** — container state, exit codes, and eviction reasons (surfaces *why* a
+  pod is failing even after its events have expired).
+- **Log save-to-file**, and a resizable details split.
+
+### Views
+- **Topology** (sidebar → VIEWS → Topology): a native, dependency-free
+  **Ingress → Service → Workload → Pods** map with the *real* edges (Service→Pod by label selector,
+  Deployment→Pod by ownership via ReplicaSet). Click a node to focus + open details in place, click a
+  line to trace a connection, drag to pan, Ctrl+scroll to zoom.
+- **Health scan** (sidebar → VIEWS → Health): a one-screen "what's wrong right now" — scans the
+  namespace and cluster Nodes for CrashLoop / ImagePull / OOM / Evicted / unschedulable / high-restart
+  / BestEffort pods, unavailable workloads, failed Jobs, unbound PVCs, orphaned Services, and unhealthy
+  / cordoned Nodes. Ranked most-severe first; double-click to inspect, right-click to act.
+
+### Act (all over the API — no kubectl)
+- **Management actions**: delete, rollout restart, scale, and edit-YAML-and-apply — with confirmations
+  and per-kind context menus. The same actions are reachable from table rows, topology nodes, and the
+  details-panel **Actions** menu.
+- **"+ Create / Apply YAML"** — create or update any resource(s) via server-side apply (multi-document,
+  open-from-file), with **live YAML linting** and a **Validate (dry-run)** button.
+- **Pod exec** command console.
+- **Port-forwarding**: open a tunnel to a pod port at `localhost:<port>`; a toolbar manager lists
+  active tunnels (Copy / Open / Stop). Tunnels are persisted and offered for restore on next launch.
+
+### Preferences
+- Persisted across restarts (`~/.kubedesk/prefs.json`): custom kube.conf path, last context and
+  namespace, hidden table columns, and active port-forwards.
 
 ## Architecture
 
 The UI never touches fabric8 directly. Everything goes through the `ClusterService` interface, so a
-future `kubectl`-backed implementation can be added for niche operations without changing the UI.
+future `kubectl`-backed implementation (or an MCP/CLI reuse of the same logic) can be added without
+changing the UI. A generic table model (columns + string rows) drives all kinds.
 
 ```
 JavaFX UI  ──►  ClusterService  ──►  Fabric8ClusterService  ──HTTPS/WSS──►  cluster API server
@@ -66,8 +107,8 @@ There are convenience scripts: **`scripts/package.ps1`** (Windows) and **`script
 ./scripts/package.ps1
 
 # 2) Installer (.exe or .msi) — requires the WiX Toolset v3 on PATH.
-./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-0.1.0.exe
-./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-0.1.0.msi
+./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-1.2.0.exe
+./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-1.2.0.msi
 ```
 
 Installers (`exe`/`msi`) need the **[WiX Toolset v3](https://wixtoolset.org/)** on the `PATH`
@@ -84,8 +125,8 @@ The installer adds a Start-menu entry, a desktop shortcut, and an install-locati
 ```bash
 chmod +x scripts/package.sh          # once
 ./scripts/package.sh                  # app-image -> dist/KubeDesk.app
-./scripts/package.sh dmg              # -> dist/KubeDesk-0.1.0.dmg
-./scripts/package.sh pkg              # -> dist/KubeDesk-0.1.0.pkg
+./scripts/package.sh dmg              # -> dist/KubeDesk-1.2.0.dmg
+./scripts/package.sh pkg              # -> dist/KubeDesk-1.2.0.pkg
 ```
 
 Needs **Xcode Command Line Tools** (`xcode-select --install`). For distribution *outside* your own
@@ -98,8 +139,8 @@ machines, macOS requires the app to be **code-signed and notarized** with an App
 ```bash
 chmod +x scripts/package.sh          # once
 ./scripts/package.sh                  # app-image -> dist/KubeDesk/
-./scripts/package.sh deb              # -> dist/kubedesk_0.1.0_amd64.deb   (needs dpkg + fakeroot)
-./scripts/package.sh rpm              # -> dist/kubedesk-0.1.0.x86_64.rpm  (needs rpmbuild)
+./scripts/package.sh deb              # -> dist/kubedesk_1.2.0_amd64.deb   (needs dpkg + fakeroot)
+./scripts/package.sh rpm              # -> dist/kubedesk-1.2.0.x86_64.rpm  (needs rpmbuild)
 ```
 
 - `.deb` needs `dpkg-deb` + `fakeroot` (`sudo apt install fakeroot`).
@@ -136,14 +177,14 @@ three platforms on their own runners (jpackage can't cross-compile):
 **Cut a release:**
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
-Pushing a `v*` tag builds every installer and publishes a **GitHub Release** with them attached
-(with auto-generated release notes). You can also trigger the workflow manually from the **Actions**
-tab ("Build distributions" → *Run workflow*); manual runs upload the installers as **workflow
-artifacts** instead of creating a release.
+Pushing a `v*` tag builds every installer and publishes a **GitHub Release** with them attached (using
+the matching [CHANGELOG](CHANGELOG.md) section as the release body). You can also trigger the workflow
+manually from the **Actions** tab ("Build distributions" → *Run workflow*); manual runs upload the
+installers as **workflow artifacts** instead of creating a release.
 
 > macOS builds are unsigned, so Gatekeeper will warn end users until the app is signed/notarized
 > with an Apple Developer ID. Add `--mac-sign ...` options (and the signing secrets) to enable that.
@@ -154,9 +195,17 @@ artifacts** instead of creating a release.
 
 ## Roadmap
 
-- **v1 actions:** delete / scale / restart, exec into pod (terminal), port-forward, edit YAML.
-- **v2:** apply manifests, Helm releases, multi-cluster, CRDs, RBAC views.
-- Native installers via `jpackage` (`.msi` / `.dmg` / `.deb`).
+Shipped through **v1.2.0**: 12 resource kinds, live watches, details panel (incl. exec + logs), pod
+diagnostics, management actions, Create/Apply with lint + dry-run, port-forwarding, preferences,
+topology view, and health scan.
+
+Candidate next:
+- **Cluster-wide Events view** (the practical "cluster log").
+- **Multi-pod log tailing** (stern-style) and optional Loki/cloud-logging integration.
+- **Headless health CLI** for CI/CD gates (reuses `ClusterService.healthCheck`).
+- **MCP server** for AI agents (read-only by default, reusing `ClusterService`).
+- Live CPU/Memory graphs, all-namespaces view + global search, Sealed Secrets, generic CRD support,
+  and macOS signing/notarization.
 
 [fabric8 Kubernetes client]: https://github.com/fabric8io/kubernetes-client
 [AtlantaFX]: https://github.com/mkpaz/atlantafx
