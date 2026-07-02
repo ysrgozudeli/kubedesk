@@ -4,6 +4,8 @@ import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.HealthFinding;
+import com.kubedesk.service.Dtos.HealthSeverity;
 import com.kubedesk.service.Dtos.TopoNode;
 import com.kubedesk.prefs.Settings;
 import com.kubedesk.prefs.SettingsStore;
@@ -103,11 +105,19 @@ public class MainView extends BorderPane {
     private final Label contentTitle = new Label("Pods");
     private final Label statusBar = new Label("Ready.");
 
-    // Topology view
-    private final TopologyView topologyView = new TopologyView();
+    // Extra views (topology, health) live in the same center area as the resource table.
+    private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH }
+
+    private ViewMode currentView = ViewMode.RESOURCE;
     private final Map<ResourceKind, ToggleButton> navButtons = new EnumMap<>(ResourceKind.class);
+
+    private final TopologyView topologyView = new TopologyView();
     private final ToggleButton topologyToggle = new ToggleButton("›  Topology");
-    private boolean topologyMode = false;
+
+    private final ToggleButton healthToggle = new ToggleButton("›  Health");
+    private final VBox healthView = new VBox(10);
+    private final TableView<HealthFinding> healthTable = new TableView<>();
+    private final Label healthSummary = new Label();
 
     // Details panel (right side)
     private final VBox detailsPane = new VBox();
@@ -391,6 +401,16 @@ public class MainView extends BorderPane {
         Label viewsSection = new Label("VIEWS");
         viewsSection.getStyleClass().add("nav-section");
         nav.getChildren().add(viewsSection);
+        healthToggle.setToggleGroup(group);
+        healthToggle.setMaxWidth(Double.MAX_VALUE);
+        healthToggle.getStyleClass().add("nav-item");
+        healthToggle.setOnAction(e -> {
+            if (healthToggle.isSelected()) {
+                enterHealth();
+            }
+        });
+        nav.getChildren().add(healthToggle);
+
         topologyToggle.setToggleGroup(group);
         topologyToggle.setMaxWidth(Double.MAX_VALUE);
         topologyToggle.getStyleClass().add("nav-item");
@@ -434,7 +454,12 @@ public class MainView extends BorderPane {
         topologyView.setManaged(false);
         VBox.setVgrow(topologyView, Priority.ALWAYS);
 
-        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView);
+        buildHealthView();
+        healthView.setVisible(false);
+        healthView.setManaged(false);
+        VBox.setVgrow(healthView, Priority.ALWAYS);
+
+        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView, healthView);
         content.setPadding(new Insets(16));
         content.getStyleClass().add("content");
         content.setMinWidth(320); // keep the table usable no matter how wide the details pane gets
@@ -944,12 +969,12 @@ public class MainView extends BorderPane {
         detailsActionsBtn.getItems().addAll(copyName, copyYaml, new SeparatorMenuItem(), delete);
     }
 
-    /** Refresh whatever view is showing after a mutation (topology or table). */
+    /** Refresh whatever view is showing after a mutation (topology, health, or table). */
     private void afterMutation() {
-        if (topologyMode) {
-            loadTopology();
-        } else {
-            refreshContent();
+        switch (currentView) {
+            case TOPOLOGY -> loadTopology();
+            case HEALTH -> loadHealth();
+            default -> refreshContent();
         }
     }
 
@@ -1527,21 +1552,23 @@ public class MainView extends BorderPane {
         settings.lastContext = c != null ? c.name() : null;
         settings.lastNamespace = namespaceBox.getValue();
         saveSettings();
-        if (topologyMode) {
-            loadTopology();
-            return;
-        }
-        refreshContent();
-        if (paused) {
-            updateLiveUi();
-        } else {
-            restartWatch();
+        switch (currentView) {
+            case TOPOLOGY -> loadTopology();
+            case HEALTH -> loadHealth();
+            default -> {
+                refreshContent();
+                if (paused) {
+                    updateLiveUi();
+                } else {
+                    restartWatch();
+                }
+            }
         }
     }
 
-    // --- topology view ----------------------------------------------------------------------
+    // --- view switching (resource table / topology / health) --------------------------------
 
-    /** Switch to a resource-kind table view (also used by topology node clicks). */
+    /** Switch to a resource-kind table view (also used by topology/health node clicks). */
     private void selectKind(ResourceKind kind) {
         currentKind = kind;
         contentTitle.setText(kind.label());
@@ -1549,30 +1576,42 @@ public class MainView extends BorderPane {
         if (btn != null) {
             btn.setSelected(true);
         }
-        setTopologyMode(false);
+        setCenterView(ViewMode.RESOURCE);
         closeDetails();
         onSelectionChanged();
     }
 
     private void enterTopology() {
-        setTopologyMode(true);
+        setCenterView(ViewMode.TOPOLOGY);
         topologyToggle.setSelected(true);
         closeDetails();
         stopWatch();
         loadTopology();
     }
 
-    private void setTopologyMode(boolean on) {
-        topologyMode = on;
-        table.setVisible(!on);
-        table.setManaged(!on);
-        topologyView.setVisible(on);
-        topologyView.setManaged(on);
-        if (on) {
+    private void enterHealth() {
+        setCenterView(ViewMode.HEALTH);
+        healthToggle.setSelected(true);
+        closeDetails();
+        stopWatch();
+        loadHealth();
+    }
+
+    /** Show exactly one of the resource table (+ring), the topology view, or the health view. */
+    private void setCenterView(ViewMode mode) {
+        currentView = mode;
+        boolean res = mode == ViewMode.RESOURCE;
+        table.setVisible(res);
+        table.setManaged(res);
+        if (!res) {
             healthRing.getChildren().clear();
         }
-        healthRing.setVisible(!on);
-        healthRing.setManaged(!on);
+        healthRing.setVisible(res);
+        healthRing.setManaged(res);
+        topologyView.setVisible(mode == ViewMode.TOPOLOGY);
+        topologyView.setManaged(mode == ViewMode.TOPOLOGY);
+        healthView.setVisible(mode == ViewMode.HEALTH);
+        healthView.setManaged(mode == ViewMode.HEALTH);
     }
 
     private void loadTopology() {
@@ -1588,6 +1627,102 @@ public class MainView extends BorderPane {
             topologyView.render(data, this::onTopoNodeClick, this::buildTopoNodeMenu);
             status(data.nodes().size() + " nodes · " + data.edges().size() + " links."
                     + "  (Ctrl+scroll to zoom, drag to pan, click a node to open it.)");
+        });
+    }
+
+    // --- health view ------------------------------------------------------------------------
+
+    private void buildHealthView() {
+        Button rescan = new Button("↻ Rescan");
+        rescan.getStyleClass().add("accent-button");
+        rescan.setOnAction(e -> loadHealth());
+
+        healthSummary.getStyleClass().add("muted");
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox controls = new HBox(10, healthSummary, spacer, rescan);
+        controls.setAlignment(Pos.CENTER_LEFT);
+
+        healthTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        healthTable.setPlaceholder(new Label("No issues found ✓"));
+        VBox.setVgrow(healthTable, Priority.ALWAYS);
+
+        TableColumn<HealthFinding, String> sev = new TableColumn<>("Severity");
+        sev.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                c.getValue().severity() == HealthSeverity.CRITICAL ? "Critical" : "Warning"));
+        sev.setCellFactory(c -> severityChipCell());
+        sev.setPrefWidth(110);
+        sev.setMaxWidth(130);
+
+        TableColumn<HealthFinding, String> check = new TableColumn<>("Check");
+        check.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().check()));
+        check.setPrefWidth(190);
+        check.setMaxWidth(240);
+
+        TableColumn<HealthFinding, String> resource = new TableColumn<>("Resource");
+        resource.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                c.getValue().kind().label() + "/" + c.getValue().name()));
+        resource.setPrefWidth(260);
+
+        TableColumn<HealthFinding, String> detail = new TableColumn<>("Detail");
+        detail.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().detail()));
+
+        healthTable.getColumns().setAll(List.of(sev, check, resource, detail));
+
+        // Double-click → open details; right-click → the shared view/act menu.
+        healthTable.setRowFactory(tv -> {
+            TableRow<HealthFinding> row = new TableRow<>();
+            row.itemProperty().addListener((o, a, b) ->
+                    row.setContextMenu(b == null ? null : buildResourceMenu(b.kind(), b.name())));
+            row.setOnMouseClicked(ev -> {
+                if (ev.getButton() == MouseButton.PRIMARY && ev.getClickCount() == 2 && !row.isEmpty()) {
+                    HealthFinding hf = row.getItem();
+                    openDetails(hf.kind(), hf.name(), null, kindHasEvents(hf.kind()) ? eventsTab : yamlTab);
+                }
+            });
+            return row;
+        });
+
+        healthView.getChildren().setAll(controls, healthTable);
+    }
+
+    private TableCell<HealthFinding, String> severityChipCell() {
+        return new TableCell<>() {
+            @Override
+            protected void updateItem(String value, boolean empty) {
+                super.updateItem(value, empty);
+                getStyleClass().removeAll("chip", "chip-bad", "chip-warn");
+                if (empty || value == null) {
+                    setText(null);
+                } else {
+                    setText(value);
+                    getStyleClass().add("chip");
+                    getStyleClass().add("Critical".equals(value) ? "chip-bad" : "chip-warn");
+                }
+            }
+        };
+    }
+
+    private void loadHealth() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String ns = namespaceBox.getValue();
+        contentTitle.setText("Health · " + safeNamespace());
+        healthSummary.setText("Scanning…");
+        status("Running health scan…");
+        runAsync(() -> service.healthCheck(ctx.name(), ns), findings -> {
+            healthTable.setItems(FXCollections.observableArrayList(findings));
+            long crit = findings.stream().filter(h -> h.severity() == HealthSeverity.CRITICAL).count();
+            long warn = findings.size() - crit;
+            if (findings.isEmpty()) {
+                healthSummary.setText("No issues found ✓");
+            } else {
+                healthSummary.setText(crit + " critical · " + warn + " warning" + (warn == 1 ? "" : "s"));
+            }
+            status("Health scan complete — " + findings.size() + " finding(s). Double-click to inspect, "
+                    + "right-click to act.");
         });
     }
 
@@ -1611,13 +1746,17 @@ public class MainView extends BorderPane {
         };
     }
 
-    /** Right-click menu for a topology node — reuses the same (kind, name) handlers as the table. */
+    /** Right-click menu for a topology node — reuses the shared (kind, name) menu builder. */
     private ContextMenu buildTopoNodeMenu(TopoNode node) {
         ResourceKind kind = kindOf(node.kind());
         if (kind == null) {
             return null;
         }
-        String name = node.name();
+        return buildResourceMenu(kind, node.name());
+    }
+
+    /** A view/act context menu for any resource, keyed by (kind, name) — shared everywhere. */
+    private ContextMenu buildResourceMenu(ResourceKind kind, String name) {
         ContextMenu menu = new ContextMenu();
 
         MenuItem details = new MenuItem("View details");

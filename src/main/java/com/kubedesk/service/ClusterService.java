@@ -1,6 +1,7 @@
 package com.kubedesk.service;
 
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.Dtos.TopologyData;
@@ -39,6 +40,13 @@ public interface ClusterService {
      * backends and label selectors.
      */
     TopologyData getTopology(String context, String namespace);
+
+    /**
+     * Scan a namespace (plus cluster Nodes) for resources failing common health checks —
+     * CrashLoop/ImagePull/OOM/Evicted pods, unavailable workloads, unbound PVCs, orphaned
+     * Services, unhealthy Nodes, etc. Findings are ordered most-severe first.
+     */
+    List<HealthFinding> healthCheck(String context, String namespace);
 
     /**
      * Fetch a single resource and render its full manifest as YAML (for the details panel).

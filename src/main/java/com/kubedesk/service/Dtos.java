@@ -40,4 +40,14 @@ public final class Dtos {
     /** The full namespace topology: nodes plus the edges connecting them. */
     public record TopologyData(List<TopoNode> nodes, List<TopoEdge> edges) {
     }
+
+    /** Severity of a health finding. */
+    public enum HealthSeverity {
+        CRITICAL, WARNING
+    }
+
+    /** A single health-scan finding: a resource failing a common check. */
+    public record HealthFinding(HealthSeverity severity, ResourceKind kind, String name,
+                                String check, String detail) {
+    }
 }

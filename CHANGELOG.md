@@ -3,6 +3,17 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Health scan** (sidebar → VIEWS → Health): a one-screen "what's wrong right now" — scans the
+  current namespace (plus cluster Nodes) for resources failing common checks: CrashLoop /
+  ImagePull / OOM / Evicted / unschedulable / high-restart pods, BestEffort (eviction-prone) pods,
+  Deployments/StatefulSets/DaemonSets with replicas unavailable, failed Jobs, unbound PVCs,
+  orphaned Services (selector matches no ready pods), and unhealthy / cordoned / pressured Nodes.
+  Findings are ranked most-severe first with a plain-English reason; double-click a finding to
+  inspect it, right-click to act (restart/scale/delete). One "Rescan" button, all over the API.
+
 ## [1.1.0] - 2026-07-02
 
 ### Added

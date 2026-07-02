@@ -1,6 +1,8 @@
 package com.kubedesk.service;
 
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.HealthFinding;
+import com.kubedesk.service.Dtos.HealthSeverity;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.Dtos.TopoEdge;
@@ -832,6 +834,190 @@ public class Fabric8ClusterService implements ClusterService {
             return new TopologyData(nodes, edges);
         } catch (Exception e) {
             throw new ClusterException("Could not build topology: " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public List<HealthFinding> healthCheck(String context, String namespace) {
+        try (KubernetesClient client = clientFor(context)) {
+            List<HealthFinding> f = new ArrayList<>();
+
+            for (Pod p : client.pods().inNamespace(namespace).list().getItems()) {
+                checkPod(p, f);
+            }
+            for (Deployment d : client.apps().deployments().inNamespace(namespace).list().getItems()) {
+                checkReplicas(f, ResourceKind.DEPLOYMENTS, d.getMetadata().getName(),
+                        d.getStatus() != null ? d.getStatus().getReadyReplicas() : null,
+                        d.getSpec() != null ? d.getSpec().getReplicas() : null);
+            }
+            for (StatefulSet s : client.apps().statefulSets().inNamespace(namespace).list().getItems()) {
+                checkReplicas(f, ResourceKind.STATEFULSETS, s.getMetadata().getName(),
+                        s.getStatus() != null ? s.getStatus().getReadyReplicas() : null,
+                        s.getSpec() != null ? s.getSpec().getReplicas() : null);
+            }
+            for (DaemonSet ds : client.apps().daemonSets().inNamespace(namespace).list().getItems()) {
+                checkReplicas(f, ResourceKind.DAEMONSETS, ds.getMetadata().getName(),
+                        ds.getStatus() != null ? ds.getStatus().getNumberReady() : null,
+                        ds.getStatus() != null ? ds.getStatus().getDesiredNumberScheduled() : null);
+            }
+            for (Job j : client.batch().v1().jobs().inNamespace(namespace).list().getItems()) {
+                if ("Failed".equals(jobStatus(j))) {
+                    f.add(new HealthFinding(HealthSeverity.CRITICAL, ResourceKind.JOBS,
+                            j.getMetadata().getName(), "Failed", "Job did not complete successfully"));
+                }
+            }
+            for (PersistentVolumeClaim pvc : client.persistentVolumeClaims().inNamespace(namespace)
+                    .list().getItems()) {
+                String phase = pvc.getStatus() != null ? pvc.getStatus().getPhase() : null;
+                if (phase != null && !"Bound".equals(phase)) {
+                    HealthSeverity sev = "Lost".equals(phase) ? HealthSeverity.CRITICAL : HealthSeverity.WARNING;
+                    f.add(new HealthFinding(sev, ResourceKind.PVCS, pvc.getMetadata().getName(),
+                            phase, "PersistentVolumeClaim is not Bound"));
+                }
+            }
+            checkOrphanServices(client, namespace, f);
+            checkNodes(client, f);
+
+            // Most severe first, then by kind and name for stability.
+            f.sort(Comparator.comparingInt((HealthFinding h) ->
+                            h.severity() == HealthSeverity.CRITICAL ? 0 : 1)
+                    .thenComparing(h -> h.kind().label())
+                    .thenComparing(HealthFinding::name));
+            return f;
+        } catch (Exception e) {
+            throw new ClusterException("Health scan failed: " + rootMessage(e), e);
+        }
+    }
+
+    private static final java.util.Set<String> BAD_WAITING = java.util.Set.of(
+            "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull",
+            "InvalidImageName", "CreateContainerConfigError", "CreateContainerError", "RunContainerError");
+
+    private void checkPod(Pod p, List<HealthFinding> f) {
+        var meta = p.getMetadata();
+        var st = p.getStatus();
+        String name = meta.getName();
+        if (meta.getDeletionTimestamp() != null) {
+            return; // terminating — don't flag
+        }
+        if (st != null && "Evicted".equals(st.getReason())) {
+            f.add(new HealthFinding(HealthSeverity.CRITICAL, ResourceKind.PODS, name, "Evicted",
+                    nz(st.getMessage())));
+            return;
+        }
+        if (st != null && st.getContainerStatuses() != null) {
+            for (ContainerStatus cs : st.getContainerStatuses()) {
+                if (cs.getState() != null && cs.getState().getWaiting() != null) {
+                    String r = cs.getState().getWaiting().getReason();
+                    if (r != null && BAD_WAITING.contains(r)) {
+                        f.add(new HealthFinding(HealthSeverity.CRITICAL, ResourceKind.PODS, name, r,
+                                cs.getName() + ": " + nz(cs.getState().getWaiting().getMessage())));
+                        return;
+                    }
+                }
+            }
+        }
+        String phase = st != null ? st.getPhase() : null;
+        if ("Pending".equals(phase)) {
+            String unsched = podScheduledFalse(p);
+            if (unsched != null) {
+                f.add(new HealthFinding(HealthSeverity.CRITICAL, ResourceKind.PODS, name,
+                        "Unschedulable", unsched));
+            } else {
+                f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.PODS, name,
+                        "Pending", "Not running yet"));
+            }
+            return;
+        }
+        if ("Failed".equals(phase)) {
+            f.add(new HealthFinding(HealthSeverity.CRITICAL, ResourceKind.PODS, name, "Failed",
+                    nz(st.getReason())));
+            return;
+        }
+        int restarts = 0;
+        if (st != null && st.getContainerStatuses() != null) {
+            for (ContainerStatus cs : st.getContainerStatuses()) {
+                if (cs.getRestartCount() != null) {
+                    restarts += cs.getRestartCount();
+                }
+            }
+        }
+        if (restarts >= 5) {
+            f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.PODS, name,
+                    "High restarts", restarts + " restarts"));
+        }
+        if (st != null && "BestEffort".equals(st.getQosClass())) {
+            f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.PODS, name, "BestEffort QoS",
+                    "No requests/limits set — first to be evicted under node pressure"));
+        }
+    }
+
+    /** If the pod can't be scheduled, return the reason/message; else null. */
+    private String podScheduledFalse(Pod p) {
+        if (p.getStatus() == null || p.getStatus().getConditions() == null) {
+            return null;
+        }
+        for (var c : p.getStatus().getConditions()) {
+            if ("PodScheduled".equals(c.getType()) && "False".equals(c.getStatus())) {
+                return c.getMessage() != null ? c.getMessage() : nz(c.getReason());
+            }
+        }
+        return null;
+    }
+
+    private void checkReplicas(List<HealthFinding> f, ResourceKind kind, String name,
+                               Integer ready, Integer desired) {
+        int r = ready != null ? ready : 0;
+        int d = desired != null ? desired : 0;
+        if (d > 0 && r == 0) {
+            f.add(new HealthFinding(HealthSeverity.CRITICAL, kind, name, "0/" + d + " available",
+                    "No replicas are ready"));
+        } else if (r < d) {
+            f.add(new HealthFinding(HealthSeverity.WARNING, kind, name, r + "/" + d + " available",
+                    (d - r) + " replica(s) not ready"));
+        }
+    }
+
+    private void checkOrphanServices(KubernetesClient client, String namespace, List<HealthFinding> f) {
+        for (Service s : client.services().inNamespace(namespace).list().getItems()) {
+            var spec = s.getSpec();
+            if (spec == null || "ExternalName".equals(spec.getType())) {
+                continue;
+            }
+            if (spec.getSelector() == null || spec.getSelector().isEmpty()) {
+                continue; // headless / manually-managed endpoints
+            }
+            String name = s.getMetadata().getName();
+            var ep = client.endpoints().inNamespace(namespace).withName(name).get();
+            boolean hasAddresses = ep != null && ep.getSubsets() != null && ep.getSubsets().stream()
+                    .anyMatch(sub -> sub.getAddresses() != null && !sub.getAddresses().isEmpty());
+            if (!hasAddresses) {
+                f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.SERVICES, name,
+                        "No endpoints", "Selector matches no ready pods"));
+            }
+        }
+    }
+
+    private void checkNodes(KubernetesClient client, List<HealthFinding> f) {
+        for (Node n : client.nodes().list().getItems()) {
+            String name = n.getMetadata().getName();
+            if (n.getSpec() != null && Boolean.TRUE.equals(n.getSpec().getUnschedulable())) {
+                f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.NODES, name,
+                        "Cordoned", "Node is marked unschedulable"));
+            }
+            if (n.getStatus() == null || n.getStatus().getConditions() == null) {
+                continue;
+            }
+            for (NodeCondition c : n.getStatus().getConditions()) {
+                if ("Ready".equals(c.getType()) && !"True".equals(c.getStatus())) {
+                    f.add(new HealthFinding(HealthSeverity.CRITICAL, ResourceKind.NODES, name,
+                            "NotReady", nz(c.getMessage())));
+                } else if (("MemoryPressure".equals(c.getType()) || "DiskPressure".equals(c.getType())
+                        || "PIDPressure".equals(c.getType())) && "True".equals(c.getStatus())) {
+                    f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.NODES, name,
+                            c.getType(), nz(c.getMessage())));
+                }
+            }
         }
     }
 
