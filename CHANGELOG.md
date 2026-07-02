@@ -3,7 +3,7 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] - 2026-07-02
 
 ### Added
 - **YAML linting on the Create / Apply screen**: a live client-side syntax check (with line/column)
