@@ -28,6 +28,9 @@ jobs:
           - os: windows-latest
             type: msi
             pattern: dist/*.msi
+          - os: windows-latest
+            type: app-image          # portable zip (no installer, runs on a locked-down VDI)
+            pattern: dist/*.zip
           - os: macos-latest
             type: dmg
             pattern: dist/*.dmg
@@ -64,7 +67,7 @@ jobs:
       # --- platform-specific packaging prerequisites ---
 
       - name: Install WiX (Windows, for .msi)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.type == 'msi'
         shell: pwsh
         run: |
           choco install wixtoolset --no-progress -y
@@ -81,7 +84,7 @@ jobs:
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/package.ps1 -Type ${{ matrix.type }} -AppVersion "$env:APP_VERSION"
+        run: ./scripts/package.ps1 -Type ${{ matrix.type }} -AppVersion "$env:APP_VERSION" ${{ matrix.type == 'app-image' && '-Zip' || '' }}
 
       - name: Package (macOS / Linux)
         if: runner.os != 'Windows'

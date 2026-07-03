@@ -10,12 +10,16 @@
 
 .EXAMPLE
     ./scripts/package.ps1                 # app-image  -> dist\KubeDesk\KubeDesk.exe
+    ./scripts/package.ps1 -Zip            # portable    -> dist\KubeDesk-<ver>-windows-portable.zip
     ./scripts/package.ps1 -Type msi       # installer  -> dist\KubeDesk-<ver>.msi
 #>
 param(
     [ValidateSet("app-image", "msi", "exe")]
     [string]$Type = "app-image",
-    [string]$AppVersion = "0.1.0"
+    [string]$AppVersion = "0.1.0",
+    # With an app-image build, also produce a portable .zip (no install, no admin, bundles its own
+    # JRE) — handy for locked-down machines (e.g. a VDI) where you can't run an installer.
+    [switch]$Zip
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +62,19 @@ if ($Type -ne "app-image") {
 Write-Host "==> Running jpackage ($Type)..." -ForegroundColor Cyan
 & $jpackage @jpArgs
 if ($LASTEXITCODE -ne 0) { throw "jpackage failed (for msi/exe make sure WiX v3 is on PATH)." }
+
+# Portable zip: bundle the self-contained app-image folder so it can be unzipped and run anywhere
+# (no installer, no admin rights, no Java on the target machine).
+if ($Zip) {
+    if ($Type -ne "app-image") {
+        Write-Warning "-Zip only applies to an app-image build; skipping (Type is $Type)."
+    } else {
+        $zipPath = "dist\KubeDesk-$AppVersion-windows-portable.zip"
+        Write-Host "==> Zipping portable app-image -> $zipPath" -ForegroundColor Cyan
+        Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
+        Compress-Archive -Path "dist\KubeDesk" -DestinationPath $zipPath
+    }
+}
 
 Write-Host "==> Done. Output in dist\" -ForegroundColor Green
 Get-ChildItem dist | Select-Object Name, Length

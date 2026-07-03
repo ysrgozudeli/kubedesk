@@ -106,9 +106,13 @@ There are convenience scripts: **`scripts/package.ps1`** (Windows) and **`script
 # 1) Self-contained app folder — no extra tooling. -> dist\KubeDesk\KubeDesk.exe
 ./scripts/package.ps1
 
+# 1b) Portable zip — no installer, no admin, no Java. Unzip and run KubeDesk.exe.
+#     Ideal for locked-down machines (e.g. a VDI) where you can't run an installer.
+./scripts/package.ps1 -Zip          # -> dist\KubeDesk-1.2.2-windows-portable.zip
+
 # 2) Installer (.exe or .msi) — requires the WiX Toolset v3 on PATH.
-./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-1.2.0.exe
-./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-1.2.0.msi
+./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-1.2.2.exe
+./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-1.2.2.msi
 ```
 
 Installers (`exe`/`msi`) need the **[WiX Toolset v3](https://wixtoolset.org/)** on the `PATH`
@@ -168,11 +172,16 @@ Drop a platform icon and the scripts pick it up automatically:
 A GitHub Actions workflow (`.github/workflows/release.yml`) builds the native installers for all
 three platforms on their own runners (jpackage can't cross-compile):
 
-| Platform | Artifact            |
-|----------|---------------------|
-| Windows  | `.msi` (WiX)        |
-| macOS    | `.dmg`              |
-| Linux    | `.deb` and `.rpm`   |
+| Platform | Artifact                              |
+|----------|---------------------------------------|
+| Windows  | `.msi` (WiX) **+ portable `.zip`**     |
+| macOS    | `.dmg`                                 |
+| Linux    | `.deb` and `.rpm`                      |
+
+> The Windows **portable zip** (`KubeDesk-<version>-windows-portable.zip`) needs no installer, no
+> admin rights, and no Java — unzip it and run `KubeDesk.exe`. Handy for locked-down environments
+> (e.g. a VDI). Note: strict endpoint policies (AppLocker/WDAC, SmartScreen) can still block unsigned
+> executables — test it in your environment.
 
 **Cut a release:**
 

@@ -3,6 +3,15 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] - 2026-07-03
+
+### Added
+- **Portable Windows build (no installer)** — a `KubeDesk-<version>-windows-portable.zip` is now
+  published with each release. Unzip it and run `KubeDesk.exe`: no installer, no admin rights, and no
+  Java needed (it bundles its own runtime). Ideal for locked-down environments such as a VDI where you
+  can't run an `.msi`. The packaging script gained a `-Zip` switch (`./scripts/package.ps1 -Zip`) to
+  produce the same zip locally.
+
 ## [1.2.1] - 2026-07-02
 
 ### Added
