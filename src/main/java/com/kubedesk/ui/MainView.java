@@ -34,6 +34,7 @@ import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.Tab;
@@ -373,7 +374,7 @@ public class MainView extends BorderPane {
 
     // --- sidebar ----------------------------------------------------------------------------
 
-    private VBox buildSidebar() {
+    private Region buildSidebar() {
         VBox nav = new VBox(4);
         nav.getStyleClass().add("sidebar");
         nav.setPadding(new Insets(16, 8, 16, 8));
@@ -429,17 +430,29 @@ public class MainView extends BorderPane {
         });
         nav.getChildren().add(topologyToggle);
 
-        // Pin the global "+ Create" action to the bottom of the sidebar (it applies any kind).
-        Region grow = new Region();
-        VBox.setVgrow(grow, Priority.ALWAYS);
+        // Make the nav scrollable so a short window (e.g. a small VDI screen) shrinks/scrolls the
+        // list instead of forcing the whole layout taller than the screen and hiding the status bar.
+        ScrollPane scroll = new ScrollPane(nav);
+        scroll.getStyleClass().add("sidebar-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        scroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        scroll.setMinHeight(0);
+        VBox.setVgrow(scroll, Priority.ALWAYS);
+
+        // Pin the global "+ Create" action to the bottom, outside the scroll area (it applies any kind).
         Button createBtn = new Button("+ Create");
         createBtn.getStyleClass().add("accent-button");
         createBtn.setMaxWidth(Double.MAX_VALUE);
         createBtn.setOnAction(e -> openCreateDialog());
         VBox createBox = new VBox(createBtn);
-        createBox.setPadding(new Insets(10, 4, 0, 4));
-        nav.getChildren().addAll(grow, createBox);
-        return nav;
+        createBox.setPadding(new Insets(10, 12, 12, 12));
+
+        VBox left = new VBox(scroll, createBox);
+        left.getStyleClass().add("sidebar-container");
+        left.setMinHeight(0);
+        left.setMinWidth(190);
+        return left;
     }
 
     // --- center content ---------------------------------------------------------------------

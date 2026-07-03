@@ -70,10 +70,24 @@
 }
 
 /* ---- sidebar ---- */
-.sidebar {
+/* The left column: white with a divider on the right. Holds the scrollable nav + pinned actions. */
+.sidebar-container {
     -fx-background-color: white;
     -fx-border-color: transparent #e3e6ea transparent transparent;
     -fx-border-width: 0 1 0 0;
+}
+
+.sidebar {
+    -fx-background-color: transparent;
+}
+
+/* Keep the scroll wrapper invisible so the nav looks exactly like a plain column. */
+.sidebar-scroll,
+.sidebar-scroll > .viewport {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+    -fx-border-color: transparent;
+    -fx-padding: 0;
 }
 
 .nav-section {
