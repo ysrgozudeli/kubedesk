@@ -3,6 +3,20 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.3] - 2026-07-03
+
+### Fixed
+- **Works with namespace-scoped tokens** (common on AKS and other managed clusters). Listing
+  namespaces cluster-wide is often forbidden for such tokens; KubeDesk no longer fails the whole load
+  when that happens — it falls back to the namespace declared in your kubeconfig context so resources
+  still load. The **namespace box is now editable**, so you can type a namespace even when they can't
+  be enumerated.
+- **Window fits the screen.** On smaller displays (e.g. a 1366×768 VDI) the window could open taller
+  than the screen, hiding the bottom status bar until you maximized. It now sizes itself to the
+  screen's work area and centers on-screen.
+- **Status bar stays visible** when the window is short (the content area shrinks instead of pushing
+  it off-screen), and **errors now render in red/bold** so a failed load can't be silently missed.
+
 ## [1.2.2] - 2026-07-03
 
 ### Added
