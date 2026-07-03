@@ -298,12 +298,18 @@
 
 /* ---- status bar ---- */
 .status-bar {
-    -fx-background-color: white;
-    -fx-border-color: #e3e6ea transparent transparent transparent;
+    -fx-background-color: #f8f9fa;
+    -fx-border-color: #d7dbe0 transparent transparent transparent;
     -fx-border-width: 1 0 0 0;
 }
 
 .status-bar .label {
-    -fx-text-fill: #6b7280;
-    -fx-font-size: 12px;
+    -fx-text-fill: #4b5563;
+    -fx-font-size: 12.5px;
+}
+
+/* Errors: red + bold so a failed load can't be missed. */
+.status-bar .label:error {
+    -fx-text-fill: #c0392b;
+    -fx-font-weight: bold;
 }

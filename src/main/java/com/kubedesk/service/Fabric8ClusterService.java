@@ -32,6 +32,7 @@ import io.fabric8.kubernetes.api.model.networking.v1.IngressRule;
 import io.fabric8.kubernetes.client.Config;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
+import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.LocalPortForward;
 import io.fabric8.kubernetes.client.dsl.ExecListener;
 import io.fabric8.kubernetes.client.dsl.ExecWatch;
@@ -138,6 +139,14 @@ public class Fabric8ClusterService implements ClusterService {
                     .map(m -> m.getName())
                     .sorted()
                     .collect(Collectors.toList());
+        } catch (KubernetesClientException e) {
+            // A namespace-scoped token (common on AKS and other managed clusters) is often forbidden
+            // from listing namespaces cluster-wide. Don't fail the whole load — return an empty list
+            // and let the UI fall back to the namespace declared in the kubeconfig context.
+            if (e.getCode() == 403 || e.getCode() == 401) {
+                return List.of();
+            }
+            throw new ClusterException("Could not list namespaces: " + rootMessage(e), e);
         } catch (Exception e) {
             throw new ClusterException("Could not list namespaces: " + rootMessage(e), e);
         }

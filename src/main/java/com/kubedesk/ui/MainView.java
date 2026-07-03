@@ -19,6 +19,7 @@ import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
 import javafx.collections.FXCollections;
 import javafx.concurrent.Task;
+import javafx.css.PseudoClass;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.util.Duration;
@@ -104,6 +105,7 @@ public class MainView extends BorderPane {
     private final HBox healthRing = new HBox();
     private final Label contentTitle = new Label("Pods");
     private final Label statusBar = new Label("Ready.");
+    private static final PseudoClass ERROR_PSEUDO = PseudoClass.getPseudoClass("error");
 
     // Extra views (topology, health) live in the same center area as the resource table.
     private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH }
@@ -303,6 +305,9 @@ public class MainView extends BorderPane {
 
         namespaceBox.setPromptText("Namespace");
         namespaceBox.setMinWidth(180);
+        // Editable so you can type a namespace even when the token can't enumerate them (e.g. a
+        // namespace-scoped token on AKS, where listing namespaces cluster-wide is forbidden).
+        namespaceBox.setEditable(true);
         namespaceBox.setOnAction(e -> onSelectionChanged());
 
         searchField.setPromptText("Search…");
@@ -1502,14 +1507,21 @@ public class MainView extends BorderPane {
         runAsync(() -> service.listNamespaces(context.name()), namespaces -> {
             String chosen;
             if (context.name().equals(settings.lastContext) && settings.lastNamespace != null
-                    && namespaces.contains(settings.lastNamespace)) {
+                    && (namespaces.isEmpty() || namespaces.contains(settings.lastNamespace))) {
                 chosen = settings.lastNamespace;
             } else if (namespaces.contains(context.namespace())) {
                 chosen = context.namespace();
+            } else if (namespaces.isEmpty()) {
+                // Couldn't enumerate namespaces (e.g. a namespace-scoped token). Trust the namespace
+                // from the kubeconfig context so resources still load; the box is editable if you
+                // need a different one.
+                chosen = context.namespace();
+                status("Couldn't list namespaces (token may be namespace-scoped) — using \"" + chosen
+                        + "\" from your kube.conf. You can type another namespace in the box.");
             } else if (namespaces.contains("default")) {
                 chosen = "default";
             } else {
-                chosen = namespaces.isEmpty() ? null : namespaces.get(0);
+                chosen = namespaces.get(0);
             }
             // Populate with the handler detached, then trigger a single reload + watch.
             namespaceBox.setOnAction(null);
@@ -2123,7 +2135,7 @@ public class MainView extends BorderPane {
         task.setOnSucceeded(e -> onSuccess.accept(task.getValue()));
         task.setOnFailed(e -> {
             Throwable ex = task.getException();
-            status("Error: " + (ex != null ? ex.getMessage() : "unknown"));
+            statusError("Error: " + (ex != null ? ex.getMessage() : "unknown"));
         });
         pool.submit(task);
     }
@@ -2139,16 +2151,29 @@ public class MainView extends BorderPane {
         task.setOnSucceeded(e -> onSuccess.run());
         task.setOnFailed(e -> {
             Throwable ex = task.getException();
-            status("Error: " + (ex != null ? ex.getMessage() : "unknown"));
+            statusError("Error: " + (ex != null ? ex.getMessage() : "unknown"));
         });
         pool.submit(task);
     }
 
     private void status(String message) {
-        if (Platform.isFxApplicationThread()) {
+        setStatus(message, false);
+    }
+
+    /** Show an error in the status bar, rendered prominently (red, bold) so it isn't missed. */
+    private void statusError(String message) {
+        setStatus(message, true);
+    }
+
+    private void setStatus(String message, boolean error) {
+        Runnable apply = () -> {
             statusBar.setText(message);
+            statusBar.pseudoClassStateChanged(ERROR_PSEUDO, error);
+        };
+        if (Platform.isFxApplicationThread()) {
+            apply.run();
         } else {
-            Platform.runLater(() -> statusBar.setText(message));
+            Platform.runLater(apply);
         }
     }
 
