@@ -3,6 +3,13 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.4] - 2026-07-03
+
+### Fixed
+- **Status bar stays visible on small screens.** The sidebar's nav list is now scrollable, so a short
+  window (e.g. a small VDI display) shrinks/scrolls the list instead of forcing the whole layout taller
+  than the screen and pushing the bottom status bar off-screen. "+ Create" stays pinned at the bottom.
+
 ## [1.2.3] - 2026-07-03
 
 ### Fixed
