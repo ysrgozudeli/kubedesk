@@ -181,6 +181,9 @@ public class MainView extends BorderPane {
         applyColumnDefaults();
         buildDetails(); // builds detailsPane (added to the split only when shown)
         centerSplit.getItems().setAll(buildContent());
+        // Let the center collapse fully so the bottom status bar is never pushed off-screen when the
+        // window is short — the table area shrinks instead of the status bar disappearing.
+        centerSplit.setMinHeight(0);
         setTop(buildTopBar());
         setLeft(buildSidebar());
         setCenter(centerSplit);
