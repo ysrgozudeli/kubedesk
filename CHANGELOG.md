@@ -3,6 +3,19 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.6] - 2026-07-04
+
+### Added
+- **Auto-update.** On startup KubeDesk checks GitHub for a newer release and, if one exists, shows a
+  dismissible banner under the toolbar. **Update now** downloads the installer for your OS (with a
+  progress dialog) and launches it — a one-click upgrade. The check is async (never blocks startup),
+  fails silently when offline, remembers a version you dismiss, and can be turned off with
+  `updateCheckEnabled: false` in `~/.kubedesk/prefs.json`.
+  (Note: the installers aren't code-signed yet, so Windows may still show an "unknown publisher"
+  prompt during the update — that's expected.)
+- **App menu (☰) + About dialog.** A new menu at the right of the toolbar with **Check for updates…**
+  (manual re-check with feedback) and **About KubeDesk** (version, links, license).
+
 ## [1.2.5] - 2026-07-04
 
 ### Added

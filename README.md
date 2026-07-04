@@ -64,6 +64,13 @@ alternative to Lens.
 - Persisted across restarts (`~/.kubedesk/prefs.json`): custom kube.conf path, last context and
   namespace, hidden table columns, and active port-forwards.
 
+### Updates
+- **Auto-update**: on startup KubeDesk checks GitHub for a newer release and offers a one-click
+  in-app update (downloads and launches the installer for your OS). Also reachable manually via the
+  **☰** menu → *Check for updates*. Disable it with `updateCheckEnabled: false` in
+  `~/.kubedesk/prefs.json`. (Installers are unsigned, so Windows may show an "unknown publisher"
+  prompt.)
+
 ## Architecture
 
 The UI never touches fabric8 directly. Everything goes through the `ClusterService` interface, so a
