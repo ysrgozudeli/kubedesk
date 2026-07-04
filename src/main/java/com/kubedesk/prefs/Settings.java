@@ -24,6 +24,12 @@ public class Settings {
     /** Whether first-run column defaults (e.g. hide verbose pod columns) have been seeded. */
     public boolean columnDefaultsApplied = false;
 
+    /** Check GitHub for a newer release on startup. Set false in prefs.json to disable. */
+    public boolean updateCheckEnabled = true;
+
+    /** A version the user chose to skip; the update banner won't reappear for it. */
+    public String skippedVersion;
+
     /** Port-forwards active at last exit, offered for restore on launch. */
     public List<PortForwardPref> portForwards = new ArrayList<>();
 

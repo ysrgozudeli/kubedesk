@@ -55,8 +55,11 @@ $icon = "src\main\resources\icons\kubedesk.ico"
 if (Test-Path $icon) { $jpArgs += @("--icon", $icon) }
 
 # Installer-only niceties: Start-menu entry, desktop shortcut, install-dir chooser.
+# A FIXED upgrade UUID is essential: it lets each new .msi UPGRADE the previous install (replacing it)
+# instead of installing side-by-side — which is what makes in-app auto-update actually work.
 if ($Type -ne "app-image") {
-    $jpArgs += @("--win-shortcut", "--win-menu", "--win-dir-chooser", "--win-per-user-install")
+    $jpArgs += @("--win-shortcut", "--win-menu", "--win-dir-chooser", "--win-per-user-install",
+                 "--win-upgrade-uuid", "8b3f6d2a-1c4e-4a9b-9f7d-2e5a6c8b1d40")
 }
 
 Write-Host "==> Running jpackage ($Type)..." -ForegroundColor Cyan

@@ -9,6 +9,7 @@ import com.kubedesk.service.Dtos.HealthSeverity;
 import com.kubedesk.service.Dtos.TopoNode;
 import com.kubedesk.prefs.Settings;
 import com.kubedesk.prefs.SettingsStore;
+import com.kubedesk.update.UpdateService;
 import com.kubedesk.util.YamlLint;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
@@ -31,9 +32,11 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Dialog;
+import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.ProgressBar;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
@@ -59,13 +62,17 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 import javafx.scene.shape.Circle;
 import javafx.stage.FileChooser;
+import javafx.stage.Modality;
 
 import java.awt.Desktop;
 import java.io.File;
 import java.net.URI;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -76,6 +83,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Future;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.Consumer;
@@ -167,6 +175,10 @@ public class MainView extends BorderPane {
     // Bulk cleanup of terminal pods (shown only on the Pods view).
     private final MenuButton cleanupButton = new MenuButton("🧹 Clean up");
 
+    // Auto-update: checks GitHub on startup and offers a one-click installer download.
+    private final UpdateService updateService = new UpdateService();
+    private final HBox updateBanner = new HBox(12);
+
     // Live updates
     private final Label liveLabel = new Label("● Live");
     private final Button pauseButton = new Button("⏸");
@@ -188,10 +200,13 @@ public class MainView extends BorderPane {
         // Let the center collapse fully so the bottom status bar is never pushed off-screen when the
         // window is short — the table area shrinks instead of the status bar disappearing.
         centerSplit.setMinHeight(0);
-        setTop(buildTopBar());
         setLeft(buildSidebar());
         setCenter(centerSplit);
         setBottom(buildStatusBar());
+
+        // Toolbar with the update banner stacked just under it (hidden until an update is found).
+        configureUpdateBanner();
+        setTop(new VBox(buildTopBar(), updateBanner));
     }
 
     /** Kick off the first load once the scene is shown. */
@@ -200,6 +215,210 @@ public class MainView extends BorderPane {
         autoRefreshPause.setOnFinished(e -> refreshContent());
         applySavedKubeConfig();
         loadContexts();
+        checkForUpdates(false);
+    }
+
+    // --- auto-update ------------------------------------------------------------------------
+
+    private void configureUpdateBanner() {
+        updateBanner.getStyleClass().add("update-banner");
+        updateBanner.setAlignment(Pos.CENTER_LEFT);
+        updateBanner.setPadding(new Insets(8, 16, 8, 16));
+        updateBanner.setVisible(false);
+        updateBanner.setManaged(false);
+    }
+
+    /**
+     * Ask GitHub (async) whether a newer release exists; show the banner if so. When
+     * {@code userInitiated} is true (the "Check for updates" menu), give feedback either way and
+     * ignore a previously-skipped version; the silent startup check does neither.
+     */
+    private void checkForUpdates(boolean userInitiated) {
+        if (!userInitiated && !settings.updateCheckEnabled) {
+            return;
+        }
+        if (userInitiated) {
+            status("Checking for updates…");
+        }
+        pool.submit(() -> {
+            Optional<UpdateService.ReleaseInfo> latest = updateService.latestRelease();
+            Platform.runLater(() -> {
+                if (latest.isEmpty()) {
+                    if (userInitiated) {
+                        statusError("Couldn't check for updates (offline or rate-limited).");
+                    }
+                    return;
+                }
+                UpdateService.ReleaseInfo r = latest.get();
+                boolean newer = UpdateService.isNewer(r.version(), UpdateService.currentVersion());
+                if (newer && (userInitiated || !r.version().equals(settings.skippedVersion))) {
+                    showUpdateBanner(r);
+                } else if (userInitiated) {
+                    status("You're on the latest version (" + UpdateService.currentVersion() + ").");
+                }
+            });
+        });
+    }
+
+    private void showAboutDialog() {
+        Dialog<Void> dlg = new Dialog<>();
+        dlg.setTitle("About KubeDesk");
+        dlg.setHeaderText("KubeDesk " + UpdateService.currentVersion());
+
+        try (var in = getClass().getResourceAsStream("/icons/kubedesk.png")) {
+            if (in != null) {
+                ImageView icon = new ImageView(new Image(in));
+                icon.setFitWidth(48);
+                icon.setFitHeight(48);
+                dlg.setGraphic(icon);
+            }
+        } catch (Exception ignore) {
+            // no icon — not important
+        }
+
+        Label desc = new Label("A lightweight, cross-platform desktop client for managing "
+                + "Kubernetes clusters — talks directly to the API server, no kubectl required.");
+        desc.setWrapText(true);
+        desc.setMaxWidth(360);
+
+        Hyperlink repo = new Hyperlink("github.com/ysrgozudeli/kubedesk");
+        repo.setOnAction(e -> openInBrowser("https://github.com/ysrgozudeli/kubedesk"));
+
+        Label license = new Label("MIT License © Yasar Gozudeli");
+        license.getStyleClass().add("muted");
+
+        VBox box = new VBox(8, desc, repo, license);
+        box.setPadding(new Insets(12, 4, 4, 4));
+        dlg.getDialogPane().setContent(box);
+        dlg.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        if (getScene() != null) {
+            dlg.initOwner(getScene().getWindow());
+        }
+        dlg.showAndWait();
+    }
+
+    private void showUpdateBanner(UpdateService.ReleaseInfo release) {
+        Label label = new Label("KubeDesk " + release.version() + " is available.");
+        label.getStyleClass().add("update-banner-text");
+
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+
+        Button notes = new Button("What's new");
+        notes.setOnAction(e -> openInBrowser(release.htmlUrl()));
+
+        Button update = new Button("Update now");
+        update.getStyleClass().add("accent-button");
+        update.setOnAction(e -> updateNow(release));
+
+        Button dismiss = new Button("Dismiss");
+        dismiss.setTooltip(new Tooltip("Don't show this version again"));
+        dismiss.setOnAction(e -> {
+            settings.skippedVersion = release.version();
+            saveSettings();
+            hideUpdateBanner();
+        });
+
+        updateBanner.getChildren().setAll(new Label("⬆"), label, spacer, notes, update, dismiss);
+        updateBanner.setVisible(true);
+        updateBanner.setManaged(true);
+    }
+
+    private void hideUpdateBanner() {
+        updateBanner.setVisible(false);
+        updateBanner.setManaged(false);
+    }
+
+    /** Download the OS-appropriate installer and, once done, offer to install it. */
+    private void updateNow(UpdateService.ReleaseInfo release) {
+        Optional<UpdateService.Asset> asset = updateService.installerForCurrentOs(release);
+        if (asset.isEmpty()) {
+            // No installer for this OS/build (e.g. a portable copy) — just open the download page.
+            openInBrowser(release.htmlUrl());
+            return;
+        }
+        UpdateService.Asset a = asset.get();
+
+        ProgressBar bar = new ProgressBar(0);
+        bar.setPrefWidth(340);
+        Label msg = new Label("Downloading " + a.name() + " …");
+        VBox box = new VBox(10, msg, bar);
+        box.setPadding(new Insets(16));
+
+        Dialog<Void> dlg = new Dialog<>();
+        dlg.setTitle("KubeDesk update");
+        dlg.setHeaderText("Getting KubeDesk " + release.version());
+        dlg.getDialogPane().setContent(box);
+        dlg.getDialogPane().getButtonTypes().add(ButtonType.CANCEL);
+        if (getScene() != null) {
+            dlg.initOwner(getScene().getWindow());
+        }
+        dlg.initModality(Modality.APPLICATION_MODAL);
+
+        final Future<?>[] holder = new Future<?>[1];
+        // Closing the dialog (Cancel) aborts the download.
+        dlg.setOnHidden(e -> {
+            if (holder[0] != null) {
+                holder[0].cancel(true);
+            }
+        });
+
+        holder[0] = pool.submit(() -> {
+            try {
+                Path file = updateService.download(a, frac -> Platform.runLater(() ->
+                        bar.setProgress(frac < 0 ? ProgressBar.INDETERMINATE_PROGRESS : frac)));
+                Platform.runLater(() -> {
+                    dlg.setResult(null);
+                    dlg.close();
+                    // Deferred so this runs after the dialog has fully closed (no nested modal loop).
+                    Platform.runLater(() -> offerToInstall(release, file));
+                });
+            } catch (InterruptedException cancelled) {
+                Platform.runLater(() -> status("Update download cancelled."));
+            } catch (Exception ex) {
+                Platform.runLater(() -> {
+                    dlg.setResult(null);
+                    dlg.close();
+                    statusError("Update download failed: " + ex.getMessage());
+                });
+            }
+        });
+
+        // show() (not showAndWait) — modal but non-blocking, so completing the download and then
+        // opening the install confirmation doesn't nest two event loops and freeze the UI.
+        dlg.show();
+    }
+
+    /** Confirm, then launch the installer and quit so it can replace the running app. */
+    private void offerToInstall(UpdateService.ReleaseInfo release, Path installer) {
+        boolean ok = confirm("Install KubeDesk " + release.version() + "?",
+                "The installer was downloaded to:\n" + installer + "\n\n"
+                        + "KubeDesk will close so the installer can replace it. "
+                        + "(It is not code-signed, so Windows may show an \"unknown publisher\" prompt "
+                        + "— that's expected; choose Run/Yes.)");
+        if (!ok) {
+            status("Update saved to " + installer + " — run it when you're ready.");
+            return;
+        }
+        try {
+            String os = System.getProperty("os.name", "").toLowerCase();
+            String name = installer.getFileName().toString().toLowerCase();
+            if (os.contains("win") && name.endsWith(".msi")) {
+                new ProcessBuilder("msiexec", "/i", installer.toString()).start();
+            } else if (Desktop.isDesktopSupported()
+                    && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
+                Desktop.getDesktop().open(installer.toFile());
+            } else {
+                new ProcessBuilder(os.contains("mac") ? "open" : "xdg-open",
+                        installer.toString()).start();
+            }
+            // Quit so the installer isn't blocked by files in use.
+            shutdown();
+            Platform.exit();
+            System.exit(0);
+        } catch (Exception e) {
+            statusError("Couldn't launch the installer: " + e.getMessage());
+        }
     }
 
     // --- preferences ------------------------------------------------------------------------
@@ -335,6 +554,15 @@ public class MainView extends BorderPane {
         cleanupButton.setVisible(false);
         cleanupButton.setManaged(false);
 
+        MenuButton appMenu = new MenuButton("☰");
+        appMenu.getStyleClass().add("icon-button");
+        appMenu.setTooltip(new Tooltip("Menu"));
+        MenuItem checkUpdates = new MenuItem("Check for updates…");
+        checkUpdates.setOnAction(e -> checkForUpdates(true));
+        MenuItem about = new MenuItem("About KubeDesk");
+        about.setOnAction(e -> showAboutDialog());
+        appMenu.getItems().setAll(checkUpdates, new SeparatorMenuItem(), about);
+
         liveLabel.getStyleClass().add("live-indicator");
         pauseButton.getStyleClass().add("live-toggle");
         pauseButton.setOnAction(e -> togglePause());
@@ -355,7 +583,7 @@ public class MainView extends BorderPane {
                 liveBox,
                 new Label("Context:"), contextBox,
                 new Label("Namespace:"), namespaceBox,
-                searchField, cleanupButton, refresh, pfButton);
+                searchField, cleanupButton, refresh, pfButton, appMenu);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(10, 16, 10, 16));
         bar.getStyleClass().add("top-bar");
