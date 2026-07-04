@@ -459,6 +459,29 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     @Override
+    public int cleanupPods(String context, String namespace, java.util.Set<String> phases, boolean dryRun) {
+        try (KubernetesClient client = clientFor(context)) {
+            int count = 0;
+            for (Pod p : client.pods().inNamespace(namespace).list().getItems()) {
+                String phase = p.getStatus() != null ? p.getStatus().getPhase() : null;
+                if (phase == null || !phases.contains(phase)) {
+                    continue;
+                }
+                if (p.getMetadata().getDeletionTimestamp() != null) {
+                    continue; // already being deleted
+                }
+                count++;
+                if (!dryRun) {
+                    client.pods().inNamespace(namespace).withName(p.getMetadata().getName()).delete();
+                }
+            }
+            return count;
+        } catch (Exception e) {
+            throw new ClusterException("Pod cleanup failed: " + rootMessage(e), e);
+        }
+    }
+
+    @Override
     public void restartDeployment(String context, String namespace, String name) {
         try (KubernetesClient client = clientFor(context)) {
             client.apps().deployments().inNamespace(namespace).withName(name).rolling().restart();

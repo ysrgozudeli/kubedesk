@@ -87,6 +87,15 @@ public interface ClusterService {
     /** Delete a resource. */
     void deleteResource(String context, String namespace, ResourceKind kind, String name);
 
+    /**
+     * Delete all pods in the namespace whose {@code status.phase} is in {@code phases} (e.g. "Failed"
+     * for evicted/errored pods, "Succeeded" for completed ones) — a bulk cleanup of terminal pod
+     * records. Never touches Running/Pending pods. When {@code dryRun} is true, nothing is deleted and
+     * the count of matching pods is returned (for a confirmation prompt); otherwise the number actually
+     * deleted is returned.
+     */
+    int cleanupPods(String context, String namespace, java.util.Set<String> phases, boolean dryRun);
+
     /** Trigger a rolling restart of a Deployment (à la {@code kubectl rollout restart}). */
     void restartDeployment(String context, String namespace, String name);
 

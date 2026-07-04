@@ -164,6 +164,9 @@ public class MainView extends BorderPane {
     private final List<PortForward> portForwards = new ArrayList<>();
     private final Button pfButton = new Button("Port-forwards");
 
+    // Bulk cleanup of terminal pods (shown only on the Pods view).
+    private final MenuButton cleanupButton = new MenuButton("🧹 Clean up");
+
     // Live updates
     private final Label liveLabel = new Label("● Live");
     private final Button pauseButton = new Button("⏸");
@@ -327,6 +330,11 @@ public class MainView extends BorderPane {
         pfButton.setVisible(false);
         pfButton.setManaged(false);
 
+        cleanupButton.getItems().setAll(buildCleanupMenuItems());
+        cleanupButton.setTooltip(new Tooltip("Delete terminal (evicted/failed/completed) pods"));
+        cleanupButton.setVisible(false);
+        cleanupButton.setManaged(false);
+
         liveLabel.getStyleClass().add("live-indicator");
         pauseButton.getStyleClass().add("live-toggle");
         pauseButton.setOnAction(e -> togglePause());
@@ -347,7 +355,7 @@ public class MainView extends BorderPane {
                 liveBox,
                 new Label("Context:"), contextBox,
                 new Label("Namespace:"), namespaceBox,
-                searchField, refresh, pfButton);
+                searchField, cleanupButton, refresh, pfButton);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(10, 16, 10, 16));
         bar.getStyleClass().add("top-bar");
@@ -1027,6 +1035,51 @@ public class MainView extends BorderPane {
                 });
     }
 
+    /** The two cleanup choices, reused by the toolbar and the health view. */
+    private List<MenuItem> buildCleanupMenuItems() {
+        MenuItem failed = new MenuItem("Remove evicted / failed pods");
+        failed.setOnAction(e -> cleanupPodsAction(java.util.Set.of("Failed"), "evicted / failed"));
+        MenuItem all = new MenuItem("Remove failed + completed pods");
+        all.setOnAction(e -> cleanupPodsAction(java.util.Set.of("Failed", "Succeeded"), "failed / completed"));
+        return List.of(failed, all);
+    }
+
+    /** Bulk-delete terminal pods in the current namespace, after confirming the exact count. */
+    private void cleanupPodsAction(java.util.Set<String> phases, String label) {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            status("Select a context first.");
+            return;
+        }
+        String ns = namespaceBox.getValue();
+        if (ns == null || ns.isEmpty()) {
+            status("Select a namespace first.");
+            return;
+        }
+        status("Scanning for " + label + " pods…");
+        // Dry-run count first so the confirmation shows the real number.
+        runAsync(() -> service.cleanupPods(ctx.name(), ns, phases, true), count -> {
+            if (count == 0) {
+                status("No " + label + " pods to clean up in \"" + ns + "\".");
+                return;
+            }
+            String noun = count == 1 ? "pod" : "pods";
+            boolean ok = confirm("Clean up " + count + " " + noun + "?",
+                    "Delete " + count + " " + label + " " + noun + " in namespace \"" + ns + "\"?\n\n"
+                            + "These are terminal pod records — running workloads are unaffected. "
+                            + "This cannot be undone.");
+            if (!ok) {
+                status("Cleanup cancelled.");
+                return;
+            }
+            status("Cleaning up " + count + " " + noun + "…");
+            runAsync(() -> service.cleanupPods(ctx.name(), ns, phases, false), deleted -> {
+                status("Cleaned up " + deleted + " " + (deleted == 1 ? "pod" : "pods") + ".");
+                afterMutation();
+            });
+        });
+    }
+
     private void restartAction(String name) {
         if (name == null || name.isEmpty()) {
             return;
@@ -1640,6 +1693,10 @@ public class MainView extends BorderPane {
         topologyView.setManaged(mode == ViewMode.TOPOLOGY);
         healthView.setVisible(mode == ViewMode.HEALTH);
         healthView.setManaged(mode == ViewMode.HEALTH);
+
+        boolean showCleanup = res && currentKind == ResourceKind.PODS;
+        cleanupButton.setVisible(showCleanup);
+        cleanupButton.setManaged(showCleanup);
     }
 
     private void loadTopology() {
@@ -1665,10 +1722,14 @@ public class MainView extends BorderPane {
         rescan.getStyleClass().add("accent-button");
         rescan.setOnAction(e -> loadHealth());
 
+        MenuButton healthCleanup = new MenuButton("🧹 Clean up");
+        healthCleanup.getItems().setAll(buildCleanupMenuItems());
+        healthCleanup.setTooltip(new Tooltip("Delete terminal (evicted/failed/completed) pods"));
+
         healthSummary.getStyleClass().add("muted");
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox controls = new HBox(10, healthSummary, spacer, rescan);
+        HBox controls = new HBox(10, healthSummary, spacer, healthCleanup, rescan);
         controls.setAlignment(Pos.CENTER_LEFT);
 
         healthTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
