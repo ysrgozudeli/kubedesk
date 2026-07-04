@@ -3,6 +3,12 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.7] - 2026-07-04
+
+### Changed
+- The bulk **"Clean up"** action now lives only in the **Health scan** (removed from the Pods
+  toolbar) — the Health view is where terminal pods surface, so it's the natural home for clearing them.
+
 ## [1.2.6] - 2026-07-04
 
 ### Added

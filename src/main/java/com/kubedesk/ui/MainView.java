@@ -172,9 +172,6 @@ public class MainView extends BorderPane {
     private final List<PortForward> portForwards = new ArrayList<>();
     private final Button pfButton = new Button("Port-forwards");
 
-    // Bulk cleanup of terminal pods (shown only on the Pods view).
-    private final MenuButton cleanupButton = new MenuButton("🧹 Clean up");
-
     // Auto-update: checks GitHub on startup and offers a one-click installer download.
     private final UpdateService updateService = new UpdateService();
     private final HBox updateBanner = new HBox(12);
@@ -549,11 +546,6 @@ public class MainView extends BorderPane {
         pfButton.setVisible(false);
         pfButton.setManaged(false);
 
-        cleanupButton.getItems().setAll(buildCleanupMenuItems());
-        cleanupButton.setTooltip(new Tooltip("Delete terminal (evicted/failed/completed) pods"));
-        cleanupButton.setVisible(false);
-        cleanupButton.setManaged(false);
-
         MenuButton appMenu = new MenuButton("☰");
         appMenu.getStyleClass().add("icon-button");
         appMenu.setTooltip(new Tooltip("Menu"));
@@ -583,7 +575,7 @@ public class MainView extends BorderPane {
                 liveBox,
                 new Label("Context:"), contextBox,
                 new Label("Namespace:"), namespaceBox,
-                searchField, cleanupButton, refresh, pfButton, appMenu);
+                searchField, refresh, pfButton, appMenu);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(10, 16, 10, 16));
         bar.getStyleClass().add("top-bar");
@@ -1263,7 +1255,7 @@ public class MainView extends BorderPane {
                 });
     }
 
-    /** The two cleanup choices, reused by the toolbar and the health view. */
+    /** The two cleanup choices, used by the health view's "Clean up" menu. */
     private List<MenuItem> buildCleanupMenuItems() {
         MenuItem failed = new MenuItem("Remove evicted / failed pods");
         failed.setOnAction(e -> cleanupPodsAction(java.util.Set.of("Failed"), "evicted / failed"));
@@ -1921,10 +1913,6 @@ public class MainView extends BorderPane {
         topologyView.setManaged(mode == ViewMode.TOPOLOGY);
         healthView.setVisible(mode == ViewMode.HEALTH);
         healthView.setManaged(mode == ViewMode.HEALTH);
-
-        boolean showCleanup = res && currentKind == ResourceKind.PODS;
-        cleanupButton.setVisible(showCleanup);
-        cleanupButton.setManaged(showCleanup);
     }
 
     private void loadTopology() {
