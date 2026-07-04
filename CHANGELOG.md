@@ -3,6 +3,16 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.5] - 2026-07-04
+
+### Added
+- **Bulk "Clean up" for terminal pods** — remove evicted/failed pods (and optionally completed ones)
+  in one click instead of deleting them one by one. A **🧹 Clean up** menu on the Pods toolbar (shown
+  only for Pods) and in the Health scan offers *"evicted / failed"* (`Phase=Failed`) or *"failed +
+  completed"* (`Failed` + `Succeeded`). It counts matches first and confirms the exact number before
+  deleting, and only ever targets terminal pods — Running/Pending pods are never touched, so live
+  workloads are unaffected.
+
 ## [1.2.4] - 2026-07-03
 
 ### Fixed
