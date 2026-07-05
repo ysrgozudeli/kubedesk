@@ -70,6 +70,14 @@
 }
 
 /* ---- sidebar ---- */
+/* Events view: tint Warning rows so they stand out from Normal ones. */
+.table-row-cell.event-warning {
+    -fx-background-color: #fdf0e6;
+}
+.table-row-cell.event-warning:selected {
+    -fx-background-color: #f6c99a;
+}
+
 /* Update-available banner, stacked just under the toolbar. */
 .update-banner {
     -fx-background-color: #eef4ff;

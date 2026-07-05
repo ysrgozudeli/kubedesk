@@ -674,6 +674,35 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     @Override
+    public ResourceData listEvents(String context, String namespace) {
+        try (KubernetesClient client = clientFor(context)) {
+            List<Event> events = new ArrayList<>(
+                    client.v1().events().inNamespace(namespace).list().getItems());
+            events.sort(Comparator.comparing(this::eventTimestamp).reversed()); // most recent first
+            List<List<String>> rows = new ArrayList<>();
+            for (Event ev : events) {
+                String obj = "";
+                if (ev.getInvolvedObject() != null) {
+                    obj = nz(ev.getInvolvedObject().getKind()) + "/"
+                            + nz(ev.getInvolvedObject().getName());
+                }
+                int count = ev.getCount() != null ? ev.getCount() : 1;
+                rows.add(List.of(
+                        nz(ev.getType()),
+                        nz(ev.getReason()),
+                        obj,
+                        String.valueOf(count),
+                        age(eventTimestamp(ev)),
+                        ev.getMessage() != null ? ev.getMessage().trim() : ""));
+            }
+            return new ResourceData(
+                    List.of("Type", "Reason", "Object", "Count", "Last Seen", "Message"), rows);
+        } catch (Exception e) {
+            throw new ClusterException("Could not list events: " + rootMessage(e), e);
+        }
+    }
+
+    @Override
     public String describeEvents(String context, String namespace, ResourceKind kind, String name) {
         try (KubernetesClient client = clientFor(context)) {
             StringBuilder sb = new StringBuilder();

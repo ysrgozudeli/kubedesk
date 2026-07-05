@@ -121,7 +121,7 @@ public class MainView extends BorderPane {
     private static final PseudoClass ERROR_PSEUDO = PseudoClass.getPseudoClass("error");
 
     // Extra views (topology, health) live in the same center area as the resource table.
-    private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH }
+    private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH, EVENTS }
 
     private ViewMode currentView = ViewMode.RESOURCE;
     private final Map<ResourceKind, ToggleButton> navButtons = new EnumMap<>(ResourceKind.class);
@@ -133,6 +133,11 @@ public class MainView extends BorderPane {
     private final VBox healthView = new VBox(10);
     private final TableView<HealthFinding> healthTable = new TableView<>();
     private final Label healthSummary = new Label();
+
+    private final ToggleButton eventsToggle = new ToggleButton("›  Events");
+    private final VBox eventsView = new VBox(10);
+    private final TableView<List<String>> nsEventsTable = new TableView<>();
+    private final Label eventsSummary = new Label();
 
     // Details panel (right side)
     private final VBox detailsPane = new VBox();
@@ -674,6 +679,16 @@ public class MainView extends BorderPane {
         });
         nav.getChildren().add(topologyToggle);
 
+        eventsToggle.setToggleGroup(group);
+        eventsToggle.setMaxWidth(Double.MAX_VALUE);
+        eventsToggle.getStyleClass().add("nav-item");
+        eventsToggle.setOnAction(e -> {
+            if (eventsToggle.isSelected()) {
+                enterEvents();
+            }
+        });
+        nav.getChildren().add(eventsToggle);
+
         // Make the nav scrollable so a short window (e.g. a small VDI screen) shrinks/scrolls the
         // list instead of forcing the whole layout taller than the screen and hiding the status bar.
         ScrollPane scroll = new ScrollPane(nav);
@@ -724,7 +739,12 @@ public class MainView extends BorderPane {
         healthView.setManaged(false);
         VBox.setVgrow(healthView, Priority.ALWAYS);
 
-        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView, healthView);
+        buildEventsView();
+        eventsView.setVisible(false);
+        eventsView.setManaged(false);
+        VBox.setVgrow(eventsView, Priority.ALWAYS);
+
+        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView, healthView, eventsView);
         content.setPadding(new Insets(16));
         content.getStyleClass().add("content");
         content.setMinWidth(320); // keep the table usable no matter how wide the details pane gets
@@ -2034,6 +2054,7 @@ public class MainView extends BorderPane {
         switch (currentView) {
             case TOPOLOGY -> loadTopology();
             case HEALTH -> loadHealth();
+            case EVENTS -> loadEvents();
             default -> {
                 refreshContent();
                 if (paused) {
@@ -2133,7 +2154,15 @@ public class MainView extends BorderPane {
         loadHealth();
     }
 
-    /** Show exactly one of the resource table (+ring), the topology view, or the health view. */
+    private void enterEvents() {
+        setCenterView(ViewMode.EVENTS);
+        eventsToggle.setSelected(true);
+        closeDetails();
+        stopWatch();
+        loadEvents();
+    }
+
+    /** Show exactly one of the resource table (+ring), the topology, health, or events view. */
     private void setCenterView(ViewMode mode) {
         currentView = mode;
         boolean res = mode == ViewMode.RESOURCE;
@@ -2148,6 +2177,8 @@ public class MainView extends BorderPane {
         topologyView.setManaged(mode == ViewMode.TOPOLOGY);
         healthView.setVisible(mode == ViewMode.HEALTH);
         healthView.setManaged(mode == ViewMode.HEALTH);
+        eventsView.setVisible(mode == ViewMode.EVENTS);
+        eventsView.setManaged(mode == ViewMode.EVENTS);
     }
 
     private void loadTopology() {
@@ -2271,6 +2302,88 @@ public class MainView extends BorderPane {
             }
             status("Health scan complete — " + findings.size() + " finding(s). Double-click to inspect, "
                     + "right-click to act.");
+        });
+    }
+
+    // --- events view ------------------------------------------------------------------------
+
+    private void buildEventsView() {
+        Button refresh = new Button("↻ Refresh");
+        refresh.getStyleClass().add("accent-button");
+        refresh.setOnAction(e -> loadEvents());
+
+        eventsSummary.getStyleClass().add("muted");
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox controls = new HBox(10, eventsSummary, spacer, refresh);
+        controls.setAlignment(Pos.CENTER_LEFT);
+
+        nsEventsTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        nsEventsTable.setPlaceholder(new Label("No events (Kubernetes keeps them for only ~1 hour)."));
+        VBox.setVgrow(nsEventsTable, Priority.ALWAYS);
+
+        // Columns map to the listEvents row order: Type, Reason, Object, Count, Last Seen, Message.
+        String[] headers = {"Type", "Reason", "Object", "Count", "Last Seen", "Message"};
+        double[] widths = {90, 200, 230, 70, 110, 400};
+        for (int i = 0; i < headers.length; i++) {
+            final int idx = i;
+            TableColumn<List<String>, String> col = new TableColumn<>(headers[i]);
+            col.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                    c.getValue() != null && idx < c.getValue().size() ? c.getValue().get(idx) : ""));
+            col.setPrefWidth(widths[i]);
+            nsEventsTable.getColumns().add(col);
+        }
+
+        nsEventsTable.setRowFactory(tv -> {
+            TableRow<List<String>> row = new TableRow<>();
+            row.itemProperty().addListener((o, a, b) -> {
+                row.getStyleClass().remove("event-warning");
+                if (b != null && !b.isEmpty() && "Warning".equals(b.get(0))) {
+                    row.getStyleClass().add("event-warning");
+                }
+            });
+            MenuItem copyMsg = new MenuItem("Copy message");
+            copyMsg.setOnAction(e -> {
+                List<String> it = row.getItem();
+                if (it != null && it.size() > 5) {
+                    copyToClipboard(it.get(5));
+                }
+            });
+            row.setContextMenu(new ContextMenu(copyMsg));
+            return row;
+        });
+
+        eventsView.getChildren().setAll(controls, nsEventsTable);
+    }
+
+    private void loadEvents() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String ns = namespaceBox.getValue();
+        if (ALL_NAMESPACES.equals(ns)) {
+            status("Pick a single namespace to view its events.");
+            return;
+        }
+        if (ns == null || ns.isBlank()) {
+            ns = effectiveNamespace();
+        }
+        if (ns == null || ns.isBlank()) {
+            status("No namespace selected.");
+            return;
+        }
+        contentTitle.setText("Events · " + ns);
+        eventsSummary.setText("Loading…");
+        status("Loading events…");
+        final String namespace = ns;
+        runAsync(() -> service.listEvents(ctx.name(), namespace), data -> {
+            nsEventsTable.setItems(FXCollections.observableArrayList(data.rows()));
+            long warns = data.rows().stream()
+                    .filter(r -> !r.isEmpty() && "Warning".equals(r.get(0))).count();
+            eventsSummary.setText(data.rows().size() + " events · " + warns
+                    + " warning" + (warns == 1 ? "" : "s"));
+            status(data.rows().size() + " events in " + namespace + ".");
         });
     }
 

@@ -51,6 +51,12 @@ public interface ClusterService {
     HealthSummary podHealth(String context, String namespace);
 
     /**
+     * List all events in a namespace (the practical "namespace log"), most-recent first, as
+     * table-shaped data: Type, Reason, Object, Count, Last Seen, Message.
+     */
+    ResourceData listEvents(String context, String namespace);
+
+    /**
      * Build a service topology for a namespace: Ingress -> Service -> Workload, derived from ingress
      * backends and label selectors.
      */
