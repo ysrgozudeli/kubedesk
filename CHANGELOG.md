@@ -3,6 +3,16 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-07-05
+
+### Added
+- **Proactive RBAC awareness.** On each namespace change, KubeDesk runs a `SelfSubjectRulesReview`
+  (like `kubectl auth can-i --list`) and adapts the UI to your permissions: resource kinds you can't
+  **list** are hidden from the sidebar (with their section header), **Delete / Scale / Restart** are
+  disabled when you lack the verb, and **+ Create** is greyed out when you can't create. It **fails
+  open** — if permissions can't be determined (or in all-namespaces mode), everything is shown and
+  enabled, so nothing you can actually use is ever hidden. Broad/admin tokens see no change.
+
 ## [1.3.0] - 2026-07-05
 
 ### Added
