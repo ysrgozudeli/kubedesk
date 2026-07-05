@@ -4,6 +4,7 @@ import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSeverity;
 import com.kubedesk.service.Dtos.TopoNode;
@@ -171,6 +172,12 @@ public class MainView extends BorderPane {
     // the table gains a leading Namespace column, is read-only (view YAML only), and has no live watch.
     private static final String ALL_NAMESPACES = "✿ All namespaces";
     private final BooleanProperty allNsMode = new SimpleBooleanProperty(false);
+
+    // Proactive RBAC awareness: what the user can do in the current namespace (fail-open by default).
+    private Permissions currentPermissions = Permissions.unknown();
+    private String permKey; // context|namespace the current permissions were fetched for
+    private final Map<String, Label> sectionLabels = new HashMap<>();
+    private Button createBtn;
     private ResourceData currentData = new ResourceData(List.of(), List.of());
 
     /** Per-kind set of column names the user has hidden via the table's column menu. */
@@ -623,6 +630,7 @@ public class MainView extends BorderPane {
                 Label section = new Label(kind.section().toUpperCase());
                 section.getStyleClass().add("nav-section");
                 nav.getChildren().add(section);
+                sectionLabels.put(kind.section(), section);
                 lastSection = kind.section();
             }
             ToggleButton btn = new ToggleButton("›  " + kind.label());
@@ -677,7 +685,7 @@ public class MainView extends BorderPane {
         VBox.setVgrow(scroll, Priority.ALWAYS);
 
         // Pin the global "+ Create" action to the bottom, outside the scroll area (it applies any kind).
-        Button createBtn = new Button("+ Create");
+        createBtn = new Button("+ Create");
         createBtn.getStyleClass().add("accent-button");
         createBtn.setMaxWidth(Double.MAX_VALUE);
         createBtn.setOnAction(e -> openCreateDialog());
@@ -785,6 +793,13 @@ public class MainView extends BorderPane {
             boolean isDeployment = currentKind == ResourceKind.DEPLOYMENTS;
             restart.setVisible(isDeployment);
             scale.setVisible(isDeployment);
+            // Disable mutating actions the user isn't allowed to perform (RBAC-aware).
+            String g = currentKind.apiGroup(), r = currentKind.resource();
+            delete.setDisable(!currentPermissions.can(g, r, "delete"));
+            boolean canPatch = currentPermissions.can(g, r, "patch")
+                    || currentPermissions.can(g, r, "update");
+            restart.setDisable(!canPatch);
+            scale.setDisable(!canPatch);
         });
 
         // A read-only menu for "All namespaces" mode (act on a resource by picking its namespace).
@@ -2008,6 +2023,7 @@ public class MainView extends BorderPane {
             }
         }
         saveSettings();
+        refreshPermissions(c, effectiveNamespace());
         switch (currentView) {
             case TOPOLOGY -> loadTopology();
             case HEALTH -> loadHealth();
@@ -2019,6 +2035,63 @@ public class MainView extends BorderPane {
                     restartWatch();
                 }
             }
+        }
+    }
+
+    // --- RBAC awareness (proactive) ---------------------------------------------------------
+
+    /** Fetch what the user can do in this namespace (once per context+namespace), then adapt the UI. */
+    private void refreshPermissions(ContextInfo ctx, String ns) {
+        if (ctx == null || allNsMode.get() || ns == null || ns.isBlank()) {
+            currentPermissions = Permissions.unknown(); // show everything (fail open)
+            permKey = null;
+            updateNavVisibility();
+            updateCreateEnabled();
+            return;
+        }
+        String key = ctx.name() + "|" + ns;
+        if (key.equals(permKey)) {
+            updateNavVisibility();
+            return;
+        }
+        runAsync(() -> service.permissions(ctx.name(), ns), perms -> {
+            currentPermissions = perms;
+            permKey = key;
+            updateNavVisibility();
+            updateCreateEnabled();
+        });
+    }
+
+    /** Hide resource kinds the user can't list; hide a section header when all its kinds are hidden. */
+    private void updateNavVisibility() {
+        for (var entry : navButtons.entrySet()) {
+            ResourceKind kind = entry.getKey();
+            ToggleButton btn = entry.getValue();
+            boolean visible = !kind.namespaced() // cluster-scoped kinds aren't covered by the namespace review
+                    || currentPermissions.can(kind.apiGroup(), kind.resource(), "list");
+            btn.setVisible(visible);
+            btn.setManaged(visible);
+        }
+        for (var entry : sectionLabels.entrySet()) {
+            boolean any = navButtons.entrySet().stream()
+                    .anyMatch(e -> e.getKey().section().equals(entry.getKey()) && e.getValue().isVisible());
+            entry.getValue().setVisible(any);
+            entry.getValue().setManaged(any);
+        }
+    }
+
+    private void updateCreateEnabled() {
+        boolean canCreate = false;
+        for (ResourceKind k : ResourceKind.values()) {
+            if (currentPermissions.can(k.apiGroup(), k.resource(), "create")) {
+                canCreate = true;
+                break;
+            }
+        }
+        if (createBtn != null) {
+            createBtn.setDisable(!canCreate);
+            createBtn.setTooltip(canCreate ? null
+                    : new Tooltip("You don't have permission to create resources in this namespace."));
         }
     }
 

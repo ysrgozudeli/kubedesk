@@ -3,6 +3,7 @@ package com.kubedesk.service;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSummary;
+import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.Dtos.TopologyData;
 
@@ -24,6 +25,13 @@ public interface ClusterService {
 
     /** List namespace names visible to the given context. */
     List<String> listNamespaces(String context);
+
+    /**
+     * What the current user is allowed to do in the given namespace, via SelfSubjectRulesReview
+     * (like {@code kubectl auth can-i --list}). Used to hide/disable UI you can't use. Returns
+     * {@link Permissions#unknown()} (fail-open) if the review can't be performed.
+     */
+    Permissions permissions(String context, String namespace);
 
     /**
      * Fetch a resource collection as table-shaped data.

@@ -2,6 +2,7 @@ package com.kubedesk.service;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Plain data-transfer objects passed from the {@link ClusterService} to the UI.
@@ -16,6 +17,39 @@ public final class Dtos {
 
     /** A single entry from the user's kube.conf. */
     public record ContextInfo(String name, String cluster, String user, String namespace, boolean current) {
+    }
+
+    /** One RBAC resource rule from a SelfSubjectRulesReview (verbs × apiGroups × resources). */
+    public record ResourceRuleDto(Set<String> verbs, Set<String> apiGroups, Set<String> resources) {
+    }
+
+    /**
+     * What the current user is allowed to do in a namespace (from SelfSubjectRulesReview). Designed to
+     * FAIL OPEN: when the rules are unknown or incomplete, {@link #can} returns true, so we never hide
+     * something the user can actually access due to a review quirk.
+     */
+    public record Permissions(List<ResourceRuleDto> rules, boolean complete, boolean known) {
+        /** Use when permissions can't be determined — treat everything as allowed. */
+        public static Permissions unknown() {
+            return new Permissions(List.of(), false, false);
+        }
+
+        public boolean can(String apiGroup, String resource, String verb) {
+            if (!known || !complete) {
+                return true; // fail open
+            }
+            for (ResourceRuleDto r : rules) {
+                if (matches(r.verbs(), verb) && matches(r.apiGroups(), apiGroup)
+                        && matches(r.resources(), resource)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static boolean matches(Set<String> set, String value) {
+            return set != null && (set.contains("*") || set.contains(value));
+        }
     }
 
     /**

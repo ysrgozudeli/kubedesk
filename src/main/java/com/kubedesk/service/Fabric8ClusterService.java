@@ -2,6 +2,8 @@ package com.kubedesk.service;
 
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthFinding;
+import com.kubedesk.service.Dtos.Permissions;
+import com.kubedesk.service.Dtos.ResourceRuleDto;
 import com.kubedesk.service.Dtos.HealthSeverity;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
@@ -24,6 +26,8 @@ import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServicePort;
 import io.fabric8.kubernetes.api.model.apps.DaemonSet;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
+import io.fabric8.kubernetes.api.model.authorization.v1.SelfSubjectRulesReview;
+import io.fabric8.kubernetes.api.model.authorization.v1.SelfSubjectRulesReviewBuilder;
 import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.kubernetes.api.model.batch.v1.CronJob;
 import io.fabric8.kubernetes.api.model.batch.v1.Job;
@@ -150,6 +154,35 @@ public class Fabric8ClusterService implements ClusterService {
         } catch (Exception e) {
             throw new ClusterException("Could not list namespaces: " + rootMessage(e), e);
         }
+    }
+
+    @Override
+    public Permissions permissions(String context, String namespace) {
+        try (KubernetesClient client = clientFor(context)) {
+            SelfSubjectRulesReview review = new SelfSubjectRulesReviewBuilder()
+                    .withNewSpec().withNamespace(namespace).endSpec().build();
+            SelfSubjectRulesReview result = client.authorization().v1()
+                    .selfSubjectRulesReview().create(review);
+            var status = result != null ? result.getStatus() : null;
+            if (status == null) {
+                return Permissions.unknown();
+            }
+            boolean complete = !Boolean.TRUE.equals(status.getIncomplete());
+            List<ResourceRuleDto> rules = new ArrayList<>();
+            if (status.getResourceRules() != null) {
+                for (var r : status.getResourceRules()) {
+                    rules.add(new ResourceRuleDto(setOf(r.getVerbs()), setOf(r.getApiGroups()),
+                            setOf(r.getResources())));
+                }
+            }
+            return new Permissions(rules, complete, true);
+        } catch (Exception e) {
+            return Permissions.unknown(); // fail open — never hide access we can't verify
+        }
+    }
+
+    private java.util.Set<String> setOf(List<String> list) {
+        return list == null ? java.util.Set.of() : new java.util.HashSet<>(list);
     }
 
     @Override
