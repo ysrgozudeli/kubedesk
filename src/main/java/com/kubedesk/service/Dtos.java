@@ -19,6 +19,10 @@ public final class Dtos {
     public record ContextInfo(String name, String cluster, String user, String namespace, boolean current) {
     }
 
+    /** A point-in-time resource usage sample for a pod (summed across its containers). */
+    public record MetricSample(double cpuMillicores, double memoryMiB) {
+    }
+
     /** One RBAC resource rule from a SelfSubjectRulesReview (verbs × apiGroups × resources). */
     public record ResourceRuleDto(Set<String> verbs, Set<String> apiGroups, Set<String> resources) {
     }

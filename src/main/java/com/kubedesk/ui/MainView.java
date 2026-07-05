@@ -4,6 +4,7 @@ import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.MetricSample;
 import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSeverity;
@@ -16,7 +17,9 @@ import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.Fabric8ClusterService;
 import com.kubedesk.service.ResourceKind;
+import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
+import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
 import javafx.beans.property.BooleanProperty;
@@ -27,7 +30,10 @@ import javafx.css.PseudoClass;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.util.Duration;
+import javafx.scene.chart.LineChart;
+import javafx.scene.chart.NumberAxis;
 import javafx.scene.chart.PieChart;
+import javafx.scene.chart.XYChart;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonBar;
@@ -153,6 +159,15 @@ public class MainView extends BorderPane {
     private final Tab eventsTab = new Tab("Events", eventsArea);
     private final Tab logsTab = new Tab("Logs");
     private final Tab shellTab = new Tab("Shell");
+
+    // Live metrics (pods): polls the Metrics API and accumulates a client-side time-series.
+    private final Tab metricsTab = new Tab("Metrics");
+    private final XYChart.Series<Number, Number> cpuSeries = new XYChart.Series<>();
+    private final XYChart.Series<Number, Number> memSeries = new XYChart.Series<>();
+    private Timeline metricsTimeline;
+    private long metricsStartMillis;
+    private String metricsPod;
+    private String metricsNs;
 
     // Logs view controls
     private final ComboBox<String> containerBox = new ComboBox<>();
@@ -891,6 +906,8 @@ public class MainView extends BorderPane {
         logsTab.setContent(buildLogsPane());
         shellTab.setClosable(false);
         shellTab.setContent(buildShellPane());
+        metricsTab.setClosable(false);
+        metricsTab.setContent(buildMetricsPane());
         detailsTabs.getTabs().setAll(overviewTab, yamlTab, eventsTab);
         VBox.setVgrow(detailsTabs, Priority.ALWAYS);
 
@@ -1138,6 +1155,7 @@ public class MainView extends BorderPane {
         if (isPod) {
             detailsTabs.getTabs().add(logsTab);
             detailsTabs.getTabs().add(shellTab);
+            detailsTabs.getTabs().add(metricsTab);
         }
         // Any previously open shell belongs to the old selection — end it.
         closeExec();
@@ -1189,10 +1207,88 @@ public class MainView extends BorderPane {
                 shellContainerBox.setItems(FXCollections.observableArrayList(containers));
                 shellContainerBox.setValue(containers.isEmpty() ? null : containers.get(0));
             });
+            startMetricsPolling(ctx.name(), ns, name);
         } else {
             currentLogPod = null;
             shellPod = null;
+            stopMetricsPolling();
         }
+    }
+
+    // --- live pod metrics -------------------------------------------------------------------
+
+    private VBox buildMetricsPane() {
+        LineChart<Number, Number> cpuChart = liveChart("CPU (millicores)", cpuSeries);
+        LineChart<Number, Number> memChart = liveChart("Memory (MiB)", memSeries);
+
+        Label hint = new Label("Live — samples every 10s while open (needs metrics-server). "
+                + "The chart builds up client-side as you watch, since metrics-server keeps no history.");
+        hint.getStyleClass().add("muted");
+        hint.setWrapText(true);
+
+        VBox.setVgrow(cpuChart, Priority.ALWAYS);
+        VBox.setVgrow(memChart, Priority.ALWAYS);
+        VBox box = new VBox(8, hint, cpuChart, memChart);
+        box.setPadding(new Insets(8));
+        return box;
+    }
+
+    private LineChart<Number, Number> liveChart(String yLabel, XYChart.Series<Number, Number> series) {
+        NumberAxis x = new NumberAxis();
+        x.setLabel("seconds");
+        x.setForceZeroInRange(false);
+        NumberAxis y = new NumberAxis();
+        y.setLabel(yLabel);
+        y.setForceZeroInRange(true);
+        LineChart<Number, Number> chart = new LineChart<>(x, y);
+        chart.setLegendVisible(false);
+        chart.setAnimated(false);
+        chart.setCreateSymbols(false);
+        chart.getData().add(series);
+        return chart;
+    }
+
+    private void startMetricsPolling(String ctxName, String ns, String pod) {
+        stopMetricsPolling();
+        metricsNs = ns;
+        metricsPod = pod;
+        cpuSeries.getData().clear();
+        memSeries.getData().clear();
+        metricsStartMillis = System.currentTimeMillis();
+        sampleMetrics(ctxName); // first sample immediately
+        metricsTimeline = new Timeline(new KeyFrame(Duration.seconds(10), e -> sampleMetrics(ctxName)));
+        metricsTimeline.setCycleCount(Timeline.INDEFINITE);
+        metricsTimeline.play();
+    }
+
+    private void stopMetricsPolling() {
+        if (metricsTimeline != null) {
+            metricsTimeline.stop();
+            metricsTimeline = null;
+        }
+    }
+
+    private void sampleMetrics(String ctxName) {
+        String ns = metricsNs;
+        String pod = metricsPod;
+        if (pod == null) {
+            return;
+        }
+        runAsync(() -> service.podUsageSample(ctxName, ns, pod), sample -> {
+            if (sample == null || !pod.equals(metricsPod)) {
+                return; // no metrics yet, or the details switched to another pod
+            }
+            double t = (System.currentTimeMillis() - metricsStartMillis) / 1000.0;
+            cpuSeries.getData().add(new XYChart.Data<>(t, sample.cpuMillicores()));
+            memSeries.getData().add(new XYChart.Data<>(t, sample.memoryMiB()));
+            // Keep ~5 minutes of history (30 samples at 10s).
+            if (cpuSeries.getData().size() > 30) {
+                cpuSeries.getData().remove(0);
+            }
+            if (memSeries.getData().size() > 30) {
+                memSeries.getData().remove(0);
+            }
+        });
     }
 
     /** (Re)load the log tail for the currently shown pod + selected container. */
@@ -1256,6 +1352,8 @@ public class MainView extends BorderPane {
 
     private void closeDetails() {
         closeExec();
+        stopMetricsPolling();
+        metricsPod = null;
         centerSplit.getItems().remove(detailsPane);
     }
 
@@ -2552,6 +2650,7 @@ public class MainView extends BorderPane {
     /** Release the watch and worker threads on shutdown so the JVM can exit cleanly. */
     public void shutdown() {
         closeExec();
+        stopMetricsPolling();
         for (PortForward pf : new ArrayList<>(portForwards)) {
             try {
                 pf.close();
