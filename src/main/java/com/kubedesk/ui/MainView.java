@@ -1245,11 +1245,17 @@ public class MainView extends BorderPane {
     private void populateDetailsActions(ResourceKind kind, String name) {
         detailsActionsBtn.getItems().clear();
 
+        // RBAC-aware: disable actions the user isn't allowed to perform (mirrors the row menu).
+        String g = kind.apiGroup(), r = kind.resource();
+        boolean canPatch = currentPermissions.can(g, r, "patch") || currentPermissions.can(g, r, "update");
+
         if (kind == ResourceKind.DEPLOYMENTS) {
             MenuItem restart = new MenuItem("Restart (rollout)");
             restart.setOnAction(e -> restartAction(name));
+            restart.setDisable(!canPatch);
             MenuItem scale = new MenuItem("Scale…");
             scale.setOnAction(e -> scaleAction(name));
+            scale.setDisable(!canPatch);
             detailsActionsBtn.getItems().addAll(restart, scale);
         }
         if (kind == ResourceKind.PODS) {
@@ -1268,6 +1274,7 @@ public class MainView extends BorderPane {
         MenuItem delete = new MenuItem("Delete");
         delete.getStyleClass().add("danger-item");
         delete.setOnAction(e -> deleteAction(kind, name));
+        delete.setDisable(!currentPermissions.can(g, r, "delete"));
         detailsActionsBtn.getItems().addAll(copyName, copyYaml, new SeparatorMenuItem(), delete);
     }
 
