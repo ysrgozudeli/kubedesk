@@ -1,6 +1,7 @@
 package com.kubedesk.service;
 
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.CustomResourceType;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
@@ -24,6 +25,25 @@ public interface ClusterService {
 
     /** List namespace names visible to the given context. */
     List<String> listNamespaces(String context);
+
+    // --- custom resources (CRDs) ------------------------------------------------------------
+
+    /**
+     * Auto-discover custom resource types from the cluster's CRDs. Returns an empty list when the
+     * token can't list CRDs cluster-wide (e.g. a namespace-scoped token) — callers can still add a
+     * type manually.
+     */
+    List<CustomResourceType> listCustomResourceTypes(String context);
+
+    /** List instances of a custom resource type as table-shaped data. */
+    ResourceData listCustomResources(String context, String namespace, CustomResourceType type);
+
+    /** YAML for one custom resource instance. */
+    String describeCustomResourceYaml(String context, String namespace, CustomResourceType type,
+                                      String name);
+
+    /** Delete one custom resource instance. */
+    void deleteCustomResource(String context, String namespace, CustomResourceType type, String name);
 
     /**
      * Fetch a resource collection as table-shaped data.

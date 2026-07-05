@@ -4,6 +4,7 @@ import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.CustomResourceType;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSeverity;
 import com.kubedesk.service.Dtos.TopoNode;
@@ -18,6 +19,8 @@ import com.kubedesk.service.ResourceKind;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
+import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.SimpleBooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.concurrent.Task;
 import javafx.css.PseudoClass;
@@ -29,6 +32,7 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Dialog;
@@ -165,6 +169,14 @@ public class MainView extends BorderPane {
 
     private ResourceKind currentKind = ResourceKind.PODS;
     private ResourceData currentData = new ResourceData(List.of(), List.of());
+
+    // Custom resources (CRDs). When currentCrdType != null we're viewing a custom resource type
+    // instead of a built-in ResourceKind; crMode mirrors that for the row menu binding.
+    private CustomResourceType currentCrdType;
+    private final BooleanProperty crMode = new SimpleBooleanProperty(false);
+    private final VBox crdBox = new VBox(4);
+    private final List<CustomResourceType> manualCrdTypes = new ArrayList<>();
+    private ToggleGroup navGroup;
 
     /** Per-kind set of column names the user has hidden via the table's column menu. */
     private final Map<ResourceKind, Set<String>> hiddenColumns = new EnumMap<>(ResourceKind.class);
@@ -609,7 +621,8 @@ public class MainView extends BorderPane {
         nav.setPadding(new Insets(16, 8, 16, 8));
         nav.setMinWidth(190);
 
-        ToggleGroup group = new ToggleGroup();
+        navGroup = new ToggleGroup();
+        ToggleGroup group = navGroup;
         String lastSection = null;
         for (ResourceKind kind : ResourceKind.values()) {
             if (!kind.section().equals(lastSection)) {
@@ -658,6 +671,12 @@ public class MainView extends BorderPane {
             }
         });
         nav.getChildren().add(topologyToggle);
+
+        // Custom resources (CRDs), discovered per-context; crdBox is repopulated on context change.
+        Label crdSection = new Label("CUSTOM RESOURCES");
+        crdSection.getStyleClass().add("nav-section");
+        nav.getChildren().addAll(crdSection, crdBox);
+        rebuildCrdNav(List.of());
 
         // Make the nav scrollable so a short window (e.g. a small VDI screen) shrinks/scrolls the
         // list instead of forcing the whole layout taller than the screen and hiding the status bar.
@@ -779,13 +798,29 @@ public class MainView extends BorderPane {
             restart.setVisible(isDeployment);
             scale.setVisible(isDeployment);
         });
-        // Only show the menu on non-empty rows.
+
+        // A simpler menu for custom resources (no kind-specific actions).
+        MenuItem crYaml = new MenuItem("View YAML");
+        crYaml.setOnAction(e -> openCrDialog(row.getItem()));
+        MenuItem crCopyName = new MenuItem("Copy name");
+        crCopyName.setOnAction(e -> copyToClipboard(resourceName(row.getItem())));
+        MenuItem crDelete = new MenuItem("Delete");
+        crDelete.getStyleClass().add("danger-item");
+        crDelete.setOnAction(e -> deleteCrAction(resourceName(row.getItem())));
+        ContextMenu crMenu = new ContextMenu(crYaml, crCopyName, new SeparatorMenuItem(), crDelete);
+
+        // Only show a menu on non-empty rows; pick the custom-resource menu when in CR mode.
         row.contextMenuProperty().bind(
-                Bindings.when(row.emptyProperty()).then((ContextMenu) null).otherwise(menu));
+                Bindings.when(row.emptyProperty()).then((ContextMenu) null)
+                        .otherwise(Bindings.when(crMode).then(crMenu).otherwise(menu)));
 
         row.setOnMouseClicked(ev -> {
             if (ev.getButton() == MouseButton.PRIMARY && ev.getClickCount() == 2 && !row.isEmpty()) {
-                showDetails(row.getItem(), overviewTab);
+                if (currentCrdType != null) {
+                    openCrDialog(row.getItem());
+                } else {
+                    showDetails(row.getItem(), overviewTab);
+                }
             }
         });
         return row;
@@ -1818,6 +1853,7 @@ public class MainView extends BorderPane {
 
     private void loadNamespaces(ContextInfo context) {
         status("Loading namespaces for " + context.name() + "…");
+        refreshCrdNav(context);
         runAsync(() -> service.listNamespaces(context.name()), namespaces -> {
             String chosen;
             String remembered = settings.namespaceByContext.get(context.name());
@@ -1863,6 +1899,10 @@ public class MainView extends BorderPane {
     private void refreshContent() {
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
+            return;
+        }
+        if (currentCrdType != null) {
+            loadCustomResources(ctx);
             return;
         }
         String ns = effectiveNamespace();
@@ -1918,6 +1958,8 @@ public class MainView extends BorderPane {
     /** Switch to a resource-kind table view (also used by topology/health node clicks). */
     private void selectKind(ResourceKind kind) {
         currentKind = kind;
+        currentCrdType = null;
+        crMode.set(false);
         contentTitle.setText(kind.label());
         ToggleButton btn = navButtons.get(kind);
         if (btn != null) {
@@ -1926,6 +1968,183 @@ public class MainView extends BorderPane {
         setCenterView(ViewMode.RESOURCE);
         closeDetails();
         onSelectionChanged();
+    }
+
+    /** Switch to viewing instances of a custom resource type. */
+    private void selectCrdType(CustomResourceType type) {
+        currentCrdType = type;
+        crMode.set(true);
+        contentTitle.setText(type.kind());
+        setCenterView(ViewMode.RESOURCE);
+        closeDetails();
+        onSelectionChanged();
+    }
+
+    /** Rebuild the sidebar's Custom Resources list from discovered + manually-added types. */
+    private void rebuildCrdNav(List<CustomResourceType> discovered) {
+        crdBox.getChildren().clear();
+        // Merge discovered + manual, de-duped by group/version/plural.
+        List<CustomResourceType> all = new ArrayList<>(manualCrdTypes);
+        for (CustomResourceType t : discovered) {
+            boolean dup = all.stream().anyMatch(x -> x.group().equals(t.group())
+                    && x.version().equals(t.version()) && x.plural().equals(t.plural()));
+            if (!dup) {
+                all.add(t);
+            }
+        }
+        all.sort(java.util.Comparator.comparing(CustomResourceType::kind, String.CASE_INSENSITIVE_ORDER));
+        for (CustomResourceType t : all) {
+            ToggleButton btn = new ToggleButton("›  " + t.kind());
+            btn.setToggleGroup(navGroup);
+            btn.setMaxWidth(Double.MAX_VALUE);
+            btn.getStyleClass().add("nav-item");
+            btn.setTooltip(new Tooltip(t.apiVersion() + " · " + t.plural()
+                    + (t.namespaced() ? "" : " (cluster-scoped)")));
+            btn.setOnAction(e -> {
+                if (btn.isSelected()) {
+                    selectCrdType(t);
+                }
+            });
+            crdBox.getChildren().add(btn);
+        }
+        Hyperlink add = new Hyperlink("+ Add type…");
+        add.setOnAction(e -> promptAddCrdType());
+        crdBox.getChildren().add(add);
+    }
+
+    /** Discover custom resource types for the given context (async), then rebuild the nav list. */
+    private void refreshCrdNav(ContextInfo ctx) {
+        if (ctx == null) {
+            rebuildCrdNav(List.of());
+            return;
+        }
+        runAsync(() -> service.listCustomResourceTypes(ctx.name()), this::rebuildCrdNav);
+    }
+
+    private void promptAddCrdType() {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Add custom resource type");
+        dialog.setHeaderText("Enter the CRD's group, version and plural (as in its apiVersion).");
+        if (getScene() != null) {
+            dialog.initOwner(getScene().getWindow());
+        }
+        ButtonType addType = new ButtonType("Add", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(addType, ButtonType.CANCEL);
+
+        TextField group = new TextField();
+        group.setPromptText("group (e.g. argoproj.io)");
+        TextField version = new TextField();
+        version.setPromptText("version (e.g. v1alpha1)");
+        TextField plural = new TextField();
+        plural.setPromptText("plural (e.g. rollouts)");
+        TextField kind = new TextField();
+        kind.setPromptText("kind (e.g. Rollout) — optional");
+        CheckBox namespaced = new CheckBox("Namespaced");
+        namespaced.setSelected(true);
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(8, 4, 4, 4));
+        grid.addRow(0, new Label("Group:"), group);
+        grid.addRow(1, new Label("Version:"), version);
+        grid.addRow(2, new Label("Plural:"), plural);
+        grid.addRow(3, new Label("Kind:"), kind);
+        grid.add(namespaced, 1, 4);
+        dialog.getDialogPane().setContent(grid);
+
+        Optional<ButtonType> res = dialog.showAndWait();
+        if (res.isEmpty() || res.get() != addType) {
+            return;
+        }
+        if (version.getText().isBlank() || plural.getText().isBlank()) {
+            status("Add cancelled — version and plural are required.");
+            return;
+        }
+        String k = kind.getText().isBlank() ? plural.getText().trim() : kind.getText().trim();
+        CustomResourceType t = new CustomResourceType(group.getText().trim(), version.getText().trim(),
+                plural.getText().trim(), k, namespaced.isSelected());
+        manualCrdTypes.removeIf(x -> x.group().equals(t.group())
+                && x.version().equals(t.version()) && x.plural().equals(t.plural()));
+        manualCrdTypes.add(t);
+        rebuildCrdNav(List.of());
+        selectCrdType(t);
+    }
+
+    private void loadCustomResources(ContextInfo ctx) {
+        String ns = effectiveNamespace();
+        if (currentCrdType.namespaced() && (ns == null || ns.isBlank())) {
+            status("Type your namespace in the Namespace box to load " + currentCrdType.kind() + ".");
+            return;
+        }
+        healthRing.getChildren().clear();
+        status("Loading " + currentCrdType.kind() + "…");
+        CustomResourceType type = currentCrdType;
+        runAsync(() -> service.listCustomResources(ctx.name(), ns, type), data -> {
+            currentData = data;
+            renderTable(data);
+            applyFilter();
+            status(data.rows().size() + " " + type.kind() + " loaded.");
+        });
+    }
+
+    /** Read-only YAML viewer for a custom resource instance, with Copy and Delete. */
+    private void openCrDialog(List<String> row) {
+        if (row == null || currentCrdType == null) {
+            return;
+        }
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String name = resourceName(row);
+        String ns = effectiveNamespace();
+        CustomResourceType type = currentCrdType;
+
+        TextArea yaml = new TextArea("Loading…");
+        yaml.setEditable(false);
+        yaml.getStyleClass().add("yaml-area");
+        yaml.setPrefSize(700, 540);
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(type.kind() + ": " + name);
+        if (getScene() != null) {
+            dialog.initOwner(getScene().getWindow());
+        }
+        ButtonType deleteType = new ButtonType("Delete", ButtonBar.ButtonData.LEFT);
+        dialog.getDialogPane().getButtonTypes().addAll(deleteType, ButtonType.CLOSE);
+        dialog.getDialogPane().setContent(yaml);
+
+        runAsync(() -> service.describeCustomResourceYaml(ctx.name(), ns, type, name), yaml::setText);
+
+        Optional<ButtonType> res = dialog.showAndWait();
+        if (res.isPresent() && res.get() == deleteType) {
+            deleteCrAction(name);
+        }
+    }
+
+    private void deleteCrAction(String name) {
+        if (name == null || name.isBlank() || currentCrdType == null) {
+            return;
+        }
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String ns = effectiveNamespace();
+        CustomResourceType type = currentCrdType;
+        boolean ok = confirm("Delete " + type.kind() + "?",
+                "Delete \"" + name + "\""
+                        + (type.namespaced() ? " in namespace \"" + ns + "\"" : "") + "?\n\n"
+                        + "This cannot be undone.");
+        if (!ok) {
+            return;
+        }
+        status("Deleting " + name + "…");
+        runAsyncVoid(() -> service.deleteCustomResource(ctx.name(), ns, type, name), () -> {
+            status("Deleted " + name + ".");
+            refreshContent();
+        });
     }
 
     private void enterTopology() {
@@ -2169,6 +2388,9 @@ public class MainView extends BorderPane {
         if (paused) {
             return;
         }
+        if (currentCrdType != null) {
+            return; // no live watch for custom resources in this first cut
+        }
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
             return;
@@ -2255,7 +2477,10 @@ public class MainView extends BorderPane {
 
     private void renderTable(ResourceData data) {
         table.getColumns().clear();
-        Set<String> hidden = hiddenColumns.computeIfAbsent(currentKind, k -> new HashSet<>());
+        // Custom resources don't participate in the per-kind column hiding.
+        Set<String> hidden = currentCrdType != null
+                ? Set.of()
+                : hiddenColumns.computeIfAbsent(currentKind, k -> new HashSet<>());
         List<String> cols = data.columns();
         for (int i = 0; i < cols.size(); i++) {
             final int idx = i;

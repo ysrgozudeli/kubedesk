@@ -1,6 +1,7 @@
 package com.kubedesk.service;
 
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.CustomResourceType;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSeverity;
 import com.kubedesk.service.Dtos.HealthSummary;
@@ -11,6 +12,7 @@ import com.kubedesk.service.Dtos.TopologyData;
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.ContainerStatus;
 import io.fabric8.kubernetes.api.model.Event;
+import io.fabric8.kubernetes.api.model.GenericKubernetesResource;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.NamedContext;
 import io.fabric8.kubernetes.api.model.Namespace;
@@ -38,6 +40,7 @@ import io.fabric8.kubernetes.client.dsl.ExecListener;
 import io.fabric8.kubernetes.client.dsl.ExecWatch;
 import io.fabric8.kubernetes.client.dsl.base.PatchContext;
 import io.fabric8.kubernetes.client.dsl.base.PatchType;
+import io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext;
 import io.fabric8.kubernetes.client.Watch;
 import io.fabric8.kubernetes.client.Watcher;
 import io.fabric8.kubernetes.client.WatcherException;
@@ -149,6 +152,117 @@ public class Fabric8ClusterService implements ClusterService {
             throw new ClusterException("Could not list namespaces: " + rootMessage(e), e);
         } catch (Exception e) {
             throw new ClusterException("Could not list namespaces: " + rootMessage(e), e);
+        }
+    }
+
+    // --- custom resources (CRDs) ------------------------------------------------------------
+
+    @Override
+    public List<CustomResourceType> listCustomResourceTypes(String context) {
+        try (KubernetesClient client = clientFor(context)) {
+            List<CustomResourceType> out = new ArrayList<>();
+            for (var crd : client.apiextensions().v1().customResourceDefinitions().list().getItems()) {
+                var spec = crd.getSpec();
+                if (spec == null || spec.getNames() == null || spec.getVersions() == null) {
+                    continue;
+                }
+                // Prefer the storage version; else the first served version.
+                String version = null, served = null;
+                for (var v : spec.getVersions()) {
+                    if (Boolean.TRUE.equals(v.getServed())) {
+                        if (served == null) {
+                            served = v.getName();
+                        }
+                        if (Boolean.TRUE.equals(v.getStorage())) {
+                            version = v.getName();
+                            break;
+                        }
+                    }
+                }
+                if (version == null) {
+                    version = served;
+                }
+                if (version == null) {
+                    continue;
+                }
+                out.add(new CustomResourceType(spec.getGroup(), version, spec.getNames().getPlural(),
+                        spec.getNames().getKind(), "Namespaced".equalsIgnoreCase(spec.getScope())));
+            }
+            out.sort(Comparator.comparing(CustomResourceType::kind, String.CASE_INSENSITIVE_ORDER));
+            return out;
+        } catch (KubernetesClientException e) {
+            // A namespace-scoped token can't list cluster-scoped CRDs — degrade to manual add.
+            if (e.getCode() == 403 || e.getCode() == 401) {
+                return List.of();
+            }
+            throw new ClusterException("Could not list custom resource definitions: " + rootMessage(e), e);
+        } catch (Exception e) {
+            throw new ClusterException("Could not list custom resource definitions: " + rootMessage(e), e);
+        }
+    }
+
+    private ResourceDefinitionContext rdc(CustomResourceType t) {
+        return new ResourceDefinitionContext.Builder()
+                .withGroup(t.group())
+                .withVersion(t.version())
+                .withPlural(t.plural())
+                .withKind(t.kind())
+                .withNamespaced(t.namespaced())
+                .build();
+    }
+
+    @Override
+    public ResourceData listCustomResources(String context, String namespace, CustomResourceType type) {
+        try (KubernetesClient client = clientFor(context)) {
+            var op = client.genericKubernetesResources(rdc(type));
+            List<GenericKubernetesResource> items =
+                    (type.namespaced() ? op.inNamespace(namespace).list() : op.list()).getItems();
+            boolean ns = type.namespaced();
+            List<String> columns = ns ? List.of("Name", "Namespace", "Age") : List.of("Name", "Age");
+            List<List<String>> rows = new ArrayList<>();
+            for (GenericKubernetesResource r : items) {
+                var m = r.getMetadata();
+                if (ns) {
+                    rows.add(List.of(nz(m.getName()), nz(m.getNamespace()), age(m.getCreationTimestamp())));
+                } else {
+                    rows.add(List.of(nz(m.getName()), age(m.getCreationTimestamp())));
+                }
+            }
+            return new ResourceData(columns, rows);
+        } catch (Exception e) {
+            throw new ClusterException("Could not list " + type.kind() + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public String describeCustomResourceYaml(String context, String namespace, CustomResourceType type,
+                                             String name) {
+        try (KubernetesClient client = clientFor(context)) {
+            var op = client.genericKubernetesResources(rdc(type));
+            GenericKubernetesResource r = type.namespaced()
+                    ? op.inNamespace(namespace).withName(name).get()
+                    : op.withName(name).get();
+            if (r == null) {
+                return "# " + type.kind() + " '" + name + "' not found.";
+            }
+            return io.fabric8.kubernetes.client.utils.Serialization.asYaml(r);
+        } catch (Exception e) {
+            throw new ClusterException("Could not load YAML for " + name + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public void deleteCustomResource(String context, String namespace, CustomResourceType type,
+                                     String name) {
+        try (KubernetesClient client = clientFor(context)) {
+            var op = client.genericKubernetesResources(rdc(type));
+            if (type.namespaced()) {
+                op.inNamespace(namespace).withName(name).delete();
+            } else {
+                op.withName(name).delete();
+            }
+        } catch (Exception e) {
+            throw new ClusterException("Could not delete " + name + ": " + rootMessage(e), e);
         }
     }
 

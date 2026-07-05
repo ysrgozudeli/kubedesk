@@ -19,6 +19,18 @@ public final class Dtos {
     }
 
     /**
+     * A custom resource type — either auto-discovered from a CRD or added manually. Enough to build a
+     * fabric8 ResourceDefinitionContext and list/inspect instances.
+     */
+    public record CustomResourceType(String group, String version, String plural, String kind,
+                                     boolean namespaced) {
+        /** The apiVersion (group/version, or just version for the core group). */
+        public String apiVersion() {
+            return (group == null || group.isBlank()) ? version : group + "/" + version;
+        }
+    }
+
+    /**
      * A generic, table-shaped result: the column headers plus one string list per row.
      * This lets the UI render any resource kind with a single dynamic table.
      */
