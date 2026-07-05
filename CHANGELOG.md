@@ -3,6 +3,23 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-07-05
+
+### Added
+- **Search across all listed namespaces.** The namespace dropdown gains an **"✿ All namespaces"**
+  entry (when more than one namespace is listed). It lists the current kind in each listed namespace
+  and merges them into one table with a leading **Namespace** column, so the search box spans them
+  all. It queries each namespace individually rather than a single cluster-wide list, so it works
+  even with namespace-scoped tokens. This mode is read-only (double-click / right-click → View YAML,
+  Copy name, or "Go to this namespace"); pick a single namespace to act on a resource.
+
+### Changed
+- **Per-context namespace memory.** The last-used namespace is remembered per context and restored
+  when you switch back — juggling multiple contexts no longer loses your namespace.
+- **Copyable text.** The status message and the details Overview are now selectable and copyable
+  (select + Ctrl+C, right-click Copy, or a "Copy all" button on the Overview) — handy for pasting an
+  error or a resource's details into a ticket or chat.
+
 ## [1.2.8] - 2026-07-05
 
 ### Fixed
