@@ -1821,13 +1821,25 @@ public class MainView extends BorderPane {
         });
     }
 
+    /** The namespace to act on: the box value, or the kubeconfig context's namespace if it's blank. */
+    private String effectiveNamespace() {
+        String ns = namespaceBox.getValue();
+        if (ns != null && !ns.isBlank()) {
+            return ns;
+        }
+        ContextInfo ctx = contextBox.getValue();
+        return ctx != null ? ctx.namespace() : null;
+    }
+
     private void refreshContent() {
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
             return;
         }
-        String ns = namespaceBox.getValue();
-        if (currentKind.namespaced() && ns == null) {
+        String ns = effectiveNamespace();
+        if (currentKind.namespaced() && (ns == null || ns.isBlank())) {
+            status("Type your namespace in the Namespace box to load "
+                    + currentKind.label().toLowerCase() + ".");
             return;
         }
         status("Loading " + currentKind.label() + "…");
@@ -2127,8 +2139,8 @@ public class MainView extends BorderPane {
         if (ctx == null) {
             return;
         }
-        String ns = namespaceBox.getValue();
-        if (currentKind.namespaced() && ns == null) {
+        String ns = effectiveNamespace();
+        if (currentKind.namespaced() && (ns == null || ns.isBlank())) {
             return;
         }
         try {
@@ -2428,9 +2440,19 @@ public class MainView extends BorderPane {
         task.setOnSucceeded(e -> onSuccess.accept(task.getValue()));
         task.setOnFailed(e -> {
             Throwable ex = task.getException();
-            statusError("Error: " + (ex != null ? ex.getMessage() : "unknown"));
+            statusError(withForbiddenHint(ex != null ? ex.getMessage() : "unknown"));
         });
         pool.submit(task);
+    }
+
+    /** If a message looks like an RBAC denial, add a hint to set the namespace. */
+    private String withForbiddenHint(String message) {
+        String base = "Error: " + message;
+        if (message != null && message.toLowerCase().contains("forbidden")) {
+            return base + "  — if your token is namespace-scoped, type your namespace "
+                    + "in the Namespace box and press Enter.";
+        }
+        return base;
     }
 
     /** Like {@link #runAsync} but for a mutation that returns nothing. */

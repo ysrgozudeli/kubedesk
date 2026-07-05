@@ -3,6 +3,16 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.8] - 2026-07-05
+
+### Fixed
+- **Never list resources cluster-wide by accident.** When the Namespace box is blank (e.g. a
+  kubeconfig context that sets no default namespace), KubeDesk now falls back to the context's
+  namespace and never issues a cluster-wide list — which a namespace-scoped token is forbidden from
+  and which produced a confusing "pods is forbidden" error. If a request is still denied, the status
+  bar now hints: *type your namespace in the Namespace box and press Enter.* (The Namespace box is
+  editable, and your choice is remembered across restarts.)
+
 ## [1.2.7] - 2026-07-04
 
 ### Changed
