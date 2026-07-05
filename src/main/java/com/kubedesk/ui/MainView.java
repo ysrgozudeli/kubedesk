@@ -113,7 +113,8 @@ public class MainView extends BorderPane {
     private final TableView<List<String>> table = new TableView<>();
     private final HBox healthRing = new HBox();
     private final Label contentTitle = new Label("Pods");
-    private final Label statusBar = new Label("Ready.");
+    // Read-only TextField (not a Label) so the status message is selectable and copyable.
+    private final TextField statusBar = new TextField("Ready.");
     private static final PseudoClass ERROR_PSEUDO = PseudoClass.getPseudoClass("error");
 
     // Extra views (topology, health) live in the same center area as the resource table.
@@ -716,7 +717,12 @@ public class MainView extends BorderPane {
     }
 
     private HBox buildStatusBar() {
+        // Selectable + copyable: read-only field styled to look like a plain status label.
+        statusBar.setEditable(false);
+        statusBar.setFocusTraversable(false);
+        statusBar.getStyleClass().add("status-text");
         HBox box = new HBox(statusBar);
+        HBox.setHgrow(statusBar, Priority.ALWAYS);
         box.setPadding(new Insets(6, 16, 6, 16));
         box.getStyleClass().add("status-bar");
         return box;
@@ -1029,32 +1035,40 @@ public class MainView extends BorderPane {
         detailsSubtitle.setText(kind.label() + (kind.namespaced() ? " · " + safeNamespace() : ""));
         populateDetailsActions(kind, name);
 
-        // Overview: from the row's cells when we have them, else just the name.
+        // Overview: from the row's cells when we have them, else just the name. Values are selectable
+        // read-only fields, so you can select + Ctrl+C or right-click → Copy to share them.
         overviewBox.getChildren().clear();
+        StringBuilder all = new StringBuilder();
         if (row != null) {
             List<String> cols = currentData.columns();
             for (int i = 0; i < cols.size(); i++) {
                 String value = i < row.size() ? row.get(i) : "";
+                all.append(cols.get(i)).append(": ").append(value).append('\n');
                 Label key = new Label(cols.get(i));
                 key.getStyleClass().add("kv-key");
                 key.setMinWidth(110);
-                Label val = new Label(value);
-                val.getStyleClass().add("kv-value");
-                val.setWrapText(true);
-                HBox line = new HBox(10, key, val);
-                line.setAlignment(Pos.TOP_LEFT);
+                HBox line = new HBox(10, key, copyableValue(value));
+                line.setAlignment(Pos.CENTER_LEFT);
                 overviewBox.getChildren().add(line);
             }
         } else {
+            all.append("Name: ").append(name).append('\n');
             Label key = new Label("Name");
             key.getStyleClass().add("kv-key");
             key.setMinWidth(110);
-            Label val = new Label(name);
-            val.getStyleClass().add("kv-value");
             Label hint = new Label("See the YAML tab for full details.");
             hint.getStyleClass().add("muted");
-            overviewBox.getChildren().addAll(new HBox(10, key, val), hint);
+            overviewBox.getChildren().addAll(new HBox(10, key, copyableValue(name)), hint);
         }
+        // A "Copy all" button above the fields, to grab the whole Overview at once.
+        String allText = all.toString();
+        Button copyAll = new Button("⧉ Copy all");
+        copyAll.getStyleClass().add("icon-button");
+        copyAll.setTooltip(new Tooltip("Copy all fields to the clipboard"));
+        copyAll.setOnAction(e -> copyToClipboard(allText));
+        Region copyAllSpacer = new Region();
+        HBox.setHgrow(copyAllSpacer, Priority.ALWAYS);
+        overviewBox.getChildren().add(0, new HBox(copyAllSpacer, copyAll));
 
         // Build the tab set for this kind: Overview + YAML always; Events when applicable; Logs for pods.
         boolean isPod = kind == ResourceKind.PODS;
@@ -1737,6 +1751,17 @@ public class MainView extends BorderPane {
         ClipboardContent content = new ClipboardContent();
         content.putString(text);
         Clipboard.getSystemClipboard().setContent(content);
+    }
+
+    /** A selectable, read-only field that looks like a value label but can be copied. */
+    private TextField copyableValue(String text) {
+        TextField f = new TextField(text == null ? "" : text);
+        f.setEditable(false);
+        f.setFocusTraversable(false);
+        f.getStyleClass().addAll("kv-value", "flat-field");
+        f.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(f, Priority.ALWAYS);
+        return f;
     }
 
     /** ConfigMaps and Secrets don't emit events, so the Events action is noise for them. */
