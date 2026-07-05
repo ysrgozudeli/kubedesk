@@ -18,6 +18,9 @@ public class Settings {
     public String lastContext;
     public String lastNamespace;
 
+    /** Namespace last used per context (context name -> namespace), so switching contexts restores it. */
+    public Map<String, String> namespaceByContext = new HashMap<>();
+
     /** Hidden table columns, keyed by ResourceKind name -> list of hidden column headers. */
     public Map<String, List<String>> hiddenColumns = new HashMap<>();
 

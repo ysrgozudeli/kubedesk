@@ -1820,7 +1820,11 @@ public class MainView extends BorderPane {
         status("Loading namespaces for " + context.name() + "…");
         runAsync(() -> service.listNamespaces(context.name()), namespaces -> {
             String chosen;
-            if (context.name().equals(settings.lastContext) && settings.lastNamespace != null
+            String remembered = settings.namespaceByContext.get(context.name());
+            if (remembered != null && !remembered.isBlank()
+                    && (namespaces.isEmpty() || namespaces.contains(remembered))) {
+                chosen = remembered;
+            } else if (context.name().equals(settings.lastContext) && settings.lastNamespace != null
                     && (namespaces.isEmpty() || namespaces.contains(settings.lastNamespace))) {
                 chosen = settings.lastNamespace;
             } else if (namespaces.contains(context.namespace())) {
@@ -1889,6 +1893,11 @@ public class MainView extends BorderPane {
         ContextInfo c = contextBox.getValue();
         settings.lastContext = c != null ? c.name() : null;
         settings.lastNamespace = namespaceBox.getValue();
+        // Remember the namespace per context, so switching back to this context restores it.
+        String ns = namespaceBox.getValue();
+        if (c != null && ns != null && !ns.isBlank()) {
+            settings.namespaceByContext.put(c.name(), ns);
+        }
         saveSettings();
         switch (currentView) {
             case TOPOLOGY -> loadTopology();
