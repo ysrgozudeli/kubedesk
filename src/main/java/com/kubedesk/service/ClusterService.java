@@ -32,6 +32,13 @@ public interface ClusterService {
      */
     ResourceData listResource(String context, String namespace, ResourceKind kind);
 
+    /**
+     * List a namespaced kind across several namespaces and merge into one table with a leading
+     * "Namespace" column. Each namespace is queried individually (so it stays within namespace-scoped
+     * RBAC), unlike a single cluster-wide list.
+     */
+    ResourceData listResourceAcrossNamespaces(String context, List<String> namespaces, ResourceKind kind);
+
     /** Summarise pod phases in a namespace for the dashboard health ring. */
     HealthSummary podHealth(String context, String namespace);
 

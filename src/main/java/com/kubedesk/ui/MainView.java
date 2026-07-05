@@ -18,6 +18,8 @@ import com.kubedesk.service.ResourceKind;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
+import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.SimpleBooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.concurrent.Task;
 import javafx.css.PseudoClass;
@@ -164,6 +166,11 @@ public class MainView extends BorderPane {
     private ResourceKind detailKind = ResourceKind.PODS;
 
     private ResourceKind currentKind = ResourceKind.PODS;
+
+    // "Search all listed namespaces" mode: a sentinel entry in the namespace dropdown. In this mode
+    // the table gains a leading Namespace column, is read-only (view YAML only), and has no live watch.
+    private static final String ALL_NAMESPACES = "✿ All namespaces";
+    private final BooleanProperty allNsMode = new SimpleBooleanProperty(false);
     private ResourceData currentData = new ResourceData(List.of(), List.of());
 
     /** Per-kind set of column names the user has hidden via the table's column menu. */
@@ -779,13 +786,30 @@ public class MainView extends BorderPane {
             restart.setVisible(isDeployment);
             scale.setVisible(isDeployment);
         });
-        // Only show the menu on non-empty rows.
+
+        // A read-only menu for "All namespaces" mode (act on a resource by picking its namespace).
+        MenuItem allYaml = new MenuItem("View YAML");
+        allYaml.setOnAction(e -> openYamlDialog(currentKind, nameOfRow(row.getItem()),
+                namespaceOfRow(row.getItem())));
+        MenuItem allCopyName = new MenuItem("Copy name");
+        allCopyName.setOnAction(e -> copyToClipboard(nameOfRow(row.getItem())));
+        MenuItem goToNs = new MenuItem("Go to this namespace");
+        goToNs.setOnAction(e -> namespaceBox.setValue(namespaceOfRow(row.getItem())));
+        ContextMenu allMenu = new ContextMenu(allYaml, allCopyName, new SeparatorMenuItem(), goToNs);
+
+        // Only show a menu on non-empty rows; use the read-only menu in all-namespaces mode.
         row.contextMenuProperty().bind(
-                Bindings.when(row.emptyProperty()).then((ContextMenu) null).otherwise(menu));
+                Bindings.when(row.emptyProperty()).then((ContextMenu) null)
+                        .otherwise(Bindings.when(allNsMode).then(allMenu).otherwise(menu)));
 
         row.setOnMouseClicked(ev -> {
             if (ev.getButton() == MouseButton.PRIMARY && ev.getClickCount() == 2 && !row.isEmpty()) {
-                showDetails(row.getItem(), overviewTab);
+                if (allNsMode.get()) {
+                    openYamlDialog(currentKind, nameOfRow(row.getItem()),
+                            namespaceOfRow(row.getItem()));
+                } else {
+                    showDetails(row.getItem(), overviewTab);
+                }
             }
         });
         return row;
@@ -1774,6 +1798,22 @@ public class MainView extends BorderPane {
         return row != null && !row.isEmpty() ? row.get(0) : "";
     }
 
+    /** In all-namespaces mode the leading column is Namespace and Name is second. */
+    private String nameOfRow(List<String> row) {
+        if (allNsMode.get()) {
+            return row != null && row.size() > 1 ? row.get(1) : "";
+        }
+        return resourceName(row);
+    }
+
+    /** The namespace a row belongs to: its Namespace column in all-namespaces mode, else the box. */
+    private String namespaceOfRow(List<String> row) {
+        if (allNsMode.get()) {
+            return row != null && !row.isEmpty() ? row.get(0) : effectiveNamespace();
+        }
+        return effectiveNamespace();
+    }
+
     private String safeNamespace() {
         String ns = namespaceBox.getValue();
         return ns == null ? "" : ns;
@@ -1841,9 +1881,15 @@ public class MainView extends BorderPane {
             } else {
                 chosen = namespaces.get(0);
             }
-            // Populate with the handler detached, then trigger a single reload + watch.
+            // Populate with the handler detached, then trigger a single reload + watch. Offer the
+            // "All namespaces" sentinel (first) only when there's more than one namespace to search.
             namespaceBox.setOnAction(null);
-            namespaceBox.setItems(FXCollections.observableArrayList(namespaces));
+            List<String> items = new ArrayList<>();
+            if (namespaces.size() > 1) {
+                items.add(ALL_NAMESPACES);
+            }
+            items.addAll(namespaces);
+            namespaceBox.setItems(FXCollections.observableArrayList(items));
             namespaceBox.setValue(chosen);
             namespaceBox.setOnAction(e -> onSelectionChanged());
             onSelectionChanged();
@@ -1863,6 +1909,10 @@ public class MainView extends BorderPane {
     private void refreshContent() {
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
+            return;
+        }
+        if (allNsMode.get() && currentKind.namespaced()) {
+            loadAcrossNamespaces(ctx);
             return;
         }
         String ns = effectiveNamespace();
@@ -1886,17 +1936,76 @@ public class MainView extends BorderPane {
         }
     }
 
+    /** The namespaces to search in "All namespaces" mode: everything in the dropdown but the sentinel. */
+    private List<String> listedNamespaces() {
+        List<String> out = new ArrayList<>();
+        for (String s : namespaceBox.getItems()) {
+            if (!ALL_NAMESPACES.equals(s) && s != null && !s.isBlank()) {
+                out.add(s);
+            }
+        }
+        return out;
+    }
+
+    private void loadAcrossNamespaces(ContextInfo ctx) {
+        List<String> nss = listedNamespaces();
+        if (nss.isEmpty()) {
+            status("No namespaces to search.");
+            return;
+        }
+        healthRing.getChildren().clear();
+        status("Loading " + currentKind.label() + " across " + nss.size() + " namespaces…");
+        ResourceKind kind = currentKind;
+        runAsync(() -> service.listResourceAcrossNamespaces(ctx.name(), nss, kind), data -> {
+            currentData = data;
+            renderTable(data);
+            applyFilter();
+            status(data.rows().size() + " " + kind.label().toLowerCase() + " across "
+                    + nss.size() + " namespaces.  (Read-only — pick a namespace to act on one.)");
+        });
+    }
+
+    /** Read-only YAML viewer for a resource in a specific namespace (used from All-namespaces mode). */
+    private void openYamlDialog(ResourceKind kind, String name, String ns) {
+        if (name == null || name.isBlank()) {
+            return;
+        }
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        TextArea yaml = new TextArea("Loading…");
+        yaml.setEditable(false);
+        yaml.getStyleClass().add("yaml-area");
+        yaml.setPrefSize(700, 540);
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(kind.label() + ": " + name + "  (" + ns + ")");
+        if (getScene() != null) {
+            dialog.initOwner(getScene().getWindow());
+        }
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        dialog.getDialogPane().setContent(yaml);
+        runAsync(() -> service.describeYaml(ctx.name(), ns, kind, name), yaml::setText);
+        dialog.showAndWait();
+    }
+
     // --- live updates (watches) -------------------------------------------------------------
 
     /** Called when the user changes context/namespace/kind: reload data and (re)start the watch. */
     private void onSelectionChanged() {
         ContextInfo c = contextBox.getValue();
-        settings.lastContext = c != null ? c.name() : null;
-        settings.lastNamespace = namespaceBox.getValue();
-        // Remember the namespace per context, so switching back to this context restores it.
         String ns = namespaceBox.getValue();
-        if (c != null && ns != null && !ns.isBlank()) {
-            settings.namespaceByContext.put(c.name(), ns);
+        boolean sentinel = ALL_NAMESPACES.equals(ns);
+        // All-namespaces behavior only applies to namespaced kinds (Nodes etc. ignore it).
+        allNsMode.set(sentinel && currentKind.namespaced());
+        settings.lastContext = c != null ? c.name() : null;
+        // Don't persist the "All namespaces" sentinel as a real namespace.
+        if (!sentinel) {
+            settings.lastNamespace = ns;
+            if (c != null && ns != null && !ns.isBlank()) {
+                settings.namespaceByContext.put(c.name(), ns);
+            }
         }
         saveSettings();
         switch (currentView) {
@@ -1964,6 +2073,10 @@ public class MainView extends BorderPane {
     private void loadTopology() {
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
+            return;
+        }
+        if (allNsMode.get()) {
+            status("Pick a single namespace to view its topology.");
             return;
         }
         String ns = namespaceBox.getValue();
@@ -2057,6 +2170,10 @@ public class MainView extends BorderPane {
     private void loadHealth() {
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
+            return;
+        }
+        if (allNsMode.get()) {
+            status("Pick a single namespace to run the health scan.");
             return;
         }
         String ns = namespaceBox.getValue();
@@ -2169,6 +2286,9 @@ public class MainView extends BorderPane {
         if (paused) {
             return;
         }
+        if (allNsMode.get()) {
+            return; // no live watch in all-namespaces mode
+        }
         ContextInfo ctx = contextBox.getValue();
         if (ctx == null) {
             return;
@@ -2255,7 +2375,10 @@ public class MainView extends BorderPane {
 
     private void renderTable(ResourceData data) {
         table.getColumns().clear();
-        Set<String> hidden = hiddenColumns.computeIfAbsent(currentKind, k -> new HashSet<>());
+        // In all-namespaces mode the columns shift (Namespace prepended); don't apply per-kind hiding.
+        Set<String> hidden = allNsMode.get()
+                ? Set.of()
+                : hiddenColumns.computeIfAbsent(currentKind, k -> new HashSet<>());
         List<String> cols = data.columns();
         for (int i = 0; i < cols.size(); i++) {
             final int idx = i;

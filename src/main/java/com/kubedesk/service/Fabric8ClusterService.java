@@ -155,22 +155,59 @@ public class Fabric8ClusterService implements ClusterService {
     @Override
     public ResourceData listResource(String context, String namespace, ResourceKind kind) {
         try (KubernetesClient client = clientFor(context)) {
-            return switch (kind) {
-                case PODS -> pods(client, namespace);
-                case DEPLOYMENTS -> deployments(client, namespace);
-                case STATEFULSETS -> statefulSets(client, namespace);
-                case DAEMONSETS -> daemonSets(client, namespace);
-                case JOBS -> jobs(client, namespace);
-                case CRONJOBS -> cronJobs(client, namespace);
-                case SERVICES -> services(client, namespace);
-                case INGRESSES -> ingresses(client, namespace);
-                case CONFIGMAPS -> configMaps(client, namespace);
-                case SECRETS -> secrets(client, namespace);
-                case PVCS -> pvcs(client, namespace);
-                case NODES -> nodes(client);
-            };
+            return dataForKind(client, namespace, kind);
         } catch (Exception e) {
             throw new ClusterException("Could not list " + kind.label() + ": " + rootMessage(e), e);
+        }
+    }
+
+    private ResourceData dataForKind(KubernetesClient client, String namespace, ResourceKind kind) {
+        return switch (kind) {
+            case PODS -> pods(client, namespace);
+            case DEPLOYMENTS -> deployments(client, namespace);
+            case STATEFULSETS -> statefulSets(client, namespace);
+            case DAEMONSETS -> daemonSets(client, namespace);
+            case JOBS -> jobs(client, namespace);
+            case CRONJOBS -> cronJobs(client, namespace);
+            case SERVICES -> services(client, namespace);
+            case INGRESSES -> ingresses(client, namespace);
+            case CONFIGMAPS -> configMaps(client, namespace);
+            case SECRETS -> secrets(client, namespace);
+            case PVCS -> pvcs(client, namespace);
+            case NODES -> nodes(client);
+        };
+    }
+
+    @Override
+    public ResourceData listResourceAcrossNamespaces(String context, List<String> namespaces,
+                                                     ResourceKind kind) {
+        try (KubernetesClient client = clientFor(context)) {
+            List<String> baseColumns = null;
+            List<List<String>> allRows = new ArrayList<>();
+            for (String ns : namespaces) {
+                if (ns == null || ns.isBlank()) {
+                    continue;
+                }
+                ResourceData d = dataForKind(client, ns, kind);
+                if (baseColumns == null) {
+                    baseColumns = d.columns();
+                }
+                for (List<String> row : d.rows()) {
+                    List<String> merged = new ArrayList<>(row.size() + 1);
+                    merged.add(ns);            // prepend the owning namespace
+                    merged.addAll(row);
+                    allRows.add(merged);
+                }
+            }
+            List<String> columns = new ArrayList<>();
+            columns.add("Namespace");
+            if (baseColumns != null) {
+                columns.addAll(baseColumns);
+            }
+            return new ResourceData(columns, allRows);
+        } catch (Exception e) {
+            throw new ClusterException("Could not list " + kind.label() + " across namespaces: "
+                    + rootMessage(e), e);
         }
     }
 
