@@ -4,6 +4,7 @@ import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ContextInfo;
+import com.kubedesk.service.Dtos.MetricSample;
 import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSeverity;
@@ -16,7 +17,9 @@ import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.Fabric8ClusterService;
 import com.kubedesk.service.ResourceKind;
+import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
+import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
 import javafx.beans.property.BooleanProperty;
@@ -27,7 +30,10 @@ import javafx.css.PseudoClass;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.util.Duration;
+import javafx.scene.chart.LineChart;
+import javafx.scene.chart.NumberAxis;
 import javafx.scene.chart.PieChart;
+import javafx.scene.chart.XYChart;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonBar;
@@ -121,7 +127,7 @@ public class MainView extends BorderPane {
     private static final PseudoClass ERROR_PSEUDO = PseudoClass.getPseudoClass("error");
 
     // Extra views (topology, health) live in the same center area as the resource table.
-    private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH }
+    private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH, EVENTS }
 
     private ViewMode currentView = ViewMode.RESOURCE;
     private final Map<ResourceKind, ToggleButton> navButtons = new EnumMap<>(ResourceKind.class);
@@ -133,6 +139,11 @@ public class MainView extends BorderPane {
     private final VBox healthView = new VBox(10);
     private final TableView<HealthFinding> healthTable = new TableView<>();
     private final Label healthSummary = new Label();
+
+    private final ToggleButton eventsToggle = new ToggleButton("›  Events");
+    private final VBox eventsView = new VBox(10);
+    private final TableView<List<String>> nsEventsTable = new TableView<>();
+    private final Label eventsSummary = new Label();
 
     // Details panel (right side)
     private final VBox detailsPane = new VBox();
@@ -148,6 +159,15 @@ public class MainView extends BorderPane {
     private final Tab eventsTab = new Tab("Events", eventsArea);
     private final Tab logsTab = new Tab("Logs");
     private final Tab shellTab = new Tab("Shell");
+
+    // Live metrics (pods): polls the Metrics API and accumulates a client-side time-series.
+    private final Tab metricsTab = new Tab("Metrics");
+    private final XYChart.Series<Number, Number> cpuSeries = new XYChart.Series<>();
+    private final XYChart.Series<Number, Number> memSeries = new XYChart.Series<>();
+    private Timeline metricsTimeline;
+    private long metricsStartMillis;
+    private String metricsPod;
+    private String metricsNs;
 
     // Logs view controls
     private final ComboBox<String> containerBox = new ComboBox<>();
@@ -674,6 +694,16 @@ public class MainView extends BorderPane {
         });
         nav.getChildren().add(topologyToggle);
 
+        eventsToggle.setToggleGroup(group);
+        eventsToggle.setMaxWidth(Double.MAX_VALUE);
+        eventsToggle.getStyleClass().add("nav-item");
+        eventsToggle.setOnAction(e -> {
+            if (eventsToggle.isSelected()) {
+                enterEvents();
+            }
+        });
+        nav.getChildren().add(eventsToggle);
+
         // Make the nav scrollable so a short window (e.g. a small VDI screen) shrinks/scrolls the
         // list instead of forcing the whole layout taller than the screen and hiding the status bar.
         ScrollPane scroll = new ScrollPane(nav);
@@ -724,7 +754,12 @@ public class MainView extends BorderPane {
         healthView.setManaged(false);
         VBox.setVgrow(healthView, Priority.ALWAYS);
 
-        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView, healthView);
+        buildEventsView();
+        eventsView.setVisible(false);
+        eventsView.setManaged(false);
+        VBox.setVgrow(eventsView, Priority.ALWAYS);
+
+        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView, healthView, eventsView);
         content.setPadding(new Insets(16));
         content.getStyleClass().add("content");
         content.setMinWidth(320); // keep the table usable no matter how wide the details pane gets
@@ -871,6 +906,8 @@ public class MainView extends BorderPane {
         logsTab.setContent(buildLogsPane());
         shellTab.setClosable(false);
         shellTab.setContent(buildShellPane());
+        metricsTab.setClosable(false);
+        metricsTab.setContent(buildMetricsPane());
         detailsTabs.getTabs().setAll(overviewTab, yamlTab, eventsTab);
         VBox.setVgrow(detailsTabs, Priority.ALWAYS);
 
@@ -1118,6 +1155,7 @@ public class MainView extends BorderPane {
         if (isPod) {
             detailsTabs.getTabs().add(logsTab);
             detailsTabs.getTabs().add(shellTab);
+            detailsTabs.getTabs().add(metricsTab);
         }
         // Any previously open shell belongs to the old selection — end it.
         closeExec();
@@ -1169,10 +1207,88 @@ public class MainView extends BorderPane {
                 shellContainerBox.setItems(FXCollections.observableArrayList(containers));
                 shellContainerBox.setValue(containers.isEmpty() ? null : containers.get(0));
             });
+            startMetricsPolling(ctx.name(), ns, name);
         } else {
             currentLogPod = null;
             shellPod = null;
+            stopMetricsPolling();
         }
+    }
+
+    // --- live pod metrics -------------------------------------------------------------------
+
+    private VBox buildMetricsPane() {
+        LineChart<Number, Number> cpuChart = liveChart("CPU (millicores)", cpuSeries);
+        LineChart<Number, Number> memChart = liveChart("Memory (MiB)", memSeries);
+
+        Label hint = new Label("Live — samples every 10s while open (needs metrics-server). "
+                + "The chart builds up client-side as you watch, since metrics-server keeps no history.");
+        hint.getStyleClass().add("muted");
+        hint.setWrapText(true);
+
+        VBox.setVgrow(cpuChart, Priority.ALWAYS);
+        VBox.setVgrow(memChart, Priority.ALWAYS);
+        VBox box = new VBox(8, hint, cpuChart, memChart);
+        box.setPadding(new Insets(8));
+        return box;
+    }
+
+    private LineChart<Number, Number> liveChart(String yLabel, XYChart.Series<Number, Number> series) {
+        NumberAxis x = new NumberAxis();
+        x.setLabel("seconds");
+        x.setForceZeroInRange(false);
+        NumberAxis y = new NumberAxis();
+        y.setLabel(yLabel);
+        y.setForceZeroInRange(true);
+        LineChart<Number, Number> chart = new LineChart<>(x, y);
+        chart.setLegendVisible(false);
+        chart.setAnimated(false);
+        chart.setCreateSymbols(false);
+        chart.getData().add(series);
+        return chart;
+    }
+
+    private void startMetricsPolling(String ctxName, String ns, String pod) {
+        stopMetricsPolling();
+        metricsNs = ns;
+        metricsPod = pod;
+        cpuSeries.getData().clear();
+        memSeries.getData().clear();
+        metricsStartMillis = System.currentTimeMillis();
+        sampleMetrics(ctxName); // first sample immediately
+        metricsTimeline = new Timeline(new KeyFrame(Duration.seconds(10), e -> sampleMetrics(ctxName)));
+        metricsTimeline.setCycleCount(Timeline.INDEFINITE);
+        metricsTimeline.play();
+    }
+
+    private void stopMetricsPolling() {
+        if (metricsTimeline != null) {
+            metricsTimeline.stop();
+            metricsTimeline = null;
+        }
+    }
+
+    private void sampleMetrics(String ctxName) {
+        String ns = metricsNs;
+        String pod = metricsPod;
+        if (pod == null) {
+            return;
+        }
+        runAsync(() -> service.podUsageSample(ctxName, ns, pod), sample -> {
+            if (sample == null || !pod.equals(metricsPod)) {
+                return; // no metrics yet, or the details switched to another pod
+            }
+            double t = (System.currentTimeMillis() - metricsStartMillis) / 1000.0;
+            cpuSeries.getData().add(new XYChart.Data<>(t, sample.cpuMillicores()));
+            memSeries.getData().add(new XYChart.Data<>(t, sample.memoryMiB()));
+            // Keep ~5 minutes of history (30 samples at 10s).
+            if (cpuSeries.getData().size() > 30) {
+                cpuSeries.getData().remove(0);
+            }
+            if (memSeries.getData().size() > 30) {
+                memSeries.getData().remove(0);
+            }
+        });
     }
 
     /** (Re)load the log tail for the currently shown pod + selected container. */
@@ -1236,6 +1352,8 @@ public class MainView extends BorderPane {
 
     private void closeDetails() {
         closeExec();
+        stopMetricsPolling();
+        metricsPod = null;
         centerSplit.getItems().remove(detailsPane);
     }
 
@@ -2034,6 +2152,7 @@ public class MainView extends BorderPane {
         switch (currentView) {
             case TOPOLOGY -> loadTopology();
             case HEALTH -> loadHealth();
+            case EVENTS -> loadEvents();
             default -> {
                 refreshContent();
                 if (paused) {
@@ -2133,7 +2252,15 @@ public class MainView extends BorderPane {
         loadHealth();
     }
 
-    /** Show exactly one of the resource table (+ring), the topology view, or the health view. */
+    private void enterEvents() {
+        setCenterView(ViewMode.EVENTS);
+        eventsToggle.setSelected(true);
+        closeDetails();
+        stopWatch();
+        loadEvents();
+    }
+
+    /** Show exactly one of the resource table (+ring), the topology, health, or events view. */
     private void setCenterView(ViewMode mode) {
         currentView = mode;
         boolean res = mode == ViewMode.RESOURCE;
@@ -2148,6 +2275,8 @@ public class MainView extends BorderPane {
         topologyView.setManaged(mode == ViewMode.TOPOLOGY);
         healthView.setVisible(mode == ViewMode.HEALTH);
         healthView.setManaged(mode == ViewMode.HEALTH);
+        eventsView.setVisible(mode == ViewMode.EVENTS);
+        eventsView.setManaged(mode == ViewMode.EVENTS);
     }
 
     private void loadTopology() {
@@ -2271,6 +2400,88 @@ public class MainView extends BorderPane {
             }
             status("Health scan complete — " + findings.size() + " finding(s). Double-click to inspect, "
                     + "right-click to act.");
+        });
+    }
+
+    // --- events view ------------------------------------------------------------------------
+
+    private void buildEventsView() {
+        Button refresh = new Button("↻ Refresh");
+        refresh.getStyleClass().add("accent-button");
+        refresh.setOnAction(e -> loadEvents());
+
+        eventsSummary.getStyleClass().add("muted");
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox controls = new HBox(10, eventsSummary, spacer, refresh);
+        controls.setAlignment(Pos.CENTER_LEFT);
+
+        nsEventsTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        nsEventsTable.setPlaceholder(new Label("No events (Kubernetes keeps them for only ~1 hour)."));
+        VBox.setVgrow(nsEventsTable, Priority.ALWAYS);
+
+        // Columns map to the listEvents row order: Type, Reason, Object, Count, Last Seen, Message.
+        String[] headers = {"Type", "Reason", "Object", "Count", "Last Seen", "Message"};
+        double[] widths = {90, 200, 230, 70, 110, 400};
+        for (int i = 0; i < headers.length; i++) {
+            final int idx = i;
+            TableColumn<List<String>, String> col = new TableColumn<>(headers[i]);
+            col.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                    c.getValue() != null && idx < c.getValue().size() ? c.getValue().get(idx) : ""));
+            col.setPrefWidth(widths[i]);
+            nsEventsTable.getColumns().add(col);
+        }
+
+        nsEventsTable.setRowFactory(tv -> {
+            TableRow<List<String>> row = new TableRow<>();
+            row.itemProperty().addListener((o, a, b) -> {
+                row.getStyleClass().remove("event-warning");
+                if (b != null && !b.isEmpty() && "Warning".equals(b.get(0))) {
+                    row.getStyleClass().add("event-warning");
+                }
+            });
+            MenuItem copyMsg = new MenuItem("Copy message");
+            copyMsg.setOnAction(e -> {
+                List<String> it = row.getItem();
+                if (it != null && it.size() > 5) {
+                    copyToClipboard(it.get(5));
+                }
+            });
+            row.setContextMenu(new ContextMenu(copyMsg));
+            return row;
+        });
+
+        eventsView.getChildren().setAll(controls, nsEventsTable);
+    }
+
+    private void loadEvents() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String ns = namespaceBox.getValue();
+        if (ALL_NAMESPACES.equals(ns)) {
+            status("Pick a single namespace to view its events.");
+            return;
+        }
+        if (ns == null || ns.isBlank()) {
+            ns = effectiveNamespace();
+        }
+        if (ns == null || ns.isBlank()) {
+            status("No namespace selected.");
+            return;
+        }
+        contentTitle.setText("Events · " + ns);
+        eventsSummary.setText("Loading…");
+        status("Loading events…");
+        final String namespace = ns;
+        runAsync(() -> service.listEvents(ctx.name(), namespace), data -> {
+            nsEventsTable.setItems(FXCollections.observableArrayList(data.rows()));
+            long warns = data.rows().stream()
+                    .filter(r -> !r.isEmpty() && "Warning".equals(r.get(0))).count();
+            eventsSummary.setText(data.rows().size() + " events · " + warns
+                    + " warning" + (warns == 1 ? "" : "s"));
+            status(data.rows().size() + " events in " + namespace + ".");
         });
     }
 
@@ -2439,6 +2650,7 @@ public class MainView extends BorderPane {
     /** Release the watch and worker threads on shutdown so the JVM can exit cleanly. */
     public void shutdown() {
         closeExec();
+        stopMetricsPolling();
         for (PortForward pf : new ArrayList<>(portForwards)) {
             try {
                 pf.close();

@@ -2,6 +2,7 @@ package com.kubedesk.service;
 
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthFinding;
+import com.kubedesk.service.Dtos.MetricSample;
 import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.ResourceRuleDto;
 import com.kubedesk.service.Dtos.HealthSeverity;
@@ -674,6 +675,35 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     @Override
+    public ResourceData listEvents(String context, String namespace) {
+        try (KubernetesClient client = clientFor(context)) {
+            List<Event> events = new ArrayList<>(
+                    client.v1().events().inNamespace(namespace).list().getItems());
+            events.sort(Comparator.comparing(this::eventTimestamp).reversed()); // most recent first
+            List<List<String>> rows = new ArrayList<>();
+            for (Event ev : events) {
+                String obj = "";
+                if (ev.getInvolvedObject() != null) {
+                    obj = nz(ev.getInvolvedObject().getKind()) + "/"
+                            + nz(ev.getInvolvedObject().getName());
+                }
+                int count = ev.getCount() != null ? ev.getCount() : 1;
+                rows.add(List.of(
+                        nz(ev.getType()),
+                        nz(ev.getReason()),
+                        obj,
+                        String.valueOf(count),
+                        age(eventTimestamp(ev)),
+                        ev.getMessage() != null ? ev.getMessage().trim() : ""));
+            }
+            return new ResourceData(
+                    List.of("Type", "Reason", "Object", "Count", "Last Seen", "Message"), rows);
+        } catch (Exception e) {
+            throw new ClusterException("Could not list events: " + rootMessage(e), e);
+        }
+    }
+
+    @Override
     public String describeEvents(String context, String namespace, ResourceKind kind, String name) {
         try (KubernetesClient client = clientFor(context)) {
             StringBuilder sb = new StringBuilder();
@@ -1278,6 +1308,36 @@ public class Fabric8ClusterService implements ClusterService {
      * Live CPU/memory usage per pod from the Metrics API (metrics.k8s.io). Returns podName -> [cpu, mem].
      * If metrics-server isn't installed, returns an empty map and the columns fall back to "-".
      */
+    @Override
+    public MetricSample podUsageSample(String context, String namespace, String pod) {
+        try (KubernetesClient client = clientFor(context)) {
+            var pm = client.top().pods().metrics(namespace, pod);
+            if (pm == null || pm.getContainers() == null) {
+                return null;
+            }
+            BigDecimal cpu = BigDecimal.ZERO;
+            BigDecimal mem = BigDecimal.ZERO;
+            for (var c : pm.getContainers()) {
+                if (c.getUsage() != null) {
+                    Quantity cq = c.getUsage().get("cpu");
+                    Quantity mq = c.getUsage().get("memory");
+                    if (cq != null) {
+                        cpu = cpu.add(Quantity.getAmountInBytes(cq));
+                    }
+                    if (mq != null) {
+                        mem = mem.add(Quantity.getAmountInBytes(mq));
+                    }
+                }
+            }
+            double millicores = cpu.multiply(BigDecimal.valueOf(1000)).doubleValue();
+            double mib = mem.divide(BigDecimal.valueOf(1024L * 1024L), 2, RoundingMode.HALF_UP)
+                    .doubleValue();
+            return new MetricSample(millicores, mib);
+        } catch (Exception e) {
+            return null; // metrics-server unavailable or pod has no metrics yet
+        }
+    }
+
     private Map<String, String[]> podUsage(KubernetesClient client, String namespace) {
         Map<String, String[]> map = new HashMap<>();
         try {

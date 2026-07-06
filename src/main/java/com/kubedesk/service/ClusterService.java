@@ -3,6 +3,7 @@ package com.kubedesk.service;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSummary;
+import com.kubedesk.service.Dtos.MetricSample;
 import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.Dtos.TopologyData;
@@ -49,6 +50,19 @@ public interface ClusterService {
 
     /** Summarise pod phases in a namespace for the dashboard health ring. */
     HealthSummary podHealth(String context, String namespace);
+
+    /**
+     * List all events in a namespace (the practical "namespace log"), most-recent first, as
+     * table-shaped data: Type, Reason, Object, Count, Last Seen, Message.
+     */
+    ResourceData listEvents(String context, String namespace);
+
+    /**
+     * A current CPU/memory usage sample for a pod (summed across containers), from the Metrics API.
+     * Returns {@code null} if metrics-server isn't available or the pod has no metrics yet. Poll this
+     * to build a live time-series (metrics-server exposes only instantaneous usage, no history).
+     */
+    MetricSample podUsageSample(String context, String namespace, String pod);
 
     /**
      * Build a service topology for a namespace: Ingress -> Service -> Workload, derived from ingress
