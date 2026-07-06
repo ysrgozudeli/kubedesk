@@ -49,6 +49,12 @@ alternative to Lens.
   namespace and cluster Nodes for CrashLoop / ImagePull / OOM / Evicted / unschedulable / high-restart
   / BestEffort pods, unavailable workloads, failed Jobs, unbound PVCs, orphaned Services, and unhealthy
   / cordoned Nodes. Ranked most-severe first; double-click to inspect, right-click to act.
+- **Events view** (sidebar → VIEWS → Events): the namespace event stream as a table (Type, Reason,
+  Object, Count, Last Seen, Message), most-recent first, with **Warning** rows tinted — the practical
+  "namespace log" where failing pods, scheduling issues, and image-pull errors surface.
+- **Live pod metrics** (pod details → **Metrics** tab): live **CPU** and **Memory** line charts that
+  poll the Metrics API over time — a quick read on whether a pod is climbing toward its limits
+  (requires metrics-server).
 
 ### Act (all over the API — no kubectl)
 - **Management actions**: delete, rollout restart, scale, and edit-YAML-and-apply — with confirmations

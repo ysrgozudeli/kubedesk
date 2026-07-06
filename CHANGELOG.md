@@ -3,6 +3,18 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-07-06
+
+### Added
+- **Events view.** A new **Events** entry in the sidebar shows the namespace's event stream — the
+  practical "namespace log" — as a table (Type, Reason, Object, Count, Last Seen, Message), most-recent
+  first. **Warning** rows are tinted so problems stand out. This is where the reason for a failing pod,
+  a scheduling issue, or an image-pull error usually shows up, all in one place.
+- **Live pod metrics charts.** The pod details panel gains a **Metrics** tab with live **CPU** and
+  **Memory** line charts that poll the Metrics API (every 10s, summed across containers) and plot usage
+  over time — a quick read on whether a pod is climbing toward its limits. Requires metrics-server in
+  the cluster; the tab notes when metrics aren't available.
+
 ## [1.3.1] - 2026-07-05
 
 ### Added
