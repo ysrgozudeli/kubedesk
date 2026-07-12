@@ -39,6 +39,7 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Dialog;
@@ -64,6 +65,9 @@ import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyCodeCombination;
+import javafx.scene.input.KeyCombination;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
@@ -123,7 +127,7 @@ public class MainView extends BorderPane {
     private final SplitPane verticalSplit = new SplitPane();
     private final SplitPane centerSplit = new SplitPane();
     private KubectlConsole console; // built lazily the first time the drawer is opened
-    private final ToggleButton terminalToggle = new ToggleButton("⌨ kubectl");
+    private final CheckMenuItem consoleMenuItem = new CheckMenuItem("kubectl console");
     private final TableView<List<String>> table = new TableView<>();
     private final HBox healthRing = new HBox();
     private final Label contentTitle = new Label("Pods");
@@ -589,18 +593,18 @@ public class MainView extends BorderPane {
         pfButton.setVisible(false);
         pfButton.setManaged(false);
 
-        terminalToggle.getStyleClass().add("icon-button");
-        terminalToggle.setTooltip(new Tooltip("kubectl console (uses your local kubectl)"));
-        terminalToggle.setOnAction(e -> toggleConsole(terminalToggle.isSelected()));
+        consoleMenuItem.setOnAction(e -> toggleConsole(consoleMenuItem.isSelected()));
 
         MenuButton appMenu = new MenuButton("☰");
         appMenu.getStyleClass().add("icon-button");
         appMenu.setTooltip(new Tooltip("Menu"));
+        consoleMenuItem.setAccelerator(new KeyCodeCombination(KeyCode.K, KeyCombination.SHORTCUT_DOWN));
         MenuItem checkUpdates = new MenuItem("Check for updates…");
         checkUpdates.setOnAction(e -> checkForUpdates(true));
         MenuItem about = new MenuItem("About KubeDesk");
         about.setOnAction(e -> showAboutDialog());
-        appMenu.getItems().setAll(checkUpdates, new SeparatorMenuItem(), about);
+        appMenu.getItems().setAll(consoleMenuItem, new SeparatorMenuItem(), checkUpdates,
+                new SeparatorMenuItem(), about);
 
         liveLabel.getStyleClass().add("live-indicator");
         pauseButton.getStyleClass().add("live-toggle");
@@ -622,7 +626,7 @@ public class MainView extends BorderPane {
                 liveBox,
                 new Label("Context:"), contextBox,
                 new Label("Namespace:"), namespaceBox,
-                searchField, refresh, pfButton, terminalToggle, appMenu);
+                searchField, refresh, pfButton, appMenu);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(10, 16, 10, 16));
         bar.getStyleClass().add("top-bar");
@@ -643,6 +647,7 @@ public class MainView extends BorderPane {
                             return c == null ? null : c.name();
                         },
                         this::effectiveNamespace);
+                console.setOnClose(() -> toggleConsole(false));
             }
             if (!verticalSplit.getItems().contains(console)) {
                 verticalSplit.getItems().add(console);
@@ -652,7 +657,7 @@ public class MainView extends BorderPane {
         } else if (console != null) {
             verticalSplit.getItems().remove(console);
         }
-        terminalToggle.setSelected(show);
+        consoleMenuItem.setSelected(show);
     }
 
     private void chooseKubeConfig() {

@@ -59,6 +59,8 @@ public class KubectlConsole extends VBox {
     private final Button runBtn = new Button("Run");
     private final Button stopBtn = new Button("Stop");
     private final Button clearBtn = new Button("Clear");
+    private final Button closeBtn = new Button("✕");
+    private Runnable onClose = () -> { };
 
     // Command history, navigated with ↑/↓ from the input field.
     private final List<String> history = new ArrayList<>();
@@ -88,7 +90,10 @@ public class KubectlConsole extends VBox {
         HBox.setHgrow(hspacer, Priority.ALWAYS);
         clearBtn.getStyleClass().add("icon-button");
         clearBtn.setOnAction(e -> output.clear());
-        HBox headerBar = new HBox(10, header, hspacer, clearBtn);
+        closeBtn.getStyleClass().add("icon-button");
+        closeBtn.setTooltip(new javafx.scene.control.Tooltip("Close the console"));
+        closeBtn.setOnAction(e -> onClose.run());
+        HBox headerBar = new HBox(10, header, hspacer, clearBtn, closeBtn);
         headerBar.setAlignment(Pos.CENTER_LEFT);
         headerBar.setPadding(new Insets(6, 12, 6, 12));
         headerBar.getStyleClass().add("console-header");
@@ -265,6 +270,11 @@ public class KubectlConsole extends VBox {
     }
 
     // --- helpers ----------------------------------------------------------------------------
+
+    /** Set the action for the drawer's ✕ close button (the host hides the drawer). */
+    public void setOnClose(Runnable r) {
+        this.onClose = r != null ? r : () -> { };
+    }
 
     /** Called by the host when the drawer becomes visible: refresh the target line and focus the input. */
     public void onShown() {
