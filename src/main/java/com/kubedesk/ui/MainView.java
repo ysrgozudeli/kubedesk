@@ -28,6 +28,7 @@ import javafx.collections.FXCollections;
 import javafx.concurrent.Task;
 import javafx.css.PseudoClass;
 import javafx.geometry.Insets;
+import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
 import javafx.util.Duration;
 import javafx.scene.chart.LineChart;
@@ -117,8 +118,12 @@ public class MainView extends BorderPane {
     private final ComboBox<String> namespaceBox = new ComboBox<>();
     private final TextField searchField = new TextField();
 
-    // Content
+    // Content. The center is a vertical split: the resource area on top, the kubectl console drawer
+    // (added only when toggled on) below it, so the drawer is resizable and never steals space until used.
+    private final SplitPane verticalSplit = new SplitPane();
     private final SplitPane centerSplit = new SplitPane();
+    private KubectlConsole console; // built lazily the first time the drawer is opened
+    private final ToggleButton terminalToggle = new ToggleButton("⌨ kubectl");
     private final TableView<List<String>> table = new TableView<>();
     private final HBox healthRing = new HBox();
     private final Label contentTitle = new Label("Pods");
@@ -232,8 +237,11 @@ public class MainView extends BorderPane {
         // Let the center collapse fully so the bottom status bar is never pushed off-screen when the
         // window is short — the table area shrinks instead of the status bar disappearing.
         centerSplit.setMinHeight(0);
+        verticalSplit.setOrientation(Orientation.VERTICAL);
+        verticalSplit.setMinHeight(0);
+        verticalSplit.getItems().setAll(centerSplit);
         setLeft(buildSidebar());
-        setCenter(centerSplit);
+        setCenter(verticalSplit);
         setBottom(buildStatusBar());
 
         // Toolbar with the update banner stacked just under it (hidden until an update is found).
@@ -581,6 +589,10 @@ public class MainView extends BorderPane {
         pfButton.setVisible(false);
         pfButton.setManaged(false);
 
+        terminalToggle.getStyleClass().add("icon-button");
+        terminalToggle.setTooltip(new Tooltip("kubectl console (uses your local kubectl)"));
+        terminalToggle.setOnAction(e -> toggleConsole(terminalToggle.isSelected()));
+
         MenuButton appMenu = new MenuButton("☰");
         appMenu.getStyleClass().add("icon-button");
         appMenu.setTooltip(new Tooltip("Menu"));
@@ -610,11 +622,37 @@ public class MainView extends BorderPane {
                 liveBox,
                 new Label("Context:"), contextBox,
                 new Label("Namespace:"), namespaceBox,
-                searchField, refresh, pfButton, appMenu);
+                searchField, refresh, pfButton, terminalToggle, appMenu);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(10, 16, 10, 16));
         bar.getStyleClass().add("top-bar");
         return bar;
+    }
+
+    /**
+     * Show or hide the kubectl console drawer at the bottom of the center area. Built lazily on first
+     * open. It reads the live context/namespace via suppliers, so it always targets what's selected now.
+     */
+    private void toggleConsole(boolean show) {
+        if (show) {
+            if (console == null) {
+                console = new KubectlConsole(
+                        () -> ((Fabric8ClusterService) service).activeKubeConfigFile(),
+                        () -> {
+                            ContextInfo c = contextBox.getValue();
+                            return c == null ? null : c.name();
+                        },
+                        this::effectiveNamespace);
+            }
+            if (!verticalSplit.getItems().contains(console)) {
+                verticalSplit.getItems().add(console);
+                verticalSplit.setDividerPositions(0.62);
+            }
+            console.onShown();
+        } else if (console != null) {
+            verticalSplit.getItems().remove(console);
+        }
+        terminalToggle.setSelected(show);
     }
 
     private void chooseKubeConfig() {
@@ -2651,6 +2689,9 @@ public class MainView extends BorderPane {
     public void shutdown() {
         closeExec();
         stopMetricsPolling();
+        if (console != null) {
+            console.shutdown();
+        }
         for (PortForward pf : new ArrayList<>(portForwards)) {
             try {
                 pf.close();
