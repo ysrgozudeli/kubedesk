@@ -20,9 +20,11 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 /**
@@ -65,6 +67,13 @@ public class KubectlConsole extends VBox {
     // Command history, navigated with ↑/↓ from the input field.
     private final List<String> history = new ArrayList<>();
     private int historyIndex = 0;
+
+    // Output batching: streamed lines are queued off the FX thread and flushed in coalesced bursts, so a
+    // chatty `logs -f`/`get -w` can't flood the FX event queue (one flush in flight at most). The view is
+    // also capped so an endless follow can't grow the TextArea without bound.
+    private final ConcurrentLinkedQueue<String> pending = new ConcurrentLinkedQueue<>();
+    private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
+    private static final int MAX_OUTPUT_CHARS = 200_000;
 
     private final ExecutorService pool = Executors.newCachedThreadPool(daemon());
     private volatile Process current;
@@ -152,25 +161,36 @@ public class KubectlConsole extends VBox {
         });
     }
 
-    /** Run {@code kubectl version --client} through the shell; return its client version, or null if absent. */
+    /** Detect kubectl on PATH; return its client version (or "ready" if unparsable), or null if absent. */
     private String probeVersion() {
+        // Preferred: parse the client version out of the YAML output.
         try {
             Process p = shell("kubectl version --client -o yaml").start();
             String out = readAll(p.getInputStream());
-            int code = p.waitFor();
-            if (code != 0) {
-                return null;
-            }
-            for (String line : out.split("\\R")) {
-                String t = line.trim();
-                if (t.startsWith("gitVersion:")) {
-                    return t.substring("gitVersion:".length()).trim().replace("\"", "");
+            if (p.waitFor() == 0) {
+                for (String line : out.split("\\R")) {
+                    String t = line.trim();
+                    if (t.startsWith("gitVersion:")) {
+                        return t.substring("gitVersion:".length()).trim().replace("\"", "");
+                    }
                 }
+                return "ready";
             }
-            return "ready"; // found, but couldn't parse a version — good enough
-        } catch (Exception e) {
-            return null;
+        } catch (Exception ignored) {
+            // fall through to the plain probe below
         }
+        // Fallback: older kubectl (or a shim on PATH) may reject `-o yaml`. Just confirm the binary runs
+        // so we don't wrongly declare kubectl missing and disable the console.
+        try {
+            Process p = shell("kubectl version --client").start();
+            readAll(p.getInputStream()); // drain so it can't block on a full pipe
+            if (p.waitFor() == 0) {
+                return "ready";
+            }
+        } catch (Exception ignored) {
+            // not found
+        }
+        return null;
     }
 
     // --- running commands -------------------------------------------------------------------
@@ -208,17 +228,20 @@ public class KubectlConsole extends VBox {
      * so an explicit {@code -n other} or {@code --all-namespaces} still wins.
      */
     private String buildCommand(String args) {
+        // Only the first pipeline segment is kubectl's own; flags after a pipe belong to grep/jq/etc.
+        // (grep -n / -A / --context would otherwise be misread as kubectl flags and suppress injection).
+        String kubectlArgs = args.split("\\|", 2)[0];
         StringBuilder sb = new StringBuilder("kubectl");
         File kc = kubeConfig.get();
         if (kc != null) {
             sb.append(" --kubeconfig ").append(quote(kc.getAbsolutePath()));
         }
         String ctx = context.get();
-        if (ctx != null && !ctx.isBlank() && !mentions(args, "--context")) {
+        if (ctx != null && !ctx.isBlank() && !mentions(kubectlArgs, "--context")) {
             sb.append(" --context ").append(quote(ctx));
         }
         String ns = namespace.get();
-        if (ns != null && !ns.isBlank() && !mentionsNamespace(args)) {
+        if (ns != null && !ns.isBlank() && !mentionsNamespace(kubectlArgs)) {
             sb.append(" --namespace ").append(quote(ns));
         }
         return sb.append(' ').append(args).toString();
@@ -229,11 +252,7 @@ public class KubectlConsole extends VBox {
                 new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = r.readLine()) != null) {
-                final String l = line;
-                Platform.runLater(() -> {
-                    output.appendText(l + "\n");
-                    output.setScrollTop(Double.MAX_VALUE);
-                });
+                enqueue(line + "\n");
             }
         } catch (Exception ignored) {
             // stream closed (usually because the process was stopped) — the finally block reports exit
@@ -244,17 +263,43 @@ public class KubectlConsole extends VBox {
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
-            final int c = code;
+            if (code != 0) {
+                pending.add("[exit " + code + "]\n");
+            }
+            pending.add("\n");
             Platform.runLater(() -> {
-                if (c != 0) {
-                    output.appendText("[exit " + c + "]\n");
-                }
-                output.appendText("\n");
-                output.setScrollTop(Double.MAX_VALUE);
+                flush();
                 current = null;
                 applyEnablement(false);
             });
         }
+    }
+
+    /** Queue streamed text and ensure a single coalesced flush is scheduled on the FX thread. */
+    private void enqueue(String text) {
+        pending.add(text);
+        if (flushScheduled.compareAndSet(false, true)) {
+            Platform.runLater(this::flush);
+        }
+    }
+
+    /** Drain all queued output into the view in one append, then cap and scroll. FX thread only. */
+    private void flush() {
+        flushScheduled.set(false);
+        StringBuilder batch = new StringBuilder();
+        String s;
+        while ((s = pending.poll()) != null) {
+            batch.append(s);
+        }
+        if (batch.length() == 0) {
+            return;
+        }
+        output.appendText(batch.toString());
+        int len = output.getLength();
+        if (len > MAX_OUTPUT_CHARS) {
+            output.deleteText(0, len - MAX_OUTPUT_CHARS); // keep only the most recent output
+        }
+        output.setScrollTop(Double.MAX_VALUE);
     }
 
     /** Stop a running command (e.g. a {@code logs -f} / {@code get -w} that never ends). */

@@ -251,6 +251,16 @@ public class MainView extends BorderPane {
         // Toolbar with the update banner stacked just under it (hidden until an update is found).
         configureUpdateBanner();
         setTop(new VBox(buildTopBar(), updateBanner));
+
+        // Ctrl/Cmd+K toggles the kubectl console. Registered on the scene (not the menu item) because a
+        // MenuButton item's accelerator only fires while its popup is open — useless as a global shortcut.
+        sceneProperty().addListener((obs, old, scene) -> {
+            if (scene != null) {
+                scene.getAccelerators().put(
+                        new KeyCodeCombination(KeyCode.K, KeyCombination.SHORTCUT_DOWN),
+                        () -> toggleConsole(!consoleMenuItem.isSelected()));
+            }
+        });
     }
 
     /** Kick off the first load once the scene is shown. */
@@ -598,7 +608,6 @@ public class MainView extends BorderPane {
         MenuButton appMenu = new MenuButton("☰");
         appMenu.getStyleClass().add("icon-button");
         appMenu.setTooltip(new Tooltip("Menu"));
-        consoleMenuItem.setAccelerator(new KeyCodeCombination(KeyCode.K, KeyCombination.SHORTCUT_DOWN));
         MenuItem checkUpdates = new MenuItem("Check for updates…");
         checkUpdates.setOnAction(e -> checkForUpdates(true));
         MenuItem about = new MenuItem("About KubeDesk");
