@@ -330,6 +330,31 @@
     -fx-effect: dropshadow(gaussian, rgba(50, 108, 229, 0.35), 10, 0, 0, 0);
 }
 
+/* ---- kubectl console (bottom drawer) ---- */
+.kubectl-console {
+    -fx-background-color: #1e1e2e;
+    -fx-border-color: #326ce5 transparent transparent transparent;
+    -fx-border-width: 2 0 0 0;
+}
+
+.console-header {
+    -fx-background-color: #181825;
+    -fx-border-color: transparent transparent #313244 transparent;
+    -fx-border-width: 0 0 1 0;
+}
+
+.console-header-text {
+    -fx-text-fill: #cdd6f4;
+    -fx-font-size: 12px;
+}
+
+.kubectl-prompt {
+    -fx-text-fill: #89b4fa;
+    -fx-font-family: "Consolas", "Menlo", "monospace";
+    -fx-font-weight: bold;
+    -fx-font-size: 13px;
+}
+
 /* ---- status bar ---- */
 .status-bar {
     -fx-background-color: #f8f9fa;
