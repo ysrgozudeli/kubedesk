@@ -3,6 +3,19 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-07-12
+
+### Added
+- **Embedded kubectl console.** A new **kubectl console** (☰ menu, or **Ctrl/Cmd+K**) opens a terminal
+  drawer at the bottom of the window that runs *your own* `kubectl`. The active **context**, **namespace**,
+  and **kubeconfig** are auto-injected on every command, so what you run always matches what's selected in
+  the UI — type just the args (e.g. `get pods -o wide`). Output streams live with a **Stop** button for
+  `-f`/`-w` commands, **↑/↓** command history, and selectable/copyable text. Commands run through the
+  system shell, so pipes and redirects (`| grep`, `| jq`, `> file`) work. It defers to you when you type an
+  explicit `-n`/`--all-namespaces`/`--context`. This is a command-runner, not a full TTY — interactive
+  commands (`kubectl edit`, `exec -it`) still belong in the pod **Shell** tab; if `kubectl` isn't on your
+  PATH the drawer says so (KubeDesk's own actions don't need it).
+
 ## [1.4.0] - 2026-07-06
 
 ### Added

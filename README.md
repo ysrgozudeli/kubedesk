@@ -65,6 +65,12 @@ alternative to Lens.
 - **Pod exec** command console.
 - **Port-forwarding**: open a tunnel to a pod port at `localhost:<port>`; a toolbar manager lists
   active tunnels (Copy / Open / Stop). Tunnels are persisted and offered for restore on next launch.
+- **Embedded kubectl console** (☰ menu, or **Ctrl/Cmd+K**): a terminal drawer that runs *your own*
+  `kubectl` with the active context/namespace/kubeconfig auto-injected — the escape hatch for the long
+  tail of commands KubeDesk has no button for. Live streaming output with a **Stop** button, **↑/↓**
+  history, and shell pipes/redirects (`| grep`, `| jq`, `> file`). A command-runner, not a full TTY
+  (use the pod **Shell** tab for `exec -it`); the only feature that uses a local kubectl, and it says so
+  if one isn't on your PATH.
 
 ### Preferences
 - Persisted across restarts (`~/.kubedesk/prefs.json`): custom kube.conf path, last context and
