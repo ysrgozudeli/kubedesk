@@ -3,6 +3,17 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] - 2026-07-17
+
+### Fixed
+- **kubectl console now finds a kubectl next to the app.** The console previously ran a bare `kubectl`,
+  so it only worked when kubectl was on the system `PATH` — a frequent miss on VDIs and packaged installs,
+  where a `PATH` edit doesn't reach the already-running launcher. KubeDesk now resolves the binary in
+  order: a `KUBEDESK_KUBECTL` env var (or `-Dkubedesk.kubectl=…` property) override, then a
+  `kubectl`/`kubectl.exe` shipped next to the app (or a sibling/parent `bin/`), then the system `PATH` as
+  before. Drop your own kubectl next to KubeDesk and the console works without touching `PATH`. No binary
+  is bundled with the distribution.
+
 ## [1.5.0] - 2026-07-12
 
 ### Added
