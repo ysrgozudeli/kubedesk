@@ -30,8 +30,10 @@ import java.util.function.Supplier;
 /**
  * An embedded kubectl console — the bottom "terminal" drawer.
  *
- * <p>It runs the user's <em>own</em> {@code kubectl} (found on the system PATH) as a subprocess and
- * streams its output. The active <b>context</b> and <b>namespace</b> selected in the main window are
+ * <p>It runs the user's <em>own</em> {@code kubectl} as a subprocess and streams its output. The binary
+ * is resolved by {@link #findBundledKubectl()} — an override env/property, then one shipped next to the
+ * app, then the system PATH — so the console still works when kubectl isn't on PATH (common on VDIs).
+ * The active <b>context</b> and <b>namespace</b> selected in the main window are
  * auto-injected on every command (along with KubeDesk's active {@code --kubeconfig}), so what you run
  * here always matches what you see in the UI — change the namespace dropdown and the console follows.
  *
@@ -47,6 +49,9 @@ public class KubectlConsole extends VBox {
 
     private static final boolean WINDOWS =
             System.getProperty("os.name", "").toLowerCase().contains("win");
+
+    /** The kubectl executable's filename for this platform. */
+    private static final String KUBECTL_EXE = WINDOWS ? "kubectl.exe" : "kubectl";
 
     /** The active kube.conf KubeDesk is using (may be {@code null} to defer to kubectl's own discovery). */
     private final Supplier<File> kubeConfig;
@@ -83,12 +88,78 @@ public class KubectlConsole extends VBox {
     private volatile boolean ready = false;
     private volatile String kubectlVersion = "";
 
+    /**
+     * The kubectl command token spliced into every shell line: either a quoted absolute path to a
+     * binary shipped alongside the app, or the bare word {@code kubectl} to resolve via the system
+     * PATH. Resolved once, on construction — see {@link #findBundledKubectl()}.
+     */
+    private final String kubectlCmd;
+    /** Human-readable origin of {@link #kubectlCmd}, for the "ready" line (e.g. a bundled path, or "PATH"). */
+    private final String kubectlSource;
+
     public KubectlConsole(Supplier<File> kubeConfig, Supplier<String> context, Supplier<String> namespace) {
         this.kubeConfig = kubeConfig;
         this.context = context;
         this.namespace = namespace;
+        File bundled = findBundledKubectl();
+        this.kubectlCmd = bundled != null ? quote(bundled.getAbsolutePath()) : "kubectl";
+        this.kubectlSource = bundled != null ? bundled.getAbsolutePath() : "PATH";
         build();
         detectKubectl();
+    }
+
+    /**
+     * Locate a kubectl binary to prefer over the system PATH, so the console works even when kubectl
+     * isn't on PATH (a common headache under VDIs and packaged installs). Checked in order, first hit wins:
+     * <ol>
+     *   <li>an explicit override — the {@code kubedesk.kubectl} system property or {@code KUBEDESK_KUBECTL}
+     *       env var, pointing at the binary itself;</li>
+     *   <li>the app/jar directory and a sibling {@code bin/} — i.e. a {@code kubectl}/{@code kubectl.exe}
+     *       dropped next to the jar;</li>
+     *   <li>one directory up and its {@code bin/}, to cover jpackage's {@code app/} nesting.</li>
+     * </ol>
+     * Returns {@code null} to fall back to the bare {@code kubectl} on PATH. Platform-independent: the
+     * filename ({@link #KUBECTL_EXE}) carries the {@code .exe} suffix only on Windows.
+     */
+    private static File findBundledKubectl() {
+        String override = System.getProperty("kubedesk.kubectl");
+        if (override == null || override.isBlank()) {
+            override = System.getenv("KUBEDESK_KUBECTL");
+        }
+        if (override != null && !override.isBlank()) {
+            File f = new File(override.trim());
+            if (f.isFile()) {
+                return f;
+            }
+        }
+        File dir = appDir();
+        if (dir != null) {
+            for (File base : new File[]{ dir, dir.getParentFile() }) {
+                if (base == null) {
+                    continue;
+                }
+                for (File cand : new File[]{ new File(base, KUBECTL_EXE), new File(new File(base, "bin"), KUBECTL_EXE) }) {
+                    if (cand.isFile()) {
+                        return cand;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The directory the app runs from: the jar's folder in production, or the classes dir in dev. */
+    private static File appDir() {
+        try {
+            java.security.CodeSource cs = KubectlConsole.class.getProtectionDomain().getCodeSource();
+            if (cs == null || cs.getLocation() == null) {
+                return null;
+            }
+            File src = new File(cs.getLocation().toURI());
+            return src.isFile() ? src.getParentFile() : src;
+        } catch (Exception e) {
+            return null; // opaque classloader / security manager — just use PATH
+        }
     }
 
     private void build() {
@@ -154,7 +225,8 @@ public class KubectlConsole extends VBox {
                 refreshHeader();
                 applyEnablement(false);
                 if (ready) {
-                    output.appendText("kubectl " + kubectlVersion + " ready. "
+                    String origin = "PATH".equals(kubectlSource) ? "" : " [" + kubectlSource + "]";
+                    output.appendText("kubectl " + kubectlVersion + " ready" + origin + ". "
                             + "Type a kubectl command below (the context & namespace are applied for you).\n\n");
                 }
             });
@@ -165,7 +237,7 @@ public class KubectlConsole extends VBox {
     private String probeVersion() {
         // Preferred: parse the client version out of the YAML output.
         try {
-            Process p = shell("kubectl version --client -o yaml").start();
+            Process p = shell(kubectlCmd + " version --client -o yaml").start();
             String out = readAll(p.getInputStream());
             if (p.waitFor() == 0) {
                 for (String line : out.split("\\R")) {
@@ -182,7 +254,7 @@ public class KubectlConsole extends VBox {
         // Fallback: older kubectl (or a shim on PATH) may reject `-o yaml`. Just confirm the binary runs
         // so we don't wrongly declare kubectl missing and disable the console.
         try {
-            Process p = shell("kubectl version --client").start();
+            Process p = shell(kubectlCmd + " version --client").start();
             readAll(p.getInputStream()); // drain so it can't block on a full pipe
             if (p.waitFor() == 0) {
                 return "ready";
@@ -231,7 +303,7 @@ public class KubectlConsole extends VBox {
         // Only the first pipeline segment is kubectl's own; flags after a pipe belong to grep/jq/etc.
         // (grep -n / -A / --context would otherwise be misread as kubectl flags and suppress injection).
         String kubectlArgs = args.split("\\|", 2)[0];
-        StringBuilder sb = new StringBuilder("kubectl");
+        StringBuilder sb = new StringBuilder(kubectlCmd);
         File kc = kubeConfig.get();
         if (kc != null) {
             sb.append(" --kubeconfig ").append(quote(kc.getAbsolutePath()));
@@ -345,7 +417,7 @@ public class KubectlConsole extends VBox {
         } else if (ready) {
             header.setText("⎈ kubectl " + kubectlVersion + "     ·     " + targetLabel());
         } else {
-            header.setText("⚠ kubectl not found on PATH — install it to use this console "
+            header.setText("⚠ kubectl not found — put it on your PATH or drop the binary next to KubeDesk "
                     + "(KubeDesk's own actions don't need it).");
         }
     }
