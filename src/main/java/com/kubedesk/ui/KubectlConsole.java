@@ -271,7 +271,7 @@ public class KubectlConsole extends VBox {
         if (current != null || !ready) {
             return; // a command is already running, or kubectl isn't available
         }
-        String args = input.getText().trim();
+        String args = stripKubectlPrefix(input.getText().trim());
         if (args.isEmpty()) {
             return;
         }
@@ -292,6 +292,16 @@ public class KubectlConsole extends VBox {
         current = p;
         applyEnablement(true);
         pool.submit(() -> stream(p));
+    }
+
+    /**
+     * Drop a leading {@code kubectl}/{@code kubectl.exe} the user typed out of habit. We prepend our own
+     * kubectl (plus {@code --kubeconfig}/{@code --context}/{@code --namespace}), so a user-typed prefix
+     * would otherwise land <em>after</em> those flags and be read as a plugin name — kubectl then aborts
+     * with "flags can not be placed before plugin name: --kubeconfig".
+     */
+    private static String stripKubectlPrefix(String args) {
+        return args.replaceFirst("(?i)^kubectl(\\.exe)?(\\s+|$)", "");
     }
 
     /**
