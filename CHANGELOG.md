@@ -3,6 +3,16 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-09-06
+
+### Added
+- **Restart a pod.** Pods gain a **Restart (recreate)** action — in the table row menu, the topology /
+  health context menus, and the details **Actions** menu. Kubernetes has no restart verb for pods, so this
+  deletes the pod and lets its controller (ReplicaSet, StatefulSet, DaemonSet, Job) create a fresh
+  replacement; the confirmation says so, and points to **Restart (rollout)** on the Deployment for a
+  no-downtime restart of every replica. The action is hidden for *bare* pods (no controller — nothing would
+  recreate them) and refused server-side as a second guard, and it follows the same RBAC gating as Delete.
+
 ## [1.5.1] - 2026-07-17
 
 ### Fixed
