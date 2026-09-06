@@ -562,6 +562,27 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     @Override
+    public String restartPod(String context, String namespace, String name) {
+        try (KubernetesClient client = clientFor(context)) {
+            Pod pod = client.pods().inNamespace(namespace).withName(name).get();
+            if (pod == null) {
+                throw new ClusterException("Pod " + name + " no longer exists.");
+            }
+            String owner = controlledBy(pod);
+            if ("-".equals(owner)) {
+                throw new ClusterException("Pod " + name + " is not managed by a controller, so deleting it "
+                        + "would not recreate it. Use Delete if you really want it gone.");
+            }
+            client.pods().inNamespace(namespace).withName(name).delete();
+            return owner;
+        } catch (ClusterException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ClusterException("Could not restart " + name + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
     public void scaleDeployment(String context, String namespace, String name, int replicas) {
         try (KubernetesClient client = clientFor(context)) {
             client.apps().deployments().inNamespace(namespace).withName(name).scale(replicas);
@@ -1768,6 +1789,10 @@ public class Fabric8ClusterService implements ClusterService {
 
     /** Unchecked wrapper so the UI can show a friendly message in the status bar. */
     public static class ClusterException extends RuntimeException {
+        public ClusterException(String message) {
+            super(message);
+        }
+
         public ClusterException(String message, Throwable cause) {
             super(message, cause);
         }

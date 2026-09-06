@@ -861,6 +861,9 @@ public class MainView extends BorderPane {
         MenuItem restart = new MenuItem("Restart (rollout)");
         restart.setOnAction(e -> restartAction(resourceName(row.getItem())));
 
+        MenuItem restartPod = new MenuItem("Restart (recreate)");
+        restartPod.setOnAction(e -> restartPodAction(resourceName(row.getItem())));
+
         MenuItem scale = new MenuItem("Scale…");
         scale.setOnAction(e -> scaleAction(resourceName(row.getItem())));
 
@@ -870,7 +873,7 @@ public class MainView extends BorderPane {
 
         ContextMenu menu = new ContextMenu(details, yaml, events, logs, portForward,
                 new SeparatorMenuItem(), copyName, copyYaml,
-                new SeparatorMenuItem(), restart, scale, delete);
+                new SeparatorMenuItem(), restart, restartPod, scale, delete);
         menu.setOnShowing(e -> {
             // Tailor the menu to the resource kind: hide (not just disable) what doesn't apply.
             boolean isPod = currentKind == ResourceKind.PODS;
@@ -880,9 +883,12 @@ public class MainView extends BorderPane {
             boolean isDeployment = currentKind == ResourceKind.DEPLOYMENTS;
             restart.setVisible(isDeployment);
             scale.setVisible(isDeployment);
+            // A pod "restart" is delete-and-let-the-controller-recreate, so only offer it for managed pods.
+            restartPod.setVisible(isPod && isControlledPod(row.getItem()));
             // Disable mutating actions the user isn't allowed to perform (RBAC-aware).
             String g = currentKind.apiGroup(), r = currentKind.resource();
             delete.setDisable(!currentPermissions.can(g, r, "delete"));
+            restartPod.setDisable(!currentPermissions.can(g, r, "delete"));
             boolean canPatch = currentPermissions.can(g, r, "patch")
                     || currentPermissions.can(g, r, "update");
             restart.setDisable(!canPatch);
@@ -1429,9 +1435,12 @@ public class MainView extends BorderPane {
             detailsActionsBtn.getItems().addAll(restart, scale);
         }
         if (kind == ResourceKind.PODS) {
+            MenuItem restartPod = new MenuItem("Restart (recreate)");
+            restartPod.setOnAction(e -> restartPodAction(name));
+            restartPod.setDisable(!currentPermissions.can(g, r, "delete"));
             MenuItem portForward = new MenuItem("Port forward…");
             portForward.setOnAction(e -> openPortForwardDialog(name));
-            detailsActionsBtn.getItems().add(portForward);
+            detailsActionsBtn.getItems().addAll(restartPod, portForward);
         }
         if (!detailsActionsBtn.getItems().isEmpty()) {
             detailsActionsBtn.getItems().add(new SeparatorMenuItem());
@@ -1551,6 +1560,50 @@ public class MainView extends BorderPane {
                     status("Rolling restart triggered for " + name + ".");
                     afterMutation();
                 });
+    }
+
+    /**
+     * "Restart" a pod: Kubernetes has no restart verb for pods, so this deletes it and relies on its
+     * controller (ReplicaSet/StatefulSet/DaemonSet/Job) to create a fresh replacement. The service
+     * refuses bare pods, so a mistaken click can't silently lose an unmanaged pod.
+     */
+    private void restartPodAction(String name) {
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String ns = namespaceBox.getValue();
+        boolean ok = confirm("Restart pod?",
+                "Restart \"" + name + "\" in \"" + ns + "\"?\n\n"
+                        + "Pods can't be restarted in place: this deletes the pod and its controller "
+                        + "creates a fresh replacement (with a new name). Expect a brief blip if this is "
+                        + "the only replica. To restart a whole Deployment with no downtime, use "
+                        + "Restart (rollout) on the Deployment instead.");
+        if (!ok) {
+            return;
+        }
+        status("Restarting " + name + "…");
+        runAsync(() -> service.restartPod(ctx.name(), ns, name),
+                owner -> {
+                    status("Deleted " + name + " — " + owner + " is creating a replacement.");
+                    if (name.equals(currentDetailName)) {
+                        closeDetails();
+                    }
+                    afterMutation();
+                });
+    }
+
+    /** Whether a pod row (from the table) has a controller owner, per its "Controlled By" column. */
+    private boolean isControlledPod(List<String> row) {
+        int idx = currentData.columns().indexOf("Controlled By");
+        if (idx < 0 || row == null || idx >= row.size()) {
+            return true; // unknown — let the service make the final call
+        }
+        String owner = row.get(idx);
+        return owner != null && !owner.isBlank() && !"-".equals(owner);
     }
 
     private void scaleAction(String name) {
@@ -2595,9 +2648,11 @@ public class MainView extends BorderPane {
             menu.getItems().addAll(restart, scale);
         }
         if (kind == ResourceKind.PODS) {
+            MenuItem restartPod = new MenuItem("Restart (recreate)");
+            restartPod.setOnAction(e -> restartPodAction(name));
             MenuItem portForward = new MenuItem("Port forward…");
             portForward.setOnAction(e -> openPortForwardDialog(name));
-            menu.getItems().add(portForward);
+            menu.getItems().addAll(restartPod, portForward);
         }
 
         MenuItem copyName = new MenuItem("Copy name");

@@ -128,6 +128,16 @@ public interface ClusterService {
     /** Trigger a rolling restart of a Deployment (à la {@code kubectl rollout restart}). */
     void restartDeployment(String context, String namespace, String name);
 
+    /**
+     * "Restart" a single pod. Kubernetes has no restart verb for pods: the only way is to delete the
+     * pod and let its controller (ReplicaSet/StatefulSet/DaemonSet/Job) create a fresh replacement.
+     * This refuses to delete a <em>bare</em> pod (no controller owner), since nothing would recreate it
+     * — use {@link #deleteResource} for that.
+     *
+     * @return the owning controller as "Kind/name", for the status message
+     */
+    String restartPod(String context, String namespace, String name);
+
     /** Scale a Deployment to the given replica count. */
     void scaleDeployment(String context, String namespace, String name, int replicas);
 
