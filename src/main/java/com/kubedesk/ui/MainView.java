@@ -960,6 +960,7 @@ public class MainView extends BorderPane {
         yamlTab.setClosable(false);
         yamlTab.setContent(buildYamlPane());
         eventsTab.setClosable(false);
+        eventsTab.setContent(buildEventsPane());
         logsTab.setClosable(false);
         logsTab.setContent(buildLogsPane());
         shellTab.setClosable(false);
@@ -1106,6 +1107,57 @@ public class MainView extends BorderPane {
                 yamlArea::setText);
     }
 
+    /** The Events tab content: a refresh + copy toolbar above the read-only event text. */
+    private VBox buildEventsPane() {
+        Button refresh = new Button("↻");
+        refresh.getStyleClass().add("icon-button");
+        refresh.setTooltip(new Tooltip("Reload events"));
+        refresh.setOnAction(e -> reloadEvents());
+
+        Button copy = copyButton("Copy all events to the clipboard", eventsArea::getText, "events");
+
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+
+        HBox controls = new HBox(8, refresh, spacer, copy);
+        controls.setAlignment(Pos.CENTER_LEFT);
+        controls.setPadding(new Insets(8, 12, 8, 12));
+
+        VBox.setVgrow(eventsArea, Priority.ALWAYS);
+        return new VBox(controls, eventsArea);
+    }
+
+    private void reloadEvents() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null || currentDetailName == null) {
+            return;
+        }
+        eventsArea.setText("Loading…");
+        runAsync(() -> service.describeEvents(ctx.name(), namespaceBox.getValue(), detailKind, currentDetailName),
+                eventsArea::setText);
+    }
+
+    /**
+     * A "⧉ Copy" toolbar button that copies whatever {@code text} yields when clicked (so it always
+     * grabs the current content, not a snapshot) and confirms in the status bar.
+     */
+    private Button copyButton(String tooltip, Supplier<String> text, String what) {
+        Button copy = new Button("⧉ Copy");
+        copy.getStyleClass().add("icon-button");
+        copy.setTooltip(new Tooltip(tooltip));
+        copy.setOnAction(e -> {
+            String value = text.get();
+            if (value == null || value.isBlank() || "Loading…".equals(value)) {
+                status("Nothing to copy yet.");
+                return;
+            }
+            copyToClipboard(value);
+            long lines = value.lines().count();
+            status("Copied " + lines + (lines == 1 ? " line" : " lines") + " of " + what + " to the clipboard.");
+        });
+        return copy;
+    }
+
     /** The Logs tab content: container picker + tail-size picker + refresh + a monospace log view. */
     private VBox buildLogsPane() {
         containerBox.setMinWidth(150);
@@ -1123,13 +1175,15 @@ public class MainView extends BorderPane {
         save.getStyleClass().add("accent-button");
         save.setOnAction(e -> saveLogs());
 
+        Button copy = copyButton("Copy the whole log tail to the clipboard", logsArea::getText, "logs");
+
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
         HBox controls = new HBox(8,
                 new Label("Container:"), containerBox,
                 new Label("Tail:"), tailBox,
-                refresh, spacer, save);
+                refresh, spacer, copy, save);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
