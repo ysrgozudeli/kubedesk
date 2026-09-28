@@ -3,6 +3,14 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.1] - 2026-09-28
+
+### Added
+- **Copy buttons on Logs and Events.** The details panel's **Logs** and **Events** tabs get a **Copy**
+  button in their toolbar (like Overview's **Copy all**) that puts the whole current text on the clipboard
+  and confirms the line count in the status bar. The Events tab also gains a **refresh** button, so you
+  can re-pull events without reopening the resource.
+
 ## [1.6.0] - 2026-09-06
 
 ### Added
