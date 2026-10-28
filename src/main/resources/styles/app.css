@@ -78,6 +78,29 @@
     -fx-background-color: #f6c99a;
 }
 
+/* MCP server panel (experimental). */
+.mcp-banner {
+    -fx-background-color: #fdf0e6;
+    -fx-text-fill: #8a4b1f;
+    -fx-padding: 10 12 10 12;
+    -fx-background-radius: 6;
+}
+.mcp-status-running {
+    -fx-text-fill: #1a7f37;
+    -fx-font-weight: bold;
+}
+.mcp-status-stopped {
+    -fx-text-fill: #6a737d;
+}
+.mcp-power-label {
+    -fx-font-size: 14px;
+    -fx-font-weight: bold;
+}
+.mcp-hint {
+    -fx-text-fill: #6a737d;
+    -fx-font-size: 11px;
+}
+
 /* Update-available banner, stacked just under the toolbar. */
 .update-banner {
     -fx-background-color: #eef4ff;
