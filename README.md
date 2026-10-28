@@ -116,12 +116,37 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
 ## 🏗️ Architecture
 
 The UI never touches fabric8 directly. Everything goes through the single `ClusterService` interface,
-so a future `kubectl`-backed implementation — or an **MCP server** reusing the same logic — can be added
-without changing the UI. A generic table model (columns + string rows) drives all kinds.
+so a future `kubectl`-backed implementation can be added without changing the UI — and the experimental
+**[MCP server](#-mcp-server-for-ai-agents-experimental)** reuses that very same interface directly. A
+generic table model (columns + string rows) drives all kinds.
 
 ```
 JavaFX UI  ──►  ClusterService  ──►  Fabric8ClusterService  ──HTTPS/WSS──►  cluster API server
 ```
+
+## 🤖 MCP server for AI agents (experimental)
+
+> 🧪 **Experimental — dev/testing use only, not for production.** It gives an AI agent read access to
+> your cluster using your kubeconfig credentials. It binds **loopback only** (`127.0.0.1`) and is
+> **off by default**.
+
+KubeDesk can expose a small embedded, **read-only** [Model Context Protocol](https://modelcontextprotocol.io)
+server that reuses the same `ClusterService` the UI uses — so an AI agent (e.g. Claude) can inspect your
+cluster over the API, **no `kubectl` required**. It speaks Streamable HTTP, so any MCP client can connect.
+
+- **Turn it on:** ☰ menu → **MCP server…** → flip the switch. It serves `http://127.0.0.1:<port>/mcp`
+  (default `7865`) and keeps running until you switch it off or quit KubeDesk.
+- **Connect an agent** (Claude Code):
+  ```bash
+  claude mcp add --transport http kubedesk http://127.0.0.1:7865/mcp
+  ```
+  then ask it something like *"scan my cluster's health."*
+- **Tools (all read-only):** `health_scan`, `list_namespaces`, `list_resource`, `describe_yaml`,
+  `pod_logs`. Context and namespace default to whatever is selected in KubeDesk, and results are kept
+  compact (server-side filters, capped log tails) to save the agent's tokens.
+
+Write actions (behind an in-UI confirmation so you stay the hand that acts) and a live mirror of the
+agent's view in the UI are planned but **not here yet** — see the roadmap.
 
 ## 🛠️ Build from source
 
@@ -244,8 +269,10 @@ metrics), pod diagnostics, management actions (incl. pod restart), Create/Apply 
 topology view, health scan, Events view, embedded kubectl console, and cross-platform native packaging.
 
 Candidate next:
-- **MCP server for AI agents** — read-only by default, reusing `ClusterService`, with the option to
-  **mirror the agent's view live in the UI** so you watch it work and stay the hand that acts.
+- **MCP server — live UI mirror + write actions.** The read-only server already exists
+  ([experimental, above](#-mcp-server-for-ai-agents-experimental)); next is **mirroring the agent's
+  view live in the UI** so you watch it work, plus write tools behind an **in-UI confirmation** so you
+  stay the hand that acts.
 - **All-namespaces view + global search.**
 - **Multi-pod log tailing** (stern-style) and optional Loki/cloud-logging integration.
 - **Headless health CLI** for CI/CD gates (reuses `ClusterService.healthCheck`).
