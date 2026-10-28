@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSeverity;
+import com.kubedesk.service.Dtos.ResourceData;
+import com.kubedesk.service.ResourceKind;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.fabric8.kubernetes.client.KubernetesClientException;
@@ -32,9 +34,10 @@ import java.util.function.Supplier;
  * of the cluster" slice.
  *
  * <p><b>Experimental, dev/testing use only.</b> It binds <em>loopback only</em> ({@code 127.0.0.1})
- * and currently exposes a single <em>read-only</em> tool, {@code health_scan}, that reuses
- * {@link ClusterService#healthCheck}. There is no authentication yet (none is needed while everything
- * is read-only and loopback-bound), and no write tools — those, with their gating/auth, come later.
+ * and exposes a handful of <em>read-only</em> tools ({@code health_scan}, {@code list_namespaces},
+ * {@code list_resource}, {@code describe_yaml}, {@code pod_logs}) that reuse {@link ClusterService}.
+ * There is no authentication yet (none is needed while everything is read-only and loopback-bound),
+ * and no write tools — those, with their gating/auth, come later.
  *
  * <p>Transport is plain <b>Streamable HTTP</b> (the 2025 MCP transport) without SSE: every request is a
  * single JSON-RPC POST answered with a single JSON body, which is all a request/response tool needs.
@@ -55,6 +58,11 @@ public final class KubeDeskMcpServer {
 
     /** A single cluster call can hang if the API server is slow/unreachable; bound every tool call. */
     private static final int TOOL_TIMEOUT_SECONDS = 15;
+
+    private static final String DESC_CONTEXT =
+            "Kube context to use. Defaults to the context currently selected in KubeDesk.";
+    private static final String DESC_DEFAULT_NS =
+            "Defaults to the namespace currently selected in KubeDesk.";
 
     private final ClusterService service;
     private final String serverVersion;
@@ -193,50 +201,76 @@ public final class KubeDeskMcpServer {
 
     private ObjectNode handleToolsList() {
         ObjectNode r = json.createObjectNode();
-        ObjectNode tool = r.putArray("tools").addObject();
-        tool.put("name", "health_scan");
-        tool.put("description",
+        ArrayNode tools = r.putArray("tools");
+
+        ObjectNode health = addTool(tools, "health_scan",
                 "Scan a namespace (plus cluster Nodes) for resources failing common health checks — "
                 + "CrashLoopBackOff, ImagePullBackOff, OOMKilled, Evicted, unschedulable or high-restart "
                 + "pods, unavailable workloads, failed Jobs, unbound PVCs, orphaned Services and "
-                + "unhealthy/cordoned Nodes. Returns findings ranked most-severe first. Read-only.");
+                + "unhealthy/cordoned Nodes. Returns findings ranked most-severe first.");
+        ObjectNode healthProps = props(health);
+        strProp(healthProps, "context", DESC_CONTEXT);
+        strProp(healthProps, "namespace", "Namespace to scan. " + DESC_DEFAULT_NS);
+        strProp(healthProps, "severity",
+                "Optional: return only findings at this severity (filtered server-side to save tokens).")
+                .putArray("enum").add("critical").add("warning");
 
-        ObjectNode schema = tool.putObject("inputSchema");
-        schema.put("type", "object");
-        ObjectNode props = schema.putObject("properties");
-        ObjectNode ns = props.putObject("namespace");
-        ns.put("type", "string");
-        ns.put("description",
-                "Namespace to scan. Defaults to the namespace currently selected in KubeDesk.");
-        ObjectNode ctx = props.putObject("context");
-        ctx.put("type", "string");
-        ctx.put("description",
-                "Kube context to use. Defaults to the context currently selected in KubeDesk.");
-        ObjectNode sev = props.putObject("severity");
-        sev.put("type", "string");
-        ArrayNode en = sev.putArray("enum");
-        en.add("critical");
-        en.add("warning");
-        sev.put("description",
-                "Optional: return only findings at this severity (filtered server-side to save tokens).");
+        ObjectNode listNs = addTool(tools, "list_namespaces",
+                "List the namespaces visible in a context. Useful for discovering what to scan.");
+        strProp(props(listNs), "context", DESC_CONTEXT);
 
-        ObjectNode ann = tool.putObject("annotations");
-        ann.put("title", "Cluster health scan");
-        ann.put("readOnlyHint", true);
+        ObjectNode listRes = addTool(tools, "list_resource",
+                "List a resource kind as a compact table (columns + rows), the same data KubeDesk shows. "
+                + "Kinds: " + kindList() + ".");
+        ObjectNode listProps = props(listRes);
+        strProp(listProps, "kind", "Resource kind to list, e.g. 'Pods' or 'Deployments'.");
+        strProp(listProps, "namespace", "Namespace (ignored for cluster-scoped Nodes). " + DESC_DEFAULT_NS);
+        strProp(listProps, "context", DESC_CONTEXT);
+        strProp(listProps, "nameContains",
+                "Optional case-insensitive substring filter applied server-side (saves tokens).");
+        intProp(listProps, "limit", "Optional max rows to return (the rest are counted as 'truncated').");
+
+        ObjectNode describe = addTool(tools, "describe_yaml",
+                "Fetch a single resource's full manifest as YAML (detail on demand).");
+        ObjectNode descProps = props(describe);
+        strProp(descProps, "kind", "Resource kind, e.g. 'Pods' or 'Deployments'.");
+        strProp(descProps, "name", "Resource name.");
+        strProp(descProps, "namespace", "Namespace (ignored for Nodes). " + DESC_DEFAULT_NS);
+        strProp(descProps, "context", DESC_CONTEXT);
+
+        ObjectNode logs = addTool(tools, "pod_logs",
+                "Fetch the tail of a pod container's logs.");
+        ObjectNode logProps = props(logs);
+        strProp(logProps, "pod", "Pod name.");
+        strProp(logProps, "namespace", "Namespace. " + DESC_DEFAULT_NS);
+        strProp(logProps, "container",
+                "Optional container name; defaults to the pod's default container.");
+        strProp(logProps, "context", DESC_CONTEXT);
+        intProp(logProps, "tailLines", "Trailing lines to return (default 200, max 2000).");
+
         return r;
     }
 
     private ObjectNode handleToolsCall(JsonNode req) {
         JsonNode params = req.path("params");
         String name = params.path("name").asText("");
-        if (!"health_scan".equals(name)) {
-            return toolError("Unknown tool: " + name);
-        }
         JsonNode args = params.path("arguments");
+        return switch (name) {
+            case "health_scan" -> toolHealthScan(args);
+            case "list_namespaces" -> toolListNamespaces(args);
+            case "list_resource" -> toolListResource(args);
+            case "describe_yaml" -> toolDescribeYaml(args);
+            case "pod_logs" -> toolPodLogs(args);
+            default -> toolError("Unknown tool: " + name);
+        };
+    }
+
+    // --- tools ------------------------------------------------------------------------------
+
+    private ObjectNode toolHealthScan(JsonNode args) {
         String context = text(args, "context", defaultContext.get());
         String namespace = text(args, "namespace", defaultNamespace.get());
         String severity = text(args, "severity", null);
-
         if (namespace == null || namespace.isBlank()) {
             return toolError("No namespace was given and none is selected in KubeDesk — "
                     + "pass a 'namespace' argument.");
@@ -247,8 +281,107 @@ public final class KubeDeskMcpServer {
             List<HealthFinding> findings = runWithTimeout(() -> service.healthCheck(ctx, ns));
             return toolText(renderFindings(context, namespace, severity, findings), false);
         } catch (TimeoutException te) {
-            return toolError("Cluster health scan timed out after " + TOOL_TIMEOUT_SECONDS
-                    + "s (the API server is slow or unreachable).");
+            return toolError(timeoutMsg());
+        } catch (Exception e) {
+            return toolError(describeFailure(e, context, namespace));
+        }
+    }
+
+    private ObjectNode toolListNamespaces(JsonNode args) {
+        String context = text(args, "context", defaultContext.get());
+        try {
+            final String ctx = context;
+            List<String> namespaces = runWithTimeout(() -> service.listNamespaces(ctx));
+            ObjectNode root = json.createObjectNode();
+            root.put("context", context);
+            ArrayNode arr = root.putArray("namespaces");
+            for (String n : namespaces) {
+                arr.add(n);
+            }
+            return toolText(json.writeValueAsString(root), false);
+        } catch (TimeoutException te) {
+            return toolError(timeoutMsg());
+        } catch (Exception e) {
+            return toolError(describeFailure(e, context, null));
+        }
+    }
+
+    private ObjectNode toolListResource(JsonNode args) {
+        String context = text(args, "context", defaultContext.get());
+        ResourceKind kind = parseKind(text(args, "kind", null));
+        if (kind == null) {
+            return toolError("Missing or unknown 'kind'. One of: " + kindList());
+        }
+        String namespace = text(args, "namespace", defaultNamespace.get());
+        if (kind.namespaced() && (namespace == null || namespace.isBlank())) {
+            return toolError("'" + kind.label() + "' is namespaced — pass a 'namespace' argument.");
+        }
+        String nameContains = text(args, "nameContains", null);
+        Integer limit = intOrNull(args, "limit");
+        try {
+            final String ctx = context;
+            final String ns = namespace;
+            final ResourceKind k = kind;
+            ResourceData data = runWithTimeout(() -> service.listResource(ctx, ns, k));
+            return toolText(renderResource(data, nameContains, limit), false);
+        } catch (TimeoutException te) {
+            return toolError(timeoutMsg());
+        } catch (Exception e) {
+            return toolError(describeFailure(e, context, namespace));
+        }
+    }
+
+    private ObjectNode toolDescribeYaml(JsonNode args) {
+        String context = text(args, "context", defaultContext.get());
+        ResourceKind kind = parseKind(text(args, "kind", null));
+        if (kind == null) {
+            return toolError("Missing or unknown 'kind'. One of: " + kindList());
+        }
+        String name = text(args, "name", null);
+        if (name == null) {
+            return toolError("Missing 'name'.");
+        }
+        String namespace = text(args, "namespace", defaultNamespace.get());
+        if (kind.namespaced() && (namespace == null || namespace.isBlank())) {
+            return toolError("'" + kind.label() + "' is namespaced — pass a 'namespace' argument.");
+        }
+        try {
+            final String ctx = context;
+            final String ns = namespace;
+            final String nm = name;
+            final ResourceKind k = kind;
+            String yaml = runWithTimeout(() -> service.describeYaml(ctx, ns, k, nm));
+            return toolText(yaml == null ? "" : yaml, false);
+        } catch (TimeoutException te) {
+            return toolError(timeoutMsg());
+        } catch (Exception e) {
+            return toolError(describeFailure(e, context, namespace));
+        }
+    }
+
+    private ObjectNode toolPodLogs(JsonNode args) {
+        String context = text(args, "context", defaultContext.get());
+        String namespace = text(args, "namespace", defaultNamespace.get());
+        String pod = text(args, "pod", null);
+        String container = text(args, "container", null);
+        Integer tail = intOrNull(args, "tailLines");
+        int tailLines = tail == null ? 200 : Math.max(1, Math.min(tail, 2000));
+        if (pod == null) {
+            return toolError("Missing 'pod'.");
+        }
+        if (namespace == null || namespace.isBlank()) {
+            return toolError("Missing 'namespace'.");
+        }
+        try {
+            final String ctx = context;
+            final String ns = namespace;
+            final String p = pod;
+            final String c = container;
+            final int tl = tailLines;
+            String out = runWithTimeout(() -> service.podLogs(ctx, ns, p, c, tl));
+            return toolText(out == null ? "" : out, false);
+        } catch (TimeoutException te) {
+            return toolError(timeoutMsg());
         } catch (Exception e) {
             return toolError(describeFailure(e, context, namespace));
         }
@@ -294,6 +427,110 @@ public final class KubeDeskMcpServer {
         summary.put("total", crit + warn);
         root.set("findings", arr);
         return json.writeValueAsString(root);
+    }
+
+    /**
+     * Render table data as compact JSON {@code {columns, rows, total[, truncated]}}. Columns+rows (not
+     * an array of objects) keeps field names from repeating on every row — cheaper in tokens. The
+     * optional {@code nameContains} filter and {@code limit} are applied here, server-side.
+     */
+    private String renderResource(ResourceData data, String nameContains, Integer limit)
+            throws IOException {
+        String needle = (nameContains == null || nameContains.isBlank())
+                ? null : nameContains.toLowerCase();
+        int matched = 0;
+        int included = 0;
+        ArrayNode rows = json.createArrayNode();
+        for (List<String> row : data.rows()) {
+            if (needle != null && !rowContains(row, needle)) {
+                continue;
+            }
+            matched++;
+            if (limit != null && included >= limit) {
+                continue;
+            }
+            ArrayNode r = rows.addArray();
+            for (String cell : row) {
+                r.add(cell);
+            }
+            included++;
+        }
+        ObjectNode root = json.createObjectNode();
+        ArrayNode cols = root.putArray("columns");
+        for (String c : data.columns()) {
+            cols.add(c);
+        }
+        root.set("rows", rows);
+        root.put("total", matched);
+        if (matched > included) {
+            root.put("truncated", matched - included);
+        }
+        return json.writeValueAsString(root);
+    }
+
+    private static boolean rowContains(List<String> row, String needleLower) {
+        for (String cell : row) {
+            if (cell != null && cell.toLowerCase().contains(needleLower)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static ResourceKind parseKind(String s) {
+        if (s == null || s.isBlank()) {
+            return null;
+        }
+        String t = s.trim();
+        for (ResourceKind k : ResourceKind.values()) {
+            if (k.label().equalsIgnoreCase(t) || k.name().equalsIgnoreCase(t)
+                    || k.resource().equalsIgnoreCase(t)) {
+                return k;
+            }
+        }
+        return null;
+    }
+
+    private static String kindList() {
+        StringBuilder sb = new StringBuilder();
+        for (ResourceKind k : ResourceKind.values()) {
+            if (sb.length() > 0) {
+                sb.append(", ");
+            }
+            sb.append(k.label());
+        }
+        return sb.toString();
+    }
+
+    // --- tool-schema builders ---------------------------------------------------------------
+
+    /** Add a read-only tool with an empty object inputSchema; fill its properties via {@link #props}. */
+    private ObjectNode addTool(ArrayNode tools, String name, String description) {
+        ObjectNode t = tools.addObject();
+        t.put("name", name);
+        t.put("description", description);
+        ObjectNode schema = t.putObject("inputSchema");
+        schema.put("type", "object");
+        schema.putObject("properties");
+        t.putObject("annotations").put("readOnlyHint", true);
+        return t;
+    }
+
+    private static ObjectNode props(ObjectNode tool) {
+        return (ObjectNode) tool.get("inputSchema").get("properties");
+    }
+
+    private static ObjectNode strProp(ObjectNode props, String name, String description) {
+        ObjectNode p = props.putObject(name);
+        p.put("type", "string");
+        p.put("description", description);
+        return p;
+    }
+
+    private static void intProp(ObjectNode props, String name, String description) {
+        ObjectNode p = props.putObject(name);
+        p.put("type", "integer");
+        p.put("description", description);
     }
 
     // --- failure mapping --------------------------------------------------------------------
@@ -394,6 +631,29 @@ public final class KubeDeskMcpServer {
         ex.sendResponseHeaders(status, bytes.length);
         try (OutputStream os = ex.getResponseBody()) {
             os.write(bytes);
+        }
+    }
+
+    private static String timeoutMsg() {
+        return "The call timed out after " + TOOL_TIMEOUT_SECONDS
+                + "s (the API server is slow or unreachable).";
+    }
+
+    private static Integer intOrNull(JsonNode args, String field) {
+        if (args == null) {
+            return null;
+        }
+        JsonNode v = args.get(field);
+        if (v == null || v.isNull()) {
+            return null;
+        }
+        if (v.isNumber()) {
+            return v.asInt();
+        }
+        try {
+            return Integer.parseInt(v.asText().trim());
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
