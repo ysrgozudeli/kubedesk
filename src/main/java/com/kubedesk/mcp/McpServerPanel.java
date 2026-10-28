@@ -1,11 +1,13 @@
 package com.kubedesk.mcp;
 
+import atlantafx.base.controls.ToggleSwitch;
 import com.kubedesk.prefs.Settings;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
-import javafx.scene.control.CheckBox;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.Separator;
@@ -15,6 +17,8 @@ import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.stage.Window;
 
@@ -45,22 +49,40 @@ public final class McpServerPanel {
         banner.setMaxWidth(440);
         banner.getStyleClass().add("mcp-banner");
 
-        CheckBox enable = new CheckBox("Enable MCP server");
+        // A power-switch affordance (not a checkbox): it reads as "the server is on/off, right now".
+        ToggleSwitch power = new ToggleSwitch();
+        Label powerLabel = new Label("MCP server");
+        powerLabel.getStyleClass().add("mcp-power-label");
+        Region powerSpacer = new Region();
+        HBox.setHgrow(powerSpacer, Priority.ALWAYS);
+        Label status = new Label();
+        HBox powerRow = new HBox(10, powerLabel, powerSpacer, status, power);
+        powerRow.setAlignment(Pos.CENTER_LEFT);
 
         Spinner<Integer> port = new Spinner<>(1024, 65535, settings.mcpPort);
         port.setEditable(true);
         port.setPrefWidth(120);
 
-        Label status = new Label();
         TextField endpoint = new TextField();
         endpoint.setEditable(false);
         endpoint.setPrefWidth(280);
         Button copy = new Button("Copy");
 
+        Label hint = new Label(
+                "KubeDesk keeps the server running after you close this window — turn it off here, "
+                + "or it stops when KubeDesk exits.");
+        hint.setWrapText(true);
+        hint.setMaxWidth(440);
+        hint.getStyleClass().add("mcp-hint");
+
+        // Reflecting server state back into the switch must not re-trigger start/stop.
+        boolean[] syncing = {false};
         Runnable refresh = () -> {
             boolean running = server.isRunning();
-            enable.setSelected(running);
-            port.setDisable(running); // change the port while stopped, then re-enable
+            syncing[0] = true;
+            power.setSelected(running);
+            syncing[0] = false;
+            port.setDisable(running); // change the port while stopped, then flip it back on
             endpoint.setDisable(!running);
             copy.setDisable(!running);
             if (running) {
@@ -74,8 +96,11 @@ public final class McpServerPanel {
             }
         };
 
-        enable.setOnAction(e -> {
-            if (enable.isSelected()) {
+        power.selectedProperty().addListener((obs, was, on) -> {
+            if (syncing[0]) {
+                return; // programmatic sync from refresh(), not a user toggle
+            }
+            if (on) {
                 int p = port.getValue();
                 try {
                     server.start(p);
@@ -87,6 +112,7 @@ public final class McpServerPanel {
                             "Couldn't start the MCP server on port " + p + ":\n" + ex.getMessage());
                     a.initOwner(owner);
                     a.showAndWait();
+                    // refresh() below flips the switch back off, since the server didn't start.
                 }
             } else {
                 server.stop();
@@ -106,13 +132,13 @@ public final class McpServerPanel {
         grid.setHgap(10);
         grid.setVgap(10);
         grid.addRow(0, new Label("Port:"), port);
-        grid.addRow(1, new Label("Status:"), status);
-        grid.addRow(2, new Label("Endpoint:"), new HBox(6, endpoint, copy));
+        grid.addRow(1, new Label("Endpoint:"), new HBox(6, endpoint, copy));
 
-        VBox root = new VBox(14, banner, new Separator(), enable, grid);
+        VBox root = new VBox(14, banner, new Separator(), powerRow, grid, hint);
         root.setPadding(new Insets(16));
         dialog.getDialogPane().setContent(root);
-        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        // "Done" dismisses the dialog; it does NOT stop the server (the switch does).
+        dialog.getDialogPane().getButtonTypes().add(new ButtonType("Done", ButtonBar.ButtonData.OK_DONE));
 
         refresh.run();
         dialog.showAndWait();

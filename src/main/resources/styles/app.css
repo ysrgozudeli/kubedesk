@@ -92,6 +92,14 @@
 .mcp-status-stopped {
     -fx-text-fill: #6a737d;
 }
+.mcp-power-label {
+    -fx-font-size: 14px;
+    -fx-font-weight: bold;
+}
+.mcp-hint {
+    -fx-text-fill: #6a737d;
+    -fx-font-size: 11px;
+}
 
 /* Update-available banner, stacked just under the toolbar. */
 .update-banner {
