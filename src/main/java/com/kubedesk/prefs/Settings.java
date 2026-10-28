@@ -36,6 +36,13 @@ public class Settings {
     /** Port-forwards active at last exit, offered for restore on launch. */
     public List<PortForwardPref> portForwards = new ArrayList<>();
 
+    /**
+     * Embedded MCP server (experimental, read-only, loopback-only): whether to start it on launch, and
+     * the local port to bind. See {@code com.kubedesk.mcp.KubeDeskMcpServer}.
+     */
+    public boolean mcpEnabled = false;
+    public int mcpPort = 7865;
+
     /** A saved port-forward. */
     public record PortForwardPref(String context, String namespace, String pod,
                                   int remotePort, int localPort) {

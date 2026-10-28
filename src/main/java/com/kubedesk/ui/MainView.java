@@ -11,6 +11,8 @@ import com.kubedesk.service.Dtos.HealthSeverity;
 import com.kubedesk.service.Dtos.TopoNode;
 import com.kubedesk.prefs.Settings;
 import com.kubedesk.prefs.SettingsStore;
+import com.kubedesk.mcp.KubeDeskMcpServer;
+import com.kubedesk.mcp.McpServerPanel;
 import com.kubedesk.update.UpdateService;
 import com.kubedesk.util.YamlLint;
 import com.kubedesk.service.Dtos.HealthSummary;
@@ -220,6 +222,10 @@ public class MainView extends BorderPane {
     private final UpdateService updateService = new UpdateService();
     private final HBox updateBanner = new HBox(12);
 
+    // Embedded MCP server (experimental, read-only). Built lazily; reads the live context/namespace via
+    // suppliers so a tool call always targets what's selected now.
+    private KubeDeskMcpServer mcpServer;
+
     // Live updates
     private final Label liveLabel = new Label("● Live");
     private final Button pauseButton = new Button("⏸");
@@ -270,6 +276,21 @@ public class MainView extends BorderPane {
         applySavedKubeConfig();
         loadContexts();
         checkForUpdates(false);
+        maybeStartMcpServer();
+    }
+
+    /** If the user left the (experimental) MCP server enabled last session, start it again on launch. */
+    private void maybeStartMcpServer() {
+        if (!settings.mcpEnabled) {
+            return;
+        }
+        try {
+            mcpServer().start(settings.mcpPort);
+            status("MCP server (experimental) listening on " + mcpServer().endpoint()
+                    + " — dev/testing use only.");
+        } catch (Exception e) {
+            status("Couldn't start the MCP server on port " + settings.mcpPort + ": " + e.getMessage());
+        }
     }
 
     // --- auto-update ------------------------------------------------------------------------
@@ -608,11 +629,14 @@ public class MainView extends BorderPane {
         MenuButton appMenu = new MenuButton("☰");
         appMenu.getStyleClass().add("icon-button");
         appMenu.setTooltip(new Tooltip("Menu"));
+        MenuItem mcpServerItem = new MenuItem("MCP server…");
+        mcpServerItem.setOnAction(e -> McpServerPanel.show(getScene() == null ? null : getScene().getWindow(),
+                mcpServer(), settings, () -> pool.submit(() -> settingsStore.save(settings))));
         MenuItem checkUpdates = new MenuItem("Check for updates…");
         checkUpdates.setOnAction(e -> checkForUpdates(true));
         MenuItem about = new MenuItem("About KubeDesk");
         about.setOnAction(e -> showAboutDialog());
-        appMenu.getItems().setAll(consoleMenuItem, new SeparatorMenuItem(), checkUpdates,
+        appMenu.getItems().setAll(consoleMenuItem, mcpServerItem, new SeparatorMenuItem(), checkUpdates,
                 new SeparatorMenuItem(), about);
 
         liveLabel.getStyleClass().add("live-indicator");
@@ -667,6 +691,24 @@ public class MainView extends BorderPane {
             verticalSplit.getItems().remove(console);
         }
         consoleMenuItem.setSelected(show);
+    }
+
+    /**
+     * The embedded MCP server, built on first use. It reads the live context/namespace via suppliers
+     * (same pattern as the kubectl console), so a tool call defaults to what's selected now.
+     */
+    private KubeDeskMcpServer mcpServer() {
+        if (mcpServer == null) {
+            mcpServer = new KubeDeskMcpServer(
+                    service,
+                    UpdateService.currentVersion(),
+                    () -> {
+                        ContextInfo c = contextBox.getValue();
+                        return c == null ? null : c.name();
+                    },
+                    this::effectiveNamespace);
+        }
+        return mcpServer;
     }
 
     private void chooseKubeConfig() {
@@ -2824,6 +2866,9 @@ public class MainView extends BorderPane {
         }
         portForwards.clear();
         stopWatch();
+        if (mcpServer != null) {
+            mcpServer.stop();
+        }
         pool.shutdownNow();
     }
 
