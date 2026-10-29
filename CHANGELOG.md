@@ -3,6 +3,20 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-10-29
+
+### Added
+- **Experimental MCP server for AI agents.** KubeDesk can expose an embedded, **read-only**
+  [Model Context Protocol](https://modelcontextprotocol.io) server (**☰ → MCP server…**) so an AI agent
+  such as Claude can inspect your cluster over the same API the UI uses — **no `kubectl` required**. It
+  speaks Streamable HTTP, binds **loopback only** (`127.0.0.1`, default port `7865`), and is **off by
+  default**. Five read-only tools reuse the existing `ClusterService`: `health_scan`, `list_namespaces`,
+  `list_resource`, `describe_yaml`, and `pod_logs` — context and namespace default to the current UI
+  selection, and results are kept compact (server-side filters, capped log tails) to save the agent's
+  tokens. A small panel with a power toggle shows the endpoint to paste into `claude mcp add`.
+  Dev/testing use only; write actions (behind an in-UI confirmation) and a live in-UI mirror of the
+  agent's view are planned.
+
 ## [1.6.1] - 2026-09-28
 
 ### Added
