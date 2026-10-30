@@ -56,6 +56,22 @@ public final class KubeDeskMcpServer {
     private static final String PROTOCOL_VERSION = "2025-06-18";
     private static final String SERVER_NAME = "kubedesk";
 
+    /**
+     * Advisory guidance returned to the client in {@code initialize} (the spec's {@code instructions}
+     * field). It tells the model this server is read-only and how a change reaches the cluster: the
+     * human applies it from KubeDesk's UI. This keeps the server honestly read-only while still letting
+     * an agent be useful about writes — by handing the user ready-to-apply YAML and the exact gesture.
+     */
+    private static final String INSTRUCTIONS =
+            "KubeDesk exposes this Kubernetes cluster READ-ONLY over MCP — there are no write tools, so "
+            + "you cannot create, change, scale, restart or delete anything yourself. When the user "
+            + "wants a change, never claim you applied it. Instead: produce the complete, ready-to-apply "
+            + "YAML manifest (use describe_yaml to fetch the current manifest as a starting point), then "
+            + "tell the user to apply it in KubeDesk — click the blue \"+ Create\" button at the "
+            + "bottom-left (it opens \"Create / Apply YAML\", does a server-side apply, and offers a "
+            + "Dry-run first), or open the resource's YAML tab and click Apply. Edits take effect only "
+            + "when the user clicks Apply.";
+
     /** A single cluster call can hang if the API server is slow/unreachable; bound every tool call. */
     private static final int TOOL_TIMEOUT_SECONDS = 15;
 
@@ -72,6 +88,8 @@ public final class KubeDeskMcpServer {
 
     private final ObjectMapper json = new ObjectMapper();
     private final ExecutorService workers = Executors.newCachedThreadPool(daemon());
+    /** The live-mirror channel: every tool call is recorded here for the UI to reflect. */
+    private final McpActivity activity = new McpActivity();
 
     private volatile HttpServer http;
     private volatile int boundPort = -1;
@@ -112,6 +130,11 @@ public final class KubeDeskMcpServer {
 
     public boolean isRunning() {
         return http != null;
+    }
+
+    /** The activity channel the UI subscribes to in order to mirror the agent's calls. */
+    public McpActivity activity() {
+        return activity;
     }
 
     public int port() {
@@ -196,6 +219,7 @@ public final class KubeDeskMcpServer {
         ObjectNode info = r.putObject("serverInfo");
         info.put("name", SERVER_NAME);
         info.put("version", serverVersion);
+        r.put("instructions", INSTRUCTIONS);
         return r;
     }
 
@@ -255,7 +279,7 @@ public final class KubeDeskMcpServer {
         JsonNode params = req.path("params");
         String name = params.path("name").asText("");
         JsonNode args = params.path("arguments");
-        return switch (name) {
+        ObjectNode result = switch (name) {
             case "health_scan" -> toolHealthScan(args);
             case "list_namespaces" -> toolListNamespaces(args);
             case "list_resource" -> toolListResource(args);
@@ -263,6 +287,100 @@ public final class KubeDeskMcpServer {
             case "pod_logs" -> toolPodLogs(args);
             default -> toolError("Unknown tool: " + name);
         };
+        recordActivity(name, args, result);
+        return result;
+    }
+
+    /**
+     * Mirror a just-finished tool call onto the {@link #activity} channel: a one-line human summary,
+     * the resource the UI could reveal (if any), and a compact outcome derived from the result — a
+     * count for the list/scan tools, the first error line for failures. Best-effort and swallowing:
+     * mirroring must never affect the response the agent receives.
+     */
+    private void recordActivity(String tool, JsonNode args, ObjectNode result) {
+        try {
+            boolean isError = result.path("isError").asBoolean(false);
+            String text = result.path("content").path(0).path("text").asText("");
+
+            String ns = text(args, "namespace", defaultNamespace.get());
+            ResourceKind kind = parseKind(text(args, "kind", null));
+            String name = text(args, "name", null);
+            String pod = text(args, "pod", null);
+
+            String summary;
+            ResourceKind navKind = null;
+            String navName = null;
+            String navNamespace = null;
+            switch (tool) {
+                case "health_scan" -> summary = "health scan · " + nsLabel(ns);
+                case "list_namespaces" -> summary = "list namespaces";
+                case "list_resource" -> {
+                    summary = (kind == null ? "list" : kind.label())
+                            + (kind != null && kind.namespaced() ? " · " + nsLabel(ns) : "");
+                    navKind = kind;
+                    navNamespace = ns;
+                }
+                case "describe_yaml" -> {
+                    summary = "describe " + (kind == null ? "" : kind.label() + "/") + safe(name);
+                    navKind = kind;
+                    navName = name;
+                    navNamespace = ns;
+                }
+                case "pod_logs" -> {
+                    summary = "logs " + safe(pod);
+                    navKind = ResourceKind.PODS;
+                    navName = pod;
+                    navNamespace = ns;
+                }
+                default -> summary = tool;
+            }
+
+            McpActivity.Status status = isError ? McpActivity.Status.ERROR : McpActivity.Status.OK;
+            String outcome = isError ? firstLine(text) : okOutcome(tool, text);
+            activity.record(tool, summary, status, outcome, navKind, navName, navNamespace);
+        } catch (RuntimeException ignored) {
+            // Never let mirroring bookkeeping disturb the tool response.
+        }
+    }
+
+    /** A compact success outcome: pull a count from the JSON tools, else a size for text tools. */
+    private String okOutcome(String tool, String text) {
+        try {
+            JsonNode n = json.readTree(text);
+            if (n.path("summary").has("total")) {
+                return n.path("summary").path("total").asInt() + " findings";
+            }
+            if (n.path("namespaces").isArray()) {
+                return n.path("namespaces").size() + " namespaces";
+            }
+            if (n.has("total")) {
+                int total = n.path("total").asInt();
+                int more = n.path("truncated").asInt(0);
+                return total + (total == 1 ? " row" : " rows") + (more > 0 ? " (" + more + " more)" : "");
+            }
+        } catch (Exception notJson) {
+            // describe_yaml / pod_logs return YAML or plain text — fall through to a size.
+        }
+        if ("pod_logs".equals(tool)) {
+            long lines = text.isEmpty() ? 0 : text.lines().count();
+            return lines + (lines == 1 ? " line" : " lines");
+        }
+        if ("describe_yaml".equals(tool)) {
+            return "yaml";
+        }
+        return "ok";
+    }
+
+    private static String nsLabel(String ns) {
+        return (ns == null || ns.isBlank()) ? "—" : ns;
+    }
+
+    private static String firstLine(String s) {
+        if (s == null || s.isBlank()) {
+            return "failed";
+        }
+        String first = s.lines().findFirst().orElse(s);
+        return first.length() > 140 ? first.substring(0, 139) + "…" : first;
     }
 
     // --- tools ------------------------------------------------------------------------------

@@ -2,6 +2,8 @@ package com.kubedesk.mcp;
 
 import atlantafx.base.controls.ToggleSwitch;
 import com.kubedesk.prefs.Settings;
+import javafx.application.Platform;
+import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
@@ -10,6 +12,7 @@ import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListView;
 import javafx.scene.control.Separator;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.TextField;
@@ -21,6 +24,10 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.stage.Window;
+
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 
 /**
  * The small dialog that enables/disables the embedded {@link KubeDeskMcpServer} and shows its endpoint.
@@ -55,8 +62,11 @@ public final class McpServerPanel {
         powerLabel.getStyleClass().add("mcp-power-label");
         Region powerSpacer = new Region();
         HBox.setHgrow(powerSpacer, Priority.ALWAYS);
+        // A small always-visible badge so the read-only nature is obvious at a glance.
+        Label roBadge = new Label("READ-ONLY");
+        roBadge.getStyleClass().addAll("chip", "chip-neutral", "mcp-ro-badge");
         Label status = new Label();
-        HBox powerRow = new HBox(10, powerLabel, powerSpacer, status, power);
+        HBox powerRow = new HBox(10, powerLabel, roBadge, powerSpacer, status, power);
         powerRow.setAlignment(Pos.CENTER_LEFT);
 
         Spinner<Integer> port = new Spinner<>(1024, 65535, settings.mcpPort);
@@ -67,6 +77,73 @@ public final class McpServerPanel {
         endpoint.setEditable(false);
         endpoint.setPrefWidth(280);
         Button copy = new Button("Copy");
+
+        // Access level. Everything is read-only today; the write side is shown but locked until the
+        // write tools (and their confirmation gate) exist, so the surface is honest about what it does.
+        // A disabled switch: off (left) = Read-only, on (right) = Read & write.
+        Label accessLabel = new Label("Access");
+        accessLabel.getStyleClass().add("nav-section");
+        ToggleSwitch accessSwitch = new ToggleSwitch();
+        accessSwitch.setSelected(false); // off = read-only
+        accessSwitch.setDisable(true);   // not implemented yet — intentionally locked
+        Label roSide = new Label("Read-only");
+        roSide.getStyleClass().add("mcp-power-label"); // the active side, emphasised
+        Label rwSide = new Label("Read & write");
+        rwSide.getStyleClass().add("mcp-status-stopped"); // muted: the inactive, locked side
+        Label soon = new Label("coming soon");
+        soon.getStyleClass().add("mcp-hint");
+        HBox rwSideBox = new HBox(6, rwSide, soon);
+        rwSideBox.setAlignment(Pos.CENTER_LEFT);
+        HBox accessRow = new HBox(10, roSide, accessSwitch, rwSideBox);
+        accessRow.setAlignment(Pos.CENTER_LEFT);
+        Label accessHint = new Label(
+                "Only read tools are exposed (scan, list, describe, logs). Write tools — scale, "
+                + "restart, delete, apply — will arrive later behind a per-action confirmation gate.");
+        accessHint.setWrapText(true);
+        accessHint.setMaxWidth(440);
+        accessHint.getStyleClass().add("mcp-hint");
+        VBox accessBox = new VBox(6, accessLabel, accessRow, accessHint);
+
+        // "Follow along": reflect each agent call in the main window (status line + reveal the
+        // resource). Persisted so it applies even when this dialog is closed during a session.
+        ToggleSwitch follow = new ToggleSwitch();
+        follow.setSelected(settings.mcpFollow);
+        follow.selectedProperty().addListener((obs, was, on) -> {
+            settings.mcpFollow = on;
+            persist.run();
+        });
+        Label followLabel = new Label("Follow agent in the window");
+        followLabel.getStyleClass().add("mcp-power-label");
+        Region followSpacer = new Region();
+        HBox.setHgrow(followSpacer, Priority.ALWAYS);
+        HBox followRow = new HBox(10, followLabel, followSpacer, follow);
+        followRow.setAlignment(Pos.CENTER_LEFT);
+        Label followHint = new Label(
+                "When on, each tool call is mirrored to the status bar and the resource the agent "
+                + "reads is revealed — switching namespace/kind and opening its details.");
+        followHint.setWrapText(true);
+        followHint.setMaxWidth(440);
+        followHint.getStyleClass().add("mcp-hint");
+
+        // Live recent-activity list — newest first — seeded from the server and updated as calls land.
+        Label activityLabel = new Label("Recent activity");
+        activityLabel.getStyleClass().add("nav-section");
+        ListView<String> activity = new ListView<>();
+        activity.setPrefHeight(150);
+        activity.setPlaceholder(new Label("No agent activity yet."));
+        activity.getStyleClass().add("mcp-activity");
+        ObservableList<String> items = activity.getItems();
+        for (McpActivity.Event ev : server.activity().snapshot()) {
+            items.add(0, formatEvent(ev));
+        }
+        McpActivity.Listener liveLog = ev -> Platform.runLater(() -> {
+            items.add(0, formatEvent(ev));
+            while (items.size() > 200) {
+                items.remove(items.size() - 1);
+            }
+        });
+        server.activity().addListener(liveLog);
+        dialog.setOnHidden(e -> server.activity().removeListener(liveLog));
 
         Label hint = new Label(
                 "KubeDesk keeps the server running after you close this window — turn it off here, "
@@ -134,7 +211,9 @@ public final class McpServerPanel {
         grid.addRow(0, new Label("Port:"), port);
         grid.addRow(1, new Label("Endpoint:"), new HBox(6, endpoint, copy));
 
-        VBox root = new VBox(14, banner, new Separator(), powerRow, grid, hint);
+        VBox root = new VBox(14, banner, new Separator(), powerRow, grid,
+                new Separator(), accessBox,
+                new Separator(), followRow, followHint, activityLabel, activity, hint);
         root.setPadding(new Insets(16));
         dialog.getDialogPane().setContent(root);
         // "Done" dismisses the dialog; it does NOT stop the server (the switch does).
@@ -142,5 +221,15 @@ public final class McpServerPanel {
 
         refresh.run();
         dialog.showAndWait();
+    }
+
+    private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    /** One activity line: {@code HH:mm:ss  ✓ tool · summary → outcome}. */
+    private static String formatEvent(McpActivity.Event e) {
+        String t = Instant.ofEpochMilli(e.epochMillis())
+                .atZone(ZoneId.systemDefault()).toLocalTime().format(TIME);
+        return t + "  " + (e.ok() ? "✓" : "✗") + " " + e.tool() + " · " + e.summary()
+                + (e.ok() ? " → " : " ✗ ") + e.outcome();
     }
 }

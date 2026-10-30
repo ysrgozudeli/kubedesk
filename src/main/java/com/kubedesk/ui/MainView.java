@@ -12,6 +12,7 @@ import com.kubedesk.service.Dtos.TopoNode;
 import com.kubedesk.prefs.Settings;
 import com.kubedesk.prefs.SettingsStore;
 import com.kubedesk.mcp.KubeDeskMcpServer;
+import com.kubedesk.mcp.McpActivity;
 import com.kubedesk.mcp.McpServerPanel;
 import com.kubedesk.update.UpdateService;
 import com.kubedesk.util.YamlLint;
@@ -707,8 +708,37 @@ public class MainView extends BorderPane {
                         return c == null ? null : c.name();
                     },
                     this::effectiveNamespace);
+            mcpServer.activity().addListener(this::onMcpActivity);
         }
         return mcpServer;
+    }
+
+    /**
+     * The live mirror: reflect one agent tool call in the running window. Always echoes the call to
+     * the status bar; when "follow" is on (and the call succeeded), also reveals the resource the
+     * agent read — switching namespace/kind and opening its details — so you watch the agent work.
+     */
+    private void onMcpActivity(McpActivity.Event e) {
+        Platform.runLater(() -> {
+            setStatus("🤖 agent · " + e.summary() + (e.ok() ? " → " : " ✗ ") + e.outcome(),
+                    !e.ok());
+            if (settings.mcpFollow && e.ok() && e.navKind() != null) {
+                followAgent(e);
+            }
+        });
+    }
+
+    /** Reveal, in the UI, the resource an agent call just touched. Runs on the FX thread. */
+    private void followAgent(McpActivity.Event e) {
+        if (e.navNamespace() != null && !e.navNamespace().isBlank()
+                && !e.navNamespace().equals(namespaceBox.getValue())) {
+            namespaceBox.setValue(e.navNamespace());
+        }
+        selectKind(e.navKind());               // switches nav + view and reloads the table
+        if (e.navName() != null && !e.navName().isBlank()) {
+            Tab target = "pod_logs".equals(e.tool()) ? logsTab : yamlTab;
+            openDetails(e.navKind(), e.navName(), null, target);
+        }
     }
 
     private void chooseKubeConfig() {

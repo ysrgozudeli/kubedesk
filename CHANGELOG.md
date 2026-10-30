@@ -3,6 +3,24 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] - 2026-10-30
+
+### Added
+- **Live mirror of the MCP agent's activity.** When an AI agent calls a read tool, KubeDesk now
+  reflects it in the running window: a `🤖 agent · …` line in the status bar, and — with **Follow
+  agent** on (default) — the UI reveals what the agent read, switching namespace/kind and opening the
+  resource's **YAML** or **Logs** tab so you watch the agent work. The **☰ → MCP server…** panel gains
+  a live **Recent activity** list of recent calls.
+- **Apply handoff for agents.** The server's `initialize` response now tells the agent it is read-only
+  and how a change actually reaches the cluster — by producing ready-to-apply YAML and pointing the
+  user at the blue **+ Create** button (or a resource's **YAML → Apply**). The server stays strictly
+  read-only; this just lets an agent be useful about writes without pretending it applied them.
+
+### Changed
+- **The MCP panel states its access level.** A `READ-ONLY` badge sits beside the power toggle, and a
+  locked **Read-only ⇄ Read & write** switch makes the scope explicit — the write side is disabled
+  until write tools (with their in-UI confirmation gate) exist.
+
 ## [1.7.0] - 2026-10-29
 
 ### Added

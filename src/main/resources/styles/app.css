@@ -100,6 +100,16 @@
     -fx-text-fill: #6a737d;
     -fx-font-size: 11px;
 }
+.mcp-activity {
+    -fx-font-family: "Consolas", "Menlo", "monospace";
+    -fx-font-size: 11.5px;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+}
+.mcp-ro-badge {
+    -fx-background-color: #eef0f3;
+    -fx-font-size: 10px;
+}
 
 /* Update-available banner, stacked just under the toolbar. */
 .update-banner {

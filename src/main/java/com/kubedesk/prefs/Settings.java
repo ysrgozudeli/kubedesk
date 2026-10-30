@@ -43,6 +43,9 @@ public class Settings {
     public boolean mcpEnabled = false;
     public int mcpPort = 7865;
 
+    /** Live mirror: reflect each agent tool call in the window (status line + reveal the resource). */
+    public boolean mcpFollow = true;
+
     /** A saved port-forward. */
     public record PortForwardPref(String context, String namespace, String pod,
                                   int remotePort, int localPort) {
