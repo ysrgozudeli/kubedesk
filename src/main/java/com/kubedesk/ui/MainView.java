@@ -1305,6 +1305,11 @@ public class MainView extends BorderPane {
         followToggle.setText("▶");
         followToggle.setTooltip(new Tooltip("Follow live (kubectl logs -f)"));
 
+        Button detach = new Button("⧉");
+        detach.getStyleClass().add("icon-button");
+        detach.setTooltip(new Tooltip("Open these logs in a separate window (keeps streaming while you work)"));
+        detach.setOnAction(e -> detachLogs());
+
         Button save = new Button("Save…");
         save.getStyleClass().add("accent-button");
         save.setOnAction(e -> saveLogs());
@@ -1317,7 +1322,7 @@ public class MainView extends BorderPane {
         HBox controls = new HBox(8,
                 new Label("Container:"), containerBox,
                 new Label("Tail:"), tailBox,
-                refresh, followToggle, spacer, copy, save);
+                refresh, followToggle, detach, spacer, copy, save);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
@@ -1603,6 +1608,21 @@ public class MainView extends BorderPane {
             }
             logStream = null;
         }
+    }
+
+    /**
+     * Pop the current pod's logs into a standalone window that keeps streaming on its own, sharing
+     * this app's {@link ClusterService}. Carries over the current container, tail size and follow state.
+     */
+    private void detachLogs() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null || currentLogPod == null) {
+            status("Open a pod's logs first, then detach.");
+            return;
+        }
+        int tail = tailBox.getValue() != null ? tailBox.getValue() : 500;
+        new LogWindow(service, ctx.name(), namespaceBox.getValue(), currentLogPod,
+                containerBox.getValue(), tail, followToggle.isSelected()).show();
     }
 
     /** Save the currently displayed log to a .log file the user can share with colleagues. */
