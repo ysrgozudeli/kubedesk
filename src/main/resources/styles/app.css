@@ -98,6 +98,38 @@
     -fx-background-color: #2a5fd0;
 }
 
+/* Logs toolbar: make every button/combo the same height so refresh, follow, detach, copy and save
+   line up, and let the row wrap to a second line (FlowPane) on a narrow window. Give the buttons a
+   fixed height with symmetric vertical padding so their labels stay centered (no clipped descenders)
+   — no -fx-max-height, which would clamp the box shorter than the text and cut it off at the bottom. */
+.log-toolbar .button,
+.log-toolbar .toggle-button {
+    -fx-min-height: 32;
+    -fx-pref-height: 32;
+    -fx-padding: 4 12 4 12;
+}
+
+.log-toolbar .combo-box {
+    -fx-min-height: 32;
+    -fx-pref-height: 32;
+}
+
+/* "Jump to latest" pill that floats over the log view while you're scrolled up during a follow. */
+.jump-latest {
+    -fx-background-color: #326ce5;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-font-weight: bold;
+    -fx-padding: 5 12 5 12;
+    -fx-background-radius: 14;
+    -fx-cursor: hand;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.25), 8, 0, 0, 2);
+}
+
+.jump-latest:hover {
+    -fx-background-color: #2a5fd0;
+}
+
 /* ---- sidebar ---- */
 /* Events view: tint Warning rows so they stand out from Normal ones. */
 .table-row-cell.event-warning {

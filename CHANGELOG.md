@@ -3,6 +3,16 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.1] - 2026-10-30
+
+### Changed
+- **Log follow stays put when you scroll up.** While following, the view now only auto-scrolls when
+  you're already at the bottom — scroll up to read and new lines append silently below instead of
+  yanking you down. A **↓ Jump to latest** pill appears while you're scrolled up (click it, or scroll
+  back to the bottom, to re-pin). Applies to both the Logs tab and detached log windows.
+- **Tidier Logs toolbar.** The refresh, follow, detach, copy and save buttons now share a consistent
+  height, and the toolbar wraps onto a second line on a narrow window instead of clipping.
+
 ## [1.10.0] - 2026-10-30
 
 ### Added

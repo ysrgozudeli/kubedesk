@@ -15,9 +15,10 @@ import javafx.scene.control.Tooltip;
 import javafx.scene.image.Image;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
-import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
@@ -48,6 +49,7 @@ public final class LogWindow {
     private final ComboBox<String> containerBox = new ComboBox<>();
     private final ComboBox<Integer> tailBox = new ComboBox<>();
     private final TextArea logsArea = new TextArea();
+    private final TailScroller logTail = new TailScroller(logsArea);
     private final ToggleButton follow = new ToggleButton("▶");
 
     private AutoCloseable logStream;
@@ -103,22 +105,34 @@ public final class LogWindow {
         save.getStyleClass().add("accent-button");
         save.setOnAction(e -> saveLogs());
 
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
+        // A FlowPane so the toolbar wraps to a second line on a narrow window instead of clipping.
+        HBox containerGroup = new HBox(6, new Label("Container:"), containerBox);
+        containerGroup.setAlignment(Pos.CENTER_LEFT);
+        HBox tailGroup = new HBox(6, new Label("Tail:"), tailBox);
+        tailGroup.setAlignment(Pos.CENTER_LEFT);
 
-        HBox controls = new HBox(8,
-                new Label("Container:"), containerBox,
-                new Label("Tail:"), tailBox,
-                refresh, follow, spacer, copy, save);
+        FlowPane controls = new FlowPane(8, 8,
+                containerGroup, tailGroup, refresh, follow, copy, save);
+        controls.getStyleClass().add("log-toolbar");
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
         logsArea.setEditable(false);
         logsArea.setWrapText(false);
         logsArea.getStyleClass().addAll("yaml-area", "logs-area");
-        VBox.setVgrow(logsArea, Priority.ALWAYS);
 
-        VBox root = new VBox(controls, logsArea);
+        Button jump = new Button("↓ Jump to latest");
+        jump.getStyleClass().add("jump-latest");
+        jump.setOnAction(e -> logTail.scrollToBottom());
+        jump.visibleProperty().bind(logTail.atBottomProperty().not());
+        jump.managedProperty().bind(jump.visibleProperty());
+        StackPane.setAlignment(jump, Pos.BOTTOM_RIGHT);
+        StackPane.setMargin(jump, new Insets(0, 16, 16, 0));
+
+        StackPane logStack = new StackPane(logsArea, jump);
+        VBox.setVgrow(logStack, Priority.ALWAYS);
+
+        VBox root = new VBox(controls, logStack);
         root.getStyleClass().add("root-pane");
 
         Scene scene = new Scene(root, 860, 540);
@@ -173,14 +187,12 @@ public final class LogWindow {
                             if (gen != streamGen) {
                                 return; // a newer load superseded this stream
                             }
-                            logsArea.appendText(chunk);
-                            logsArea.setScrollTop(Double.MAX_VALUE);
+                            logTail.appendFollowing(chunk);
                         }),
                         err -> Platform.runLater(() -> {
                             if (gen == streamGen) {
-                                logsArea.appendText("\n[log stream ended"
+                                logTail.appendFollowing("\n[log stream ended"
                                         + (err != null ? ": " + err.getMessage() : "") + "]\n");
-                                logsArea.setScrollTop(Double.MAX_VALUE);
                             }
                         }));
             } catch (Exception e) {
@@ -200,7 +212,7 @@ public final class LogWindow {
                     }
                     logsArea.setText(logs);
                     logsArea.positionCaret(logs.length());
-                    logsArea.setScrollTop(Double.MAX_VALUE);
+                    logTail.scrollToBottom();
                 });
             } catch (Exception ex) {
                 Platform.runLater(() -> {

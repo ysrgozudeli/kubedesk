@@ -76,6 +76,7 @@ import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.image.Image;
@@ -185,6 +186,7 @@ public class MainView extends BorderPane {
     private final ComboBox<String> containerBox = new ComboBox<>();
     private final ComboBox<Integer> tailBox = new ComboBox<>();
     private final TextArea logsArea = new TextArea();
+    private final TailScroller logTail = new TailScroller(logsArea);
     private String currentLogPod;
     // Live log follow (kubectl logs -f): a toggle plus the handle to the running stream, if any.
     private final ToggleButton followToggle = new ToggleButton("Follow");
@@ -1316,22 +1318,37 @@ public class MainView extends BorderPane {
 
         Button copy = copyButton("Copy the whole log tail to the clipboard", logsArea::getText, "logs");
 
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
+        // A FlowPane so the toolbar wraps to a second line on a narrow window instead of clipping.
+        // Label+combo pairs are grouped so they never split across the wrap.
+        HBox containerGroup = new HBox(6, new Label("Container:"), containerBox);
+        containerGroup.setAlignment(Pos.CENTER_LEFT);
+        HBox tailGroup = new HBox(6, new Label("Tail:"), tailBox);
+        tailGroup.setAlignment(Pos.CENTER_LEFT);
 
-        HBox controls = new HBox(8,
-                new Label("Container:"), containerBox,
-                new Label("Tail:"), tailBox,
-                refresh, followToggle, detach, spacer, copy, save);
+        FlowPane controls = new FlowPane(8, 8,
+                containerGroup, tailGroup, refresh, followToggle, detach, copy, save);
+        controls.getStyleClass().add("log-toolbar");
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
         logsArea.setEditable(false);
         logsArea.setWrapText(false);
         logsArea.getStyleClass().addAll("yaml-area", "logs-area");
-        VBox.setVgrow(logsArea, Priority.ALWAYS);
 
-        VBox pane = new VBox(controls, logsArea);
+        // A "jump to latest" pill floats over the bottom-right of the log view while you're scrolled
+        // up; clicking it re-pins to the newest line. Hidden whenever you're already at the bottom.
+        Button jump = new Button("↓ Jump to latest");
+        jump.getStyleClass().add("jump-latest");
+        jump.setOnAction(e -> logTail.scrollToBottom());
+        jump.visibleProperty().bind(logTail.atBottomProperty().not());
+        jump.managedProperty().bind(jump.visibleProperty());
+        StackPane.setAlignment(jump, Pos.BOTTOM_RIGHT);
+        StackPane.setMargin(jump, new Insets(0, 16, 16, 0));
+
+        StackPane logStack = new StackPane(logsArea, jump);
+        VBox.setVgrow(logStack, Priority.ALWAYS);
+
+        VBox pane = new VBox(controls, logStack);
         return pane;
     }
 
@@ -1567,7 +1584,7 @@ public class MainView extends BorderPane {
         runAsync(() -> service.podLogs(ctx.name(), ns, pod, container, tail), logs -> {
             logsArea.setText(logs);
             logsArea.positionCaret(logs.length());
-            logsArea.setScrollTop(Double.MAX_VALUE);
+            logTail.scrollToBottom();
         });
     }
 
@@ -1582,14 +1599,12 @@ public class MainView extends BorderPane {
                         if (!followToggle.isSelected() || !pod.equals(currentLogPod)) {
                             return;
                         }
-                        logsArea.appendText(chunk);
-                        logsArea.setScrollTop(Double.MAX_VALUE);
+                        logTail.appendFollowing(chunk);
                     }),
                     err -> Platform.runLater(() -> {
                         if (pod.equals(currentLogPod) && followToggle.isSelected()) {
-                            logsArea.appendText("\n[log stream ended"
+                            logTail.appendFollowing("\n[log stream ended"
                                     + (err != null ? ": " + err.getMessage() : "") + "]\n");
-                            logsArea.setScrollTop(Double.MAX_VALUE);
                         }
                     }));
         } catch (Exception e) {
