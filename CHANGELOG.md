@@ -3,6 +3,24 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] - 2026-10-30
+
+### Added
+- **Live log follow (`kubectl logs -f`).** The Logs tab gains a **▶ / ⏸** Follow button: instead of
+  re-pulling a fixed tail with refresh, it streams new lines live as the container emits them, with
+  auto-scroll. Following persists as you switch between pods, so you can leave it running through a
+  rollout. Backed by a new `ClusterService.followLogs(...)` over the same API (no `kubectl`).
+- **Detachable log window.** A **⧉ Detach** button pops the current pod's logs into a standalone
+  window that keeps streaming on its own while you work in the main window — ideal for watching a
+  deploy on a second monitor. It carries over the current container, tail size and follow state, you
+  can open several at once (one per pod/container), and each frees its connection when closed.
+
+### Changed
+- **Internal: one shared cluster connection.** The `ClusterService` is now created once by the app
+  and injected into the UI (rather than constructed inside it), and the kube.conf file controls moved
+  onto the `ClusterService` interface. This is what lets the detached log windows share a single
+  connection; no user-visible change.
+
 ## [1.9.0] - 2026-10-30
 
 ### Added

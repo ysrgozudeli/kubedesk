@@ -79,6 +79,10 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   pod is failing even after its events have expired).
 - **Live pod metrics** (pod → **Metrics** tab): live CPU/Memory line charts polled from the Metrics
   API — a quick read on whether a pod is climbing toward its limits.
+- **Live log follow** (`kubectl logs -f`) — a **▶ / ⏸** button on the Logs tab streams new lines as
+  they arrive, and keeps following as you switch between pods (great for watching a rollout).
+- **Detachable log window** — **⧉ Detach** pops a pod's logs into its own window that keeps streaming
+  while you work elsewhere; open several at once to watch multiple pods side by side.
 - **Log save-to-file** and a resizable details split.
 
 ### Views
@@ -192,11 +196,11 @@ Convenience scripts do the work: **`scripts/package.ps1`** (Windows) and **`scri
 
 # Portable zip — no installer, no admin, no Java. Unzip and run KubeDesk.exe.
 # Ideal for locked-down machines (e.g. a VDI).
-./scripts/package.ps1 -Zip          # -> dist\KubeDesk-1.9.0-windows-portable.zip
+./scripts/package.ps1 -Zip          # -> dist\KubeDesk-1.10.0-windows-portable.zip
 
 # Installer (.exe or .msi) — requires the WiX Toolset v3 on PATH.
-./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-1.9.0.exe
-./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-1.9.0.msi
+./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-1.10.0.exe
+./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-1.10.0.msi
 ```
 
 Installers (`exe`/`msi`) need the **[WiX Toolset v3](https://wixtoolset.org/)** on the `PATH`:
@@ -212,8 +216,8 @@ The installer adds a Start-menu entry, a desktop shortcut, and an install-locati
 ```bash
 chmod +x scripts/package.sh          # once
 ./scripts/package.sh                  # app-image -> dist/KubeDesk.app
-./scripts/package.sh dmg              # -> dist/KubeDesk-1.9.0.dmg
-./scripts/package.sh pkg              # -> dist/KubeDesk-1.9.0.pkg
+./scripts/package.sh dmg              # -> dist/KubeDesk-1.10.0.dmg
+./scripts/package.sh pkg              # -> dist/KubeDesk-1.10.0.pkg
 ```
 
 Needs **Xcode Command Line Tools** (`xcode-select --install`). For distribution *outside* your own
@@ -225,8 +229,8 @@ signing options to jpackage (`--mac-sign --mac-signing-key-user-name ...`) once 
 ```bash
 chmod +x scripts/package.sh          # once
 ./scripts/package.sh                  # app-image -> dist/KubeDesk/
-./scripts/package.sh deb              # -> dist/kubedesk_1.9.0_amd64.deb   (needs dpkg + fakeroot)
-./scripts/package.sh rpm              # -> dist/kubedesk-1.9.0.x86_64.rpm  (needs rpmbuild)
+./scripts/package.sh deb              # -> dist/kubedesk_1.10.0_amd64.deb   (needs dpkg + fakeroot)
+./scripts/package.sh rpm              # -> dist/kubedesk-1.10.0.x86_64.rpm  (needs rpmbuild)
 ```
 
 - `.deb` needs `dpkg-deb` + `fakeroot` (`sudo apt install fakeroot`).
@@ -263,8 +267,8 @@ platforms on their own runners (jpackage can't cross-compile):
 **Cut a release:**
 
 ```bash
-git tag v1.9.0
-git push origin v1.9.0
+git tag v1.10.0
+git push origin v1.10.0
 ```
 
 Pushing a `v*` tag builds every installer and publishes a **GitHub Release** with them attached (using
@@ -274,17 +278,19 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.9.0**: 12 resource kinds, live watches, details panel (exec + logs + live
-metrics), pod diagnostics, management actions (incl. pod restart), Create/Apply with lint + dry-run, port-forwarding,
-topology view, health scan, Events view, embedded kubectl console, a command palette, the experimental
-read-only **MCP server with a live UI mirror**, and cross-platform native packaging.
+Shipped through **v1.10.0**: 12 resource kinds, live watches, details panel (exec + logs + live
+metrics), pod diagnostics, live log follow + detachable log windows, management actions (incl. pod
+restart), Create/Apply with lint + dry-run, port-forwarding, topology view, health scan, Events view,
+embedded kubectl console, a command palette, the experimental read-only **MCP server with a live UI
+mirror**, and cross-platform native packaging.
 
 Candidate next:
 - **MCP server — write actions.** The read-only server and its live UI mirror already exist
   ([experimental, above](#-mcp-server-for-ai-agents-experimental)); next is **write tools behind an
   in-UI confirmation** so you stay the hand that acts.
 - **All-namespaces view + global search.**
-- **Multi-pod log tailing** (stern-style) and optional Loki/cloud-logging integration.
+- **Multi-pod log tailing** (stern-style — one merged stream across a Deployment's pods; single-pod
+  follow + detachable windows already shipped) and optional Loki/cloud-logging integration.
 - **Headless health CLI** for CI/CD gates (reuses `ClusterService.healthCheck`).
 - Sealed Secrets, generic CRD support, and macOS signing/notarization.
 
