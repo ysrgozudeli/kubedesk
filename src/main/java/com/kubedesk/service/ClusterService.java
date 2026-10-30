@@ -8,6 +8,7 @@ import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.Dtos.TopologyData;
 
+import java.io.File;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -20,6 +21,15 @@ import java.util.function.Consumer;
  * without touching the UI.
  */
 public interface ClusterService {
+
+    /**
+     * Point KubeDesk at a specific kube.conf file (or {@code null} to restore default discovery:
+     * {@code $KUBECONFIG}, then {@code ~/.kube/config}). Affects subsequent calls.
+     */
+    void setKubeConfigFile(File file);
+
+    /** The kube.conf file currently in use, after applying any override; {@code null} if none resolved. */
+    File activeKubeConfigFile();
 
     /** Read all contexts defined in the active kube.conf (KUBECONFIG env or ~/.kube/config). */
     List<ContextInfo> listContexts();
@@ -121,6 +131,20 @@ public interface ClusterService {
      * @param tailLines how many trailing lines to return
      */
     String podLogs(String context, String namespace, String pod, String container, int tailLines);
+
+    /**
+     * Stream a pod container's logs live, à la {@code kubectl logs -f}: an initial tail followed by
+     * every new line as the container emits it. Used by the Logs tab's "Follow" mode.
+     *
+     * @param container the container name, or {@code null}/blank for the pod's default container
+     * @param tailLines how many trailing lines to prime the stream with
+     * @param onChunk   invoked (on a background thread) with each chunk of log text as it arrives
+     * @param onClosed  invoked (on a background thread) when the stream ends — {@code null} on a clean
+     *                  end (EOF), or the error that closed it
+     * @return a handle that stops the stream and frees its connection when closed
+     */
+    AutoCloseable followLogs(String context, String namespace, String pod, String container,
+                             int tailLines, Consumer<String> onChunk, Consumer<Exception> onClosed);
 
     // --- mutations --------------------------------------------------------------------------
 

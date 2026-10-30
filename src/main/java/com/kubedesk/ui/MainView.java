@@ -18,7 +18,6 @@ import com.kubedesk.update.UpdateService;
 import com.kubedesk.util.YamlLint;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
-import com.kubedesk.service.Fabric8ClusterService;
 import com.kubedesk.service.ResourceKind;
 import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
@@ -112,7 +111,7 @@ import java.util.function.Supplier;
  */
 public class MainView extends BorderPane {
 
-    private final ClusterService service = new Fabric8ClusterService();
+    private final ClusterService service;
 
     // Persisted preferences
     private final SettingsStore settingsStore = new SettingsStore();
@@ -187,6 +186,9 @@ public class MainView extends BorderPane {
     private final ComboBox<Integer> tailBox = new ComboBox<>();
     private final TextArea logsArea = new TextArea();
     private String currentLogPod;
+    // Live log follow (kubectl logs -f): a toggle plus the handle to the running stream, if any.
+    private final ToggleButton followToggle = new ToggleButton("Follow");
+    private AutoCloseable logStream;
 
     // Shell (exec) controls
     private final ComboBox<String> shellContainerBox = new ComboBox<>();
@@ -240,7 +242,8 @@ public class MainView extends BorderPane {
     private final java.util.concurrent.ExecutorService pool =
             Executors.newCachedThreadPool(daemonThreads());
 
-    public MainView() {
+    public MainView(ClusterService service) {
+        this.service = service;
         getStyleClass().add("root-pane");
         restoreHiddenColumns();
         applyColumnDefaults();
@@ -529,7 +532,7 @@ public class MainView extends BorderPane {
         if (settings.kubeConfigPath != null && !settings.kubeConfigPath.isBlank()) {
             File f = new File(settings.kubeConfigPath);
             if (f.exists()) {
-                ((Fabric8ClusterService) service).setKubeConfigFile(f);
+                service.setKubeConfigFile(f);
                 kubeConfigLabel.setText(f.getName());
             }
         }
@@ -680,7 +683,7 @@ public class MainView extends BorderPane {
         if (show) {
             if (console == null) {
                 console = new KubectlConsole(
-                        () -> ((Fabric8ClusterService) service).activeKubeConfigFile(),
+                        service::activeKubeConfigFile,
                         () -> {
                             ContextInfo c = contextBox.getValue();
                             return c == null ? null : c.name();
@@ -797,7 +800,7 @@ public class MainView extends BorderPane {
         }
         File chosen = chooser.showOpenDialog(getScene() != null ? getScene().getWindow() : null);
         if (chosen != null) {
-            ((Fabric8ClusterService) service).setKubeConfigFile(chosen);
+            service.setKubeConfigFile(chosen);
             kubeConfigLabel.setText(chosen.getName());
             settings.kubeConfigPath = chosen.getAbsolutePath();
             saveSettings();
@@ -1290,6 +1293,18 @@ public class MainView extends BorderPane {
         refresh.getStyleClass().add("icon-button");
         refresh.setOnAction(e -> loadLogs());
 
+        // Follow = live tail (kubectl logs -f), rendered as a play/pause button: ▶ starts the stream,
+        // ⏸ (shown while following) stops it. Toggling re-runs loadLogs(), which starts or stops the
+        // stream based on this button's state; the glyph + tooltip track the state.
+        followToggle.getStyleClass().add("log-follow");
+        followToggle.setOnAction(e -> loadLogs());
+        followToggle.selectedProperty().addListener((o, was, following) -> {
+            followToggle.setText(following ? "⏸" : "▶");
+            followToggle.setTooltip(new Tooltip(following ? "Stop following" : "Follow live (kubectl logs -f)"));
+        });
+        followToggle.setText("▶");
+        followToggle.setTooltip(new Tooltip("Follow live (kubectl logs -f)"));
+
         Button save = new Button("Save…");
         save.getStyleClass().add("accent-button");
         save.setOnAction(e -> saveLogs());
@@ -1302,7 +1317,7 @@ public class MainView extends BorderPane {
         HBox controls = new HBox(8,
                 new Label("Container:"), containerBox,
                 new Label("Tail:"), tailBox,
-                refresh, spacer, copy, save);
+                refresh, followToggle, spacer, copy, save);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
@@ -1442,6 +1457,7 @@ public class MainView extends BorderPane {
         } else {
             currentLogPod = null;
             shellPod = null;
+            stopLogStream();
             stopMetricsPolling();
         }
     }
@@ -1524,6 +1540,8 @@ public class MainView extends BorderPane {
 
     /** (Re)load the log tail for the currently shown pod + selected container. */
     private void loadLogs() {
+        // Any change (container, tail, refresh, follow toggle, new pod) stops the previous stream first.
+        stopLogStream();
         if (detailKind != ResourceKind.PODS || currentLogPod == null) {
             return;
         }
@@ -1535,12 +1553,56 @@ public class MainView extends BorderPane {
         String pod = currentLogPod;
         String container = containerBox.getValue();
         int tail = tailBox.getValue() != null ? tailBox.getValue() : 500;
+
+        if (followToggle.isSelected()) {
+            startFollow(ctx.name(), ns, pod, container, tail);
+            return;
+        }
         logsArea.setText("Loading logs…");
         runAsync(() -> service.podLogs(ctx.name(), ns, pod, container, tail), logs -> {
             logsArea.setText(logs);
             logsArea.positionCaret(logs.length());
             logsArea.setScrollTop(Double.MAX_VALUE);
         });
+    }
+
+    /** Open a live log stream (kubectl logs -f) and append chunks as they arrive, auto-scrolling. */
+    private void startFollow(String ctxName, String ns, String pod, String container, int tail) {
+        logsArea.clear();
+        status("Following logs for " + pod + "… (toggle Follow off to stop)");
+        try {
+            logStream = service.followLogs(ctxName, ns, pod, container, tail,
+                    chunk -> Platform.runLater(() -> {
+                        // Ignore late chunks if the user switched pods or turned Follow off meanwhile.
+                        if (!followToggle.isSelected() || !pod.equals(currentLogPod)) {
+                            return;
+                        }
+                        logsArea.appendText(chunk);
+                        logsArea.setScrollTop(Double.MAX_VALUE);
+                    }),
+                    err -> Platform.runLater(() -> {
+                        if (pod.equals(currentLogPod) && followToggle.isSelected()) {
+                            logsArea.appendText("\n[log stream ended"
+                                    + (err != null ? ": " + err.getMessage() : "") + "]\n");
+                            logsArea.setScrollTop(Double.MAX_VALUE);
+                        }
+                    }));
+        } catch (Exception e) {
+            followToggle.setSelected(false);
+            statusError("Could not follow logs: " + e.getMessage());
+        }
+    }
+
+    /** Stop and free any running live log stream (on pod change, refresh, panel close, or shutdown). */
+    private void stopLogStream() {
+        if (logStream != null) {
+            try {
+                logStream.close();
+            } catch (Exception ignored) {
+                // best-effort
+            }
+            logStream = null;
+        }
     }
 
     /** Save the currently displayed log to a .log file the user can share with colleagues. */
@@ -1583,6 +1645,7 @@ public class MainView extends BorderPane {
 
     private void closeDetails() {
         closeExec();
+        stopLogStream();
         stopMetricsPolling();
         metricsPod = null;
         centerSplit.getItems().remove(detailsPane);
@@ -2930,6 +2993,7 @@ public class MainView extends BorderPane {
     /** Release the watch and worker threads on shutdown so the JVM can exit cleanly. */
     public void shutdown() {
         closeExec();
+        stopLogStream();
         stopMetricsPolling();
         if (console != null) {
             console.shutdown();

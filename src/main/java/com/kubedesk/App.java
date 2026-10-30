@@ -1,6 +1,8 @@
 package com.kubedesk;
 
 import atlantafx.base.theme.PrimerLight;
+import com.kubedesk.service.ClusterService;
+import com.kubedesk.service.Fabric8ClusterService;
 import com.kubedesk.ui.MainView;
 import javafx.application.Application;
 import javafx.application.Platform;
@@ -29,7 +31,10 @@ public class App extends Application {
         double w = Math.min(1180, vb.getWidth());
         double h = Math.min(760, vb.getHeight());
 
-        MainView mainView = new MainView();
+        // One cluster connection, owned here and shared with the view (and, through it, the MCP
+        // server and any detached log windows) — the app's single seam to Kubernetes.
+        ClusterService service = new Fabric8ClusterService();
+        MainView mainView = new MainView(service);
         Scene scene = new Scene(mainView, w, h);
         scene.getStylesheets().add(
                 Objects.requireNonNull(getClass().getResource("/styles/app.css")).toExternalForm());

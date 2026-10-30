@@ -41,6 +41,7 @@ import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.LocalPortForward;
 import io.fabric8.kubernetes.client.dsl.ExecListener;
 import io.fabric8.kubernetes.client.dsl.ExecWatch;
+import io.fabric8.kubernetes.client.dsl.LogWatch;
 import io.fabric8.kubernetes.client.dsl.base.PatchContext;
 import io.fabric8.kubernetes.client.dsl.base.PatchType;
 import io.fabric8.kubernetes.client.Watch;
@@ -51,6 +52,7 @@ import io.fabric8.kubernetes.client.internal.KubeConfigUtils;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -82,12 +84,12 @@ public class Fabric8ClusterService implements ClusterService {
      */
     private volatile File kubeConfigOverride;
 
-    /** Point KubeDesk at a specific kube.conf file (or {@code null} to restore default discovery). */
+    @Override
     public void setKubeConfigFile(File file) {
         this.kubeConfigOverride = file;
     }
 
-    /** The file currently in use, after applying any override. */
+    @Override
     public File activeKubeConfigFile() {
         return kubeConfigFile();
     }
@@ -519,6 +521,47 @@ public class Fabric8ClusterService implements ClusterService {
             return (log == null || log.isEmpty()) ? "(no log output)" : log;
         } catch (Exception e) {
             throw new ClusterException("Could not load logs for " + pod + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public AutoCloseable followLogs(String context, String namespace, String pod, String container,
+                                    int tailLines, Consumer<String> onChunk, Consumer<Exception> onClosed) {
+        // A long-lived client backs the stream; both are closed together via the returned handle.
+        KubernetesClient client = clientFor(context);
+        try {
+            var op = client.pods().inNamespace(namespace).withName(pod);
+            LogWatch watch = (container == null || container.isBlank())
+                    ? op.tailingLines(tailLines).watchLog()
+                    : op.inContainer(container).tailingLines(tailLines).watchLog();
+            InputStream in = watch.getOutput();
+            // fabric8 hands us an InputStream; pump it on a daemon thread so the FX thread is free.
+            Thread reader = new Thread(() -> {
+                byte[] buf = new byte[8192];
+                try {
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        if (n > 0) {
+                            onChunk.accept(new String(buf, 0, n, StandardCharsets.UTF_8));
+                        }
+                    }
+                    onClosed.accept(null); // clean EOF (container ended / stream closed)
+                } catch (Exception e) {
+                    onClosed.accept(e);
+                }
+            }, "kubedesk-logs-" + pod);
+            reader.setDaemon(true);
+            reader.start();
+            return () -> {
+                try {
+                    watch.close();
+                } finally {
+                    client.close();
+                }
+            };
+        } catch (Exception e) {
+            client.close();
+            throw new ClusterException("Could not stream logs for " + pod + ": " + rootMessage(e), e);
         }
     }
 
