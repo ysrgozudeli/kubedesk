@@ -31,6 +31,7 @@ feels at home, positioned as a **lighter, free alternative to Lens**.
 - 🔌 **No kubectl required** — every read and action goes over the API. (There's an *optional* embedded kubectl console for the long tail — and it works even without kubectl on your PATH.)
 - 🔍 **See your cluster** — live resource tables, a real dependency **topology map**, a one-screen **health scan**, and live **CPU/memory** charts.
 - 🛠️ **Act safely** — delete, restart, scale, exec, port-forward, and apply YAML with **dry-run validation** — all with confirmations.
+- ⌨️ **Move fast** — a **command palette** (`Ctrl`/`Cmd`+`P`) to jump to any context, namespace, resource kind, or view without the mouse.
 - 🧳 **Runs anywhere** — including a **portable zip** for locked-down machines (VDIs) where you can't run an installer.
 
 ## ✨ In action
@@ -66,6 +67,8 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
 - **12 resource kinds** in the sidebar: Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs,
   Services, Ingresses, ConfigMaps, Secrets, PVCs, Nodes — Dashboard-style tables with status chips.
 - **Live updates** via watches, with **pause/resume**.
+- **Command palette** (`Ctrl`/`Cmd`+`P`) — a keyboard-driven quick-switcher: type to fuzzily filter
+  across contexts, namespaces, resource kinds, and views, then ↑/↓ and `Enter` to jump there.
 - Client-side **search/filter** and per-kind **column show/hide** (persisted).
 - Extra pod columns: **CPU / Memory** (Metrics API, degrades gracefully without metrics-server),
   **IP**, **QoS class**, and **Controlled By**.
@@ -143,10 +146,17 @@ cluster over the API, **no `kubectl` required**. It speaks Streamable HTTP, so a
   then ask it something like *"scan my cluster's health."*
 - **Tools (all read-only):** `health_scan`, `list_namespaces`, `list_resource`, `describe_yaml`,
   `pod_logs`. Context and namespace default to whatever is selected in KubeDesk, and results are kept
-  compact (server-side filters, capped log tails) to save the agent's tokens.
+  compact (server-side filters, capped log tails) to save the agent's tokens. `describe_yaml` **redacts
+  Secret values** (`data`/`stringData` → `<redacted>`, keys kept) so the agent never receives secret
+  material — the UI's own YAML view is unchanged.
+- **Watch it work (live UI mirror).** When the agent calls a read tool, KubeDesk reflects it in the
+  running window: a `🤖 agent · …` line in the status bar and, with **Follow agent** on (default), it
+  switches namespace/kind and opens the resource's **YAML** or **Logs** tab so you see what the agent
+  read. The MCP panel carries a `READ-ONLY` badge and a live **Recent activity** list.
 
-Write actions (behind an in-UI confirmation so you stay the hand that acts) and a live mirror of the
-agent's view in the UI are planned but **not here yet** — see the roadmap.
+Write actions (behind an in-UI confirmation so you stay the hand that acts) are planned but **not here
+yet** — see the roadmap. Today an agent helps with changes by producing ready-to-apply YAML and pointing
+you at the **+ Create** button (or a resource's **YAML → Apply**).
 
 ## 🛠️ Build from source
 
@@ -182,11 +192,11 @@ Convenience scripts do the work: **`scripts/package.ps1`** (Windows) and **`scri
 
 # Portable zip — no installer, no admin, no Java. Unzip and run KubeDesk.exe.
 # Ideal for locked-down machines (e.g. a VDI).
-./scripts/package.ps1 -Zip          # -> dist\KubeDesk-1.6.1-windows-portable.zip
+./scripts/package.ps1 -Zip          # -> dist\KubeDesk-1.9.0-windows-portable.zip
 
 # Installer (.exe or .msi) — requires the WiX Toolset v3 on PATH.
-./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-1.6.1.exe
-./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-1.6.1.msi
+./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-1.9.0.exe
+./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-1.9.0.msi
 ```
 
 Installers (`exe`/`msi`) need the **[WiX Toolset v3](https://wixtoolset.org/)** on the `PATH`:
@@ -202,8 +212,8 @@ The installer adds a Start-menu entry, a desktop shortcut, and an install-locati
 ```bash
 chmod +x scripts/package.sh          # once
 ./scripts/package.sh                  # app-image -> dist/KubeDesk.app
-./scripts/package.sh dmg              # -> dist/KubeDesk-1.6.1.dmg
-./scripts/package.sh pkg              # -> dist/KubeDesk-1.6.1.pkg
+./scripts/package.sh dmg              # -> dist/KubeDesk-1.9.0.dmg
+./scripts/package.sh pkg              # -> dist/KubeDesk-1.9.0.pkg
 ```
 
 Needs **Xcode Command Line Tools** (`xcode-select --install`). For distribution *outside* your own
@@ -215,8 +225,8 @@ signing options to jpackage (`--mac-sign --mac-signing-key-user-name ...`) once 
 ```bash
 chmod +x scripts/package.sh          # once
 ./scripts/package.sh                  # app-image -> dist/KubeDesk/
-./scripts/package.sh deb              # -> dist/kubedesk_1.6.1_amd64.deb   (needs dpkg + fakeroot)
-./scripts/package.sh rpm              # -> dist/kubedesk-1.6.1.x86_64.rpm  (needs rpmbuild)
+./scripts/package.sh deb              # -> dist/kubedesk_1.9.0_amd64.deb   (needs dpkg + fakeroot)
+./scripts/package.sh rpm              # -> dist/kubedesk-1.9.0.x86_64.rpm  (needs rpmbuild)
 ```
 
 - `.deb` needs `dpkg-deb` + `fakeroot` (`sudo apt install fakeroot`).
@@ -253,8 +263,8 @@ platforms on their own runners (jpackage can't cross-compile):
 **Cut a release:**
 
 ```bash
-git tag v1.6.1
-git push origin v1.6.1
+git tag v1.9.0
+git push origin v1.9.0
 ```
 
 Pushing a `v*` tag builds every installer and publishes a **GitHub Release** with them attached (using
@@ -264,15 +274,15 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.6.1**: 12 resource kinds, live watches, details panel (exec + logs + live
+Shipped through **v1.9.0**: 12 resource kinds, live watches, details panel (exec + logs + live
 metrics), pod diagnostics, management actions (incl. pod restart), Create/Apply with lint + dry-run, port-forwarding,
-topology view, health scan, Events view, embedded kubectl console, and cross-platform native packaging.
+topology view, health scan, Events view, embedded kubectl console, a command palette, the experimental
+read-only **MCP server with a live UI mirror**, and cross-platform native packaging.
 
 Candidate next:
-- **MCP server — live UI mirror + write actions.** The read-only server already exists
-  ([experimental, above](#-mcp-server-for-ai-agents-experimental)); next is **mirroring the agent's
-  view live in the UI** so you watch it work, plus write tools behind an **in-UI confirmation** so you
-  stay the hand that acts.
+- **MCP server — write actions.** The read-only server and its live UI mirror already exist
+  ([experimental, above](#-mcp-server-for-ai-agents-experimental)); next is **write tools behind an
+  in-UI confirmation** so you stay the hand that acts.
 - **All-namespaces view + global search.**
 - **Multi-pod log tailing** (stern-style) and optional Loki/cloud-logging integration.
 - **Headless health CLI** for CI/CD gates (reuses `ClusterService.healthCheck`).
