@@ -130,6 +130,7 @@ public class MainView extends BorderPane {
     private final SplitPane verticalSplit = new SplitPane();
     private final SplitPane centerSplit = new SplitPane();
     private KubectlConsole console; // built lazily the first time the drawer is opened
+    private CommandPalette palette; // Ctrl/Cmd+P quick-switcher, built lazily on first use
     private final CheckMenuItem consoleMenuItem = new CheckMenuItem("kubectl console");
     private final TableView<List<String>> table = new TableView<>();
     private final HBox healthRing = new HBox();
@@ -266,6 +267,10 @@ public class MainView extends BorderPane {
                 scene.getAccelerators().put(
                         new KeyCodeCombination(KeyCode.K, KeyCombination.SHORTCUT_DOWN),
                         () -> toggleConsole(!consoleMenuItem.isSelected()));
+                // Ctrl/Cmd+P — quick-switcher for contexts, namespaces, resources and views.
+                scene.getAccelerators().put(
+                        new KeyCodeCombination(KeyCode.P, KeyCombination.SHORTCUT_DOWN),
+                        this::openPalette);
             }
         });
     }
@@ -739,6 +744,48 @@ public class MainView extends BorderPane {
             Tab target = "pod_logs".equals(e.tool()) ? logsTab : yamlTab;
             openDetails(e.navKind(), e.navName(), null, target);
         }
+    }
+
+    /**
+     * Open the Ctrl/Cmd+P quick-switcher. Builds a fresh jump list each time so it reflects the
+     * contexts/namespaces currently loaded; every entry just drives an existing handler.
+     */
+    private void openPalette() {
+        if (palette == null) {
+            palette = new CommandPalette();
+        }
+        if (palette.isShowing()) {
+            palette.hide();
+            return;
+        }
+        List<CommandPalette.Item> items = new ArrayList<>();
+
+        // Resources — the most frequent jump.
+        for (ResourceKind kind : ResourceKind.values()) {
+            items.add(new CommandPalette.Item("Resource", kind.label(), () -> selectKind(kind)));
+        }
+        // Views.
+        items.add(new CommandPalette.Item("View", "Health", this::enterHealth));
+        items.add(new CommandPalette.Item("View", "Topology", this::enterTopology));
+        items.add(new CommandPalette.Item("View", "Events", this::enterEvents));
+        // Namespaces in the current context.
+        for (String ns : namespaceBox.getItems()) {
+            if (ns != null && !ns.isBlank()) {
+                items.add(new CommandPalette.Item("Namespace", ns, () -> namespaceBox.setValue(ns)));
+            }
+        }
+        // Contexts.
+        for (ContextInfo c : contextBox.getItems()) {
+            if (c != null) {
+                items.add(new CommandPalette.Item("Context", c.name(), () -> {
+                    if (!c.equals(contextBox.getValue())) {
+                        contextBox.setValue(c);
+                    }
+                }));
+            }
+        }
+
+        palette.show(this, items);
     }
 
     private void chooseKubeConfig() {

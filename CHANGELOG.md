@@ -3,6 +3,22 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] - 2026-10-30
+
+### Added
+- **Command palette (`Ctrl`/`Cmd`+`P`).** A keyboard-driven quick-switcher: press `Ctrl`/`Cmd`+`P`,
+  type to fuzzily filter across **contexts, namespaces, resource kinds, and views** (Health / Topology
+  / Events), then ↑/↓ and `Enter` to jump there. It removes the app's most repeated gesture — hunting
+  the context/namespace boxes and the sidebar with the mouse. Navigation-only for now; it reuses the
+  existing selection handlers.
+
+### Changed
+- **MCP `describe_yaml` redacts Secret values.** Fetching a Secret over the MCP server previously
+  returned the full manifest including the base64-encoded `data`/`stringData` values — the secret
+  material itself. Those values are now replaced with `<redacted>` for agents (keys, type and
+  structure are kept); KubeDesk's own YAML view is unchanged. Secret *listings* already showed only a
+  key count, so they were never affected.
+
 ## [1.8.0] - 2026-10-30
 
 ### Added

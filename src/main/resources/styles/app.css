@@ -111,6 +111,54 @@
     -fx-font-size: 10px;
 }
 
+/* ---- command palette (Ctrl/Cmd+P quick-switcher) ---- */
+.command-palette {
+    -fx-background-color: white;
+    -fx-background-radius: 10;
+    -fx-border-radius: 10;
+    -fx-border-color: #e3e6ea;
+    -fx-border-width: 1;
+    -fx-padding: 10;
+    -fx-effect: dropshadow(gaussian, rgba(17, 24, 39, 0.22), 28, 0, 0, 10);
+}
+
+.cmd-search {
+    -fx-font-size: 15px;
+    -fx-background-radius: 8;
+}
+
+.cmd-list,
+.cmd-list .viewport {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+}
+
+.cmd-list .list-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 7 10 7 10;
+    -fx-background-radius: 6;
+}
+
+.cmd-list .list-cell:filled:selected {
+    -fx-background-color: #e7effd;
+}
+
+.cmd-item-label {
+    -fx-text-fill: #1f2937;
+    -fx-font-size: 13px;
+}
+
+.cmd-list .list-cell:filled:selected .cmd-item-label {
+    -fx-text-fill: #326ce5;
+    -fx-font-weight: bold;
+}
+
+.cmd-category {
+    -fx-text-fill: #9ca3af;
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+}
+
 /* Update-available banner, stacked just under the toolbar. */
 .update-banner {
     -fx-background-color: #eef4ff;
