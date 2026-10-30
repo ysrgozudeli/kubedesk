@@ -85,6 +85,17 @@ public interface ClusterService {
     String describeYaml(String context, String namespace, ResourceKind kind, String name);
 
     /**
+     * As {@link #describeYaml(String, String, ResourceKind, String)}, but when {@code redactSecrets}
+     * is true the {@code data}/{@code stringData} values of a Secret are replaced with a placeholder
+     * (keys and structure are kept). Used by the MCP server so an AI agent never receives secret
+     * material; the UI keeps the unredacted view. The default implementation ignores the flag.
+     */
+    default String describeYaml(String context, String namespace, ResourceKind kind, String name,
+                                boolean redactSecrets) {
+        return describeYaml(context, namespace, kind, name);
+    }
+
+    /**
      * Fetch the events involving a resource (the "why", à la {@code kubectl describe}), formatted
      * as readable text. This is usually where the reason for a failing/red pod shows up.
      */

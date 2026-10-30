@@ -255,7 +255,8 @@ public final class KubeDeskMcpServer {
         intProp(listProps, "limit", "Optional max rows to return (the rest are counted as 'truncated').");
 
         ObjectNode describe = addTool(tools, "describe_yaml",
-                "Fetch a single resource's full manifest as YAML (detail on demand).");
+                "Fetch a single resource's full manifest as YAML (detail on demand). Secret values are "
+                + "redacted — you get the keys and structure, not the secret material.");
         ObjectNode descProps = props(describe);
         strProp(descProps, "kind", "Resource kind, e.g. 'Pods' or 'Deployments'.");
         strProp(descProps, "name", "Resource name.");
@@ -468,7 +469,8 @@ public final class KubeDeskMcpServer {
             final String ns = namespace;
             final String nm = name;
             final ResourceKind k = kind;
-            String yaml = runWithTimeout(() -> service.describeYaml(ctx, ns, k, nm));
+            // redactSecrets=true: an agent never receives Secret values, only their keys/structure.
+            String yaml = runWithTimeout(() -> service.describeYaml(ctx, ns, k, nm, true));
             return toolText(yaml == null ? "" : yaml, false);
         } catch (TimeoutException te) {
             return toolError(timeoutMsg());

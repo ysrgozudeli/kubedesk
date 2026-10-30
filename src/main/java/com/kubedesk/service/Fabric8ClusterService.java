@@ -263,6 +263,12 @@ public class Fabric8ClusterService implements ClusterService {
 
     @Override
     public String describeYaml(String context, String namespace, ResourceKind kind, String name) {
+        return describeYaml(context, namespace, kind, name, false);
+    }
+
+    @Override
+    public String describeYaml(String context, String namespace, ResourceKind kind, String name,
+                               boolean redactSecrets) {
         try (KubernetesClient client = clientFor(context)) {
             Object obj = switch (kind) {
                 case PODS -> client.pods().inNamespace(namespace).withName(name).get();
@@ -280,6 +286,15 @@ public class Fabric8ClusterService implements ClusterService {
             };
             if (obj == null) {
                 return "# " + kind.label() + " '" + name + "' not found.";
+            }
+            // Keep secret material out of an agent's view: redact Secret values (keys/structure stay).
+            if (redactSecrets && obj instanceof Secret sec) {
+                if (sec.getData() != null) {
+                    sec.getData().replaceAll((k, v) -> "<redacted>");
+                }
+                if (sec.getStringData() != null) {
+                    sec.getStringData().replaceAll((k, v) -> "<redacted>");
+                }
             }
             return io.fabric8.kubernetes.client.utils.Serialization.asYaml(obj);
         } catch (Exception e) {
