@@ -934,6 +934,84 @@ public class Fabric8ClusterService implements ClusterService {
         return s.toString();
     }
 
+    /**
+     * Build the "High restarts" finding with enough context to tell a live crashloop from benign
+     * drip: the restart count, the pod's age and the resulting average rate, and the previous
+     * instance's exit (code/reason) and how long ago it died. Severity rises to CRITICAL when
+     * restarts are frequent (≈1/hour or more on average) <em>and</em> the last one was recent —
+     * which separates "16 restarts over 2h, last exit minutes ago" (a pod that just crashlooped)
+     * from "16 restarts over 51d" (a long-lived pod that restarts occasionally).
+     */
+    private HealthFinding highRestartFinding(Pod p, String name, int restarts,
+                                             ContainerStatus lastCrashed) {
+        StringBuilder detail = new StringBuilder().append(restarts).append(" restarts");
+        String created = p.getMetadata() != null ? p.getMetadata().getCreationTimestamp() : null;
+        Instant createdAt = parseInstant(created);
+        double perHour = -1;
+        if (createdAt != null) {
+            double hours = Math.max(Duration.between(createdAt, Instant.now()).toSeconds(), 1) / 3600.0;
+            perHour = restarts / hours;
+            detail.append(" over ").append(age(created)).append(" (~").append(restartRate(perHour)).append(')');
+        }
+        Instant lastFinish = null;
+        if (lastCrashed != null && lastCrashed.getLastState() != null
+                && lastCrashed.getLastState().getTerminated() != null) {
+            var t = lastCrashed.getLastState().getTerminated();
+            lastFinish = parseInstant(t.getFinishedAt());
+            detail.append("; last exit");
+            if (t.getExitCode() != null) {
+                detail.append(' ').append(t.getExitCode()).append(exitCodeHint(t.getExitCode()));
+            }
+            if (t.getReason() != null && !t.getReason().isBlank()) {
+                detail.append(" [").append(t.getReason()).append(']');
+            }
+            if (t.getFinishedAt() != null && !t.getFinishedAt().isBlank()) {
+                detail.append(' ').append(age(t.getFinishedAt())).append(" ago");
+            }
+        }
+        boolean recentlyCrashed = lastFinish != null
+                && Duration.between(lastFinish, Instant.now()).toHours() < 6;
+        HealthSeverity sev = (perHour >= 1.0 && (lastFinish == null || recentlyCrashed))
+                ? HealthSeverity.CRITICAL : HealthSeverity.WARNING;
+        return new HealthFinding(sev, ResourceKind.PODS, name, "High restarts", detail.toString());
+    }
+
+    /** True when {@code a}'s previous-instance termination is more recent than {@code b}'s. */
+    private static boolean laterFinish(ContainerStatus a, ContainerStatus b) {
+        String fa = a.getLastState().getTerminated().getFinishedAt();
+        String fb = b.getLastState().getTerminated().getFinishedAt();
+        if (fa == null) {
+            return false;
+        }
+        if (fb == null) {
+            return true;
+        }
+        return fa.compareTo(fb) > 0; // RFC3339 timestamps sort lexically
+    }
+
+    private static Instant parseInstant(String s) {
+        if (s == null || s.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(s);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Compact average restart rate — per hour when frequent, else per day. */
+    private static String restartRate(double perHour) {
+        if (perHour >= 1.0) {
+            return Math.round(perHour) + "/hr";
+        }
+        double perDay = perHour * 24.0;
+        if (perDay >= 0.1) {
+            return (Math.round(perDay * 10.0) / 10.0) + "/day";
+        }
+        return "<0.1/day";
+    }
+
     /** Human hint for common container exit codes. */
     private String exitCodeHint(int code) {
         return switch (code) {
@@ -1203,16 +1281,20 @@ public class Fabric8ClusterService implements ClusterService {
             }
         }
         int restarts = 0;
+        ContainerStatus lastCrashed = null; // container whose previous instance died most recently
         if (st != null && st.getContainerStatuses() != null) {
             for (ContainerStatus cs : st.getContainerStatuses()) {
                 if (cs.getRestartCount() != null) {
                     restarts += cs.getRestartCount();
                 }
+                if (cs.getLastState() != null && cs.getLastState().getTerminated() != null
+                        && (lastCrashed == null || laterFinish(cs, lastCrashed))) {
+                    lastCrashed = cs;
+                }
             }
         }
         if (restarts >= 5) {
-            f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.PODS, name,
-                    "High restarts", restarts + " restarts"));
+            f.add(highRestartFinding(p, name, restarts, lastCrashed));
         }
         if (st != null && "BestEffort".equals(st.getQosClass())) {
             f.add(new HealthFinding(HealthSeverity.WARNING, ResourceKind.PODS, name, "BestEffort QoS",
