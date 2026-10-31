@@ -3,6 +3,7 @@ package com.kubedesk.ui;
 import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
+import com.kubedesk.service.Dtos.ClusterCapacity;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.MetricSample;
 import com.kubedesk.service.Dtos.Permissions;
@@ -182,6 +183,9 @@ public class MainView extends BorderPane {
     private final StatTile tileDeployments = new StatTile("Deployments", "⬢", "badge-deployments");
     private final StatTile tileNodes = new StatTile("Nodes", "▤", "badge-nodes");
     private final StatTile tileNamespaces = new StatTile("Namespaces", "▦", "badge-namespaces");
+    // Cluster-wide capacity meters (requested/used vs allocatable) and a per-node usage table.
+    private final VBox overviewCapacityBox = new VBox(12);
+    private final VBox overviewNodesBox = new VBox(4);
     private final VBox overviewUnhealthyBox = new VBox(4);
     private final VBox overviewEventsBox = new VBox(4);
     // Overview header: cluster identity (color dot, name, environment chip, config file).
@@ -884,6 +888,12 @@ public class MainView extends BorderPane {
             settings.kubeConfigPath = path;
             saveSettings();
             status("Loaded kube.conf: " + path);
+            // Land on the Overview so the just-registered cluster shows its summary once its
+            // namespaces resolve (loadContexts → loadNamespaces → onSelectionChanged → loadOverview).
+            setCenterView(ViewMode.OVERVIEW);
+            overviewToggle.setSelected(true);
+            closeDetails();
+            stopWatch();
             loadContexts();
             reloadClusters();
         }
@@ -1298,7 +1308,7 @@ public class MainView extends BorderPane {
         settingsStore.save(settings);
         refreshClusterRail();
         if (result == switchBtn) {
-            switchToCluster(c);
+            switchAndSummarize(c); // switch and land on the cluster's Overview summary
         }
     }
 
@@ -3456,12 +3466,28 @@ public class MainView extends BorderPane {
         tileNodes.onClick(() -> selectKind(ResourceKind.NODES));
         tileWarnings.onClick(this::enterHealth);
 
+        Label capacityHeader = new Label("Capacity");
+        capacityHeader.getStyleClass().add("overview-section");
+        Label nodesHeader = new Label("Nodes");
+        nodesHeader.getStyleClass().add("overview-section");
         Label unhealthyHeader = new Label("Unhealthy pods");
         unhealthyHeader.getStyleClass().add("overview-section");
         Label eventsHeader = new Label("Warning events");
         eventsHeader.getStyleClass().add("overview-section");
 
-        VBox lists = new VBox(10, unhealthyHeader, overviewUnhealthyBox, eventsHeader, overviewEventsBox);
+        // Capacity and Nodes share one row, each taking half the width (prefWidth 0 + equal Hgrow
+        // makes them split the viewport evenly regardless of their content width).
+        VBox capacityCol = new VBox(10, capacityHeader, overviewCapacityBox);
+        VBox nodesCol = new VBox(10, nodesHeader, overviewNodesBox);
+        capacityCol.setPrefWidth(0);
+        nodesCol.setPrefWidth(0);
+        capacityCol.setMaxWidth(Double.MAX_VALUE);
+        nodesCol.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(capacityCol, Priority.ALWAYS);
+        HBox.setHgrow(nodesCol, Priority.ALWAYS);
+        HBox topRow = new HBox(24, capacityCol, nodesCol);
+
+        VBox lists = new VBox(14, topRow, unhealthyHeader, overviewUnhealthyBox, eventsHeader, overviewEventsBox);
         ScrollPane scroll = new ScrollPane(lists);
         scroll.setFitToWidth(true);
         scroll.getStyleClass().add("overview-scroll");
@@ -3506,6 +3532,8 @@ public class MainView extends BorderPane {
         tileDeployments.set("…", "");
         tileNodes.set("…", "");
         tileNamespaces.set("…", "");
+        overviewCapacityBox.getChildren().setAll(mutedLabel("Loading…"));
+        overviewNodesBox.getChildren().setAll(mutedLabel("Loading…"));
         overviewUnhealthyBox.getChildren().setAll(mutedLabel("Loading…"));
         overviewEventsBox.getChildren().setAll(mutedLabel("Loading…"));
         status("Loading overview…");
@@ -3559,6 +3587,27 @@ public class MainView extends BorderPane {
             tileNamespaces.set(String.valueOf(names.size()), "in the cluster");
         });
 
+        // Cluster capacity: requested/used vs allocatable for CPU and memory, as labeled meters.
+        runAsync(() -> service.clusterCapacity(ctx.name()), cap -> {
+            if (gen != overviewGen) {
+                return;
+            }
+            buildCapacityMeters(cap);
+        });
+
+        // Per-node usage table (name · status · CPU% · Mem%), from the enriched Nodes listing.
+        runAsync(() -> service.listResource(ctx.name(), ns, ResourceKind.NODES), rd -> {
+            if (gen != overviewGen) {
+                return;
+            }
+            if (rd.rows().isEmpty()) {
+                overviewNodesBox.getChildren().setAll(mutedLabel("No nodes visible."));
+            } else {
+                overviewNodesBox.getChildren().setAll(
+                        rd.rows().stream().map(r -> overviewNodeRow(r, rd.columns())).toList());
+            }
+        });
+
         // Health findings → Warnings tile + the unhealthy-pods list.
         runAsync(() -> service.healthCheck(ctx.name(), ns), findings -> {
             if (gen != overviewGen) {
@@ -3594,6 +3643,147 @@ public class MainView extends BorderPane {
                     lines.isEmpty() ? List.of(mutedLabel("No warning events ✓")) : lines);
             status("Overview ready.");
         });
+    }
+
+    /** Render the Capacity section: CPU/memory requested and used, each as a labeled meter. */
+    private void buildCapacityMeters(ClusterCapacity cap) {
+        double cpuAlloc = cap.cpuAllocatableMillicores();
+        double memAlloc = cap.memAllocatableMiB();
+        if (cpuAlloc <= 0 && memAlloc <= 0) {
+            overviewCapacityBox.getChildren().setAll(mutedLabel("No node capacity data."));
+            return;
+        }
+        List<Node> meters = new ArrayList<>();
+        meters.add(capacityMeter("CPU requested",
+                fmtCores(cap.cpuRequestedMillicores()) + " / " + fmtCores(cpuAlloc)
+                        + "  (" + pct(cap.cpuRequestedMillicores(), cpuAlloc) + "%)",
+                frac(cap.cpuRequestedMillicores(), cpuAlloc)));
+        meters.add(capacityMeter("Memory requested",
+                fmtGi(cap.memRequestedMiB()) + " / " + fmtGi(memAlloc)
+                        + "  (" + pct(cap.memRequestedMiB(), memAlloc) + "%)",
+                frac(cap.memRequestedMiB(), memAlloc)));
+        if (cap.metricsAvailable()) {
+            meters.add(capacityMeter("CPU used",
+                    fmtCores(cap.cpuUsedMillicores()) + " / " + fmtCores(cpuAlloc)
+                            + "  (" + pct(cap.cpuUsedMillicores(), cpuAlloc) + "%)",
+                    frac(cap.cpuUsedMillicores(), cpuAlloc)));
+            meters.add(capacityMeter("Memory used",
+                    fmtGi(cap.memUsedMiB()) + " / " + fmtGi(memAlloc)
+                            + "  (" + pct(cap.memUsedMiB(), memAlloc) + "%)",
+                    frac(cap.memUsedMiB(), memAlloc)));
+        } else {
+            meters.add(mutedLabel("Live usage needs metrics-server (kubectl top) — not installed."));
+        }
+        overviewCapacityBox.getChildren().setAll(meters);
+    }
+
+    /** One capacity row: a label, a right-aligned value, and a fill bar beneath (colored when hot). */
+    private Node capacityMeter(String label, String valueText, double fraction) {
+        Label name = new Label(label);
+        name.getStyleClass().add("capacity-label");
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        Label value = new Label(valueText);
+        value.getStyleClass().add("capacity-value");
+        value.setStyle("-fx-text-fill: " + utilColor(fraction) + ";");
+        HBox top = new HBox(8, name, spacer, value);
+        top.setAlignment(Pos.CENTER_LEFT);
+
+        ProgressBar bar = new ProgressBar(Math.max(0, Math.min(1, fraction)));
+        bar.setMaxWidth(Double.MAX_VALUE);
+        bar.getStyleClass().add("capacity-bar");
+        if (fraction >= 0.9) {
+            bar.getStyleClass().add("capacity-bar-hot");
+        } else if (fraction >= 0.75) {
+            bar.getStyleClass().add("capacity-bar-warn");
+        }
+        return new VBox(4, top, bar);
+    }
+
+    /** One Overview node row: name · status · CPU% · Mem%, click-through to the node's details. */
+    private Node overviewNodeRow(List<String> row, List<String> cols) {
+        String nodeName = cell(row, cols, "Name");
+        String statusText = cell(row, cols, "Status");
+        Label name = new Label(nodeName);
+        name.getStyleClass().add("overview-row-title");
+        HBox.setHgrow(name, Priority.ALWAYS);
+        name.setMaxWidth(Double.MAX_VALUE);
+        Label status = new Label(statusText.isBlank() ? "-" : statusText);
+        status.setMinWidth(70);
+        status.setStyle("-fx-text-fill: " + ("Ready".equalsIgnoreCase(statusText) ? "#2e7d32" : "#d32f2f") + ";");
+        Label cpu = utilizationLabel("CPU ", cell(row, cols, "CPU"));
+        cpu.setMinWidth(72);
+        Label mem = utilizationLabel("Mem ", cell(row, cols, "Mem"));
+        mem.setMinWidth(72);
+        HBox box = new HBox(12, name, status, cpu, mem);
+        box.setAlignment(Pos.CENTER_LEFT);
+        box.getStyleClass().add("overview-row");
+        box.setOnMouseClicked(e -> openDetails(ResourceKind.NODES, nodeName, null,
+                kindHasEvents(ResourceKind.NODES) ? eventsTab : yamlTab));
+        return box;
+    }
+
+    private static String dashIfBlank(String s) {
+        return s == null || s.isBlank() ? "-" : s;
+    }
+
+    /**
+     * A "{prefix}{pct}" label colored by utilization (green/orange/red). When the percent can't be
+     * parsed (metrics unavailable → "-"), it stays muted gray.
+     */
+    private Label utilizationLabel(String prefix, String pctText) {
+        Label label = new Label(prefix + dashIfBlank(pctText));
+        Integer p = parsePercent(pctText);
+        if (p == null) {
+            label.getStyleClass().add("muted");
+        } else {
+            label.setStyle("-fx-text-fill: " + utilColor(p / 100.0) + ";");
+        }
+        return label;
+    }
+
+    /** Traffic-light color for a 0–1 utilization: green &lt;75%, orange 75–90%, red ≥90%. */
+    private static String utilColor(double fraction) {
+        if (fraction >= 0.90) {
+            return "#d32f2f";
+        }
+        if (fraction >= 0.75) {
+            return "#ed6c02";
+        }
+        return "#2e7d32";
+    }
+
+    /** Parse "18%" → 18; null if there's no number (e.g. "-"). */
+    private static Integer parsePercent(String s) {
+        if (s == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(s.replace("%", "").trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** Millicores → a compact cores string: whole numbers plain ("24"), else two decimals ("2.10"). */
+    private static String fmtCores(double millicores) {
+        double cores = millicores / 1000.0;
+        return cores == Math.rint(cores) ? String.format("%.0f", cores) : String.format("%.2f", cores);
+    }
+
+    /** MiB → a one-decimal GiB string with the Kubernetes "Gi" suffix ("4.4Gi"). */
+    private static String fmtGi(double mib) {
+        return String.format("%.1f", mib / 1024.0) + "Gi";
+    }
+
+    /** Whole-number percentage of part/whole, guarding divide-by-zero. */
+    private static long pct(double part, double whole) {
+        return whole <= 0 ? 0 : Math.round(part / whole * 100.0);
+    }
+
+    /** Fraction (0–1) of part/whole for a progress bar, guarding divide-by-zero. */
+    private static double frac(double part, double whole) {
+        return whole <= 0 ? 0 : part / whole;
     }
 
     private Label mutedLabel(String text) {
@@ -3965,7 +4155,7 @@ public class MainView extends BorderPane {
             case "Status", "Type", "Class", "IP" -> 120;
             case "Up-to-date", "Completions", "QoS" -> 100;
             case "Available", "Restarts", "Ready", "Desired", "Active", "Capacity", "Memory" -> 90;
-            case "Suspend", "Data", "CPU" -> 80;
+            case "Suspend", "Data", "CPU", "Mem" -> 80;
             case "Age" -> 70;
             default -> 130;
         };
@@ -3993,7 +4183,7 @@ public class MainView extends BorderPane {
             case "Status", "Type" -> 140;
             case "IP" -> 170;
             case "QoS" -> 130;
-            case "Ready", "Up-to-date", "Available", "Restarts", "CPU", "Memory" -> 110;
+            case "Ready", "Up-to-date", "Available", "Restarts", "CPU", "Memory", "Mem" -> 110;
             case "Age" -> 90;
             default -> Double.MAX_VALUE;
         };
@@ -4004,7 +4194,7 @@ public class MainView extends BorderPane {
         return switch (name) {
             case "Ready", "Up-to-date", "Available", "Restarts", "Age", "Type", "Version",
                  "Desired", "Completions", "Active", "Suspend", "Data", "Capacity", "Last Schedule",
-                 "CPU", "Memory" -> true;
+                 "CPU", "Memory", "Mem" -> true;
             default -> false;
         };
     }

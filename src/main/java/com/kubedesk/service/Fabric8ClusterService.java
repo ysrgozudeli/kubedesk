@@ -1433,6 +1433,85 @@ public class Fabric8ClusterService implements ClusterService {
         }
     }
 
+    @Override
+    public Dtos.ClusterCapacity clusterCapacity(String context) {
+        try (KubernetesClient client = clientFor(context)) {
+            // Allocatable (what the scheduler may place) from each node's status.
+            double cpuAlloc = 0, memAlloc = 0;
+            int podsAlloc = 0, nodeCount = 0;
+            for (Node n : client.nodes().list().getItems()) {
+                nodeCount++;
+                Map<String, Quantity> alloc = n.getStatus() != null ? n.getStatus().getAllocatable() : null;
+                if (alloc != null) {
+                    cpuAlloc += millicores(alloc.get("cpu"));
+                    memAlloc += mib(alloc.get("memory"));
+                    Quantity pods = alloc.get("pods");
+                    if (pods != null) {
+                        podsAlloc += (int) Quantity.getAmountInBytes(pods).doubleValue();
+                    }
+                }
+            }
+
+            // Requests + scheduled-pod count from the non-terminal pods across all namespaces.
+            // A namespace-scoped token may be unable to list cluster-wide — then leave these at 0.
+            double cpuReq = 0, memReq = 0;
+            int scheduled = 0;
+            try {
+                for (Pod pod : client.pods().inAnyNamespace().list().getItems()) {
+                    String phase = pod.getStatus() != null ? pod.getStatus().getPhase() : null;
+                    if ("Succeeded".equals(phase) || "Failed".equals(phase)) {
+                        continue; // terminal pods hold no scheduled capacity
+                    }
+                    scheduled++;
+                    if (pod.getSpec() == null || pod.getSpec().getContainers() == null) {
+                        continue;
+                    }
+                    for (var c : pod.getSpec().getContainers()) {
+                        if (c.getResources() == null || c.getResources().getRequests() == null) {
+                            continue;
+                        }
+                        cpuReq += millicores(c.getResources().getRequests().get("cpu"));
+                        memReq += mib(c.getResources().getRequests().get("memory"));
+                    }
+                }
+            } catch (Exception ignore) {
+                // cluster-wide pod list not permitted — requests/scheduled stay 0
+            }
+
+            // Live usage from the Metrics API (metrics.k8s.io); absent if metrics-server isn't installed.
+            double cpuUsed = 0, memUsed = 0;
+            boolean metrics = false;
+            try {
+                var list = client.top().nodes().metrics();
+                if (list != null && list.getItems() != null && !list.getItems().isEmpty()) {
+                    for (var nm : list.getItems()) {
+                        if (nm.getUsage() != null) {
+                            cpuUsed += millicores(nm.getUsage().get("cpu"));
+                            memUsed += mib(nm.getUsage().get("memory"));
+                        }
+                    }
+                    metrics = true;
+                }
+            } catch (Exception ignore) {
+                // metrics-server unavailable — leave usage at 0 and flag it
+            }
+
+            return new Dtos.ClusterCapacity(nodeCount, cpuReq, cpuUsed, cpuAlloc,
+                    memReq, memUsed, memAlloc, scheduled, podsAlloc, metrics);
+        }
+    }
+
+    /** A CPU {@link Quantity} (cores) as millicores; 0 if null. */
+    private static double millicores(Quantity q) {
+        return q == null ? 0 : Quantity.getAmountInBytes(q).multiply(BigDecimal.valueOf(1000)).doubleValue();
+    }
+
+    /** A memory {@link Quantity} (bytes) as MiB; 0 if null. */
+    private static double mib(Quantity q) {
+        return q == null ? 0 : Quantity.getAmountInBytes(q)
+                .divide(BigDecimal.valueOf(1024L * 1024L), 2, RoundingMode.HALF_UP).doubleValue();
+    }
+
     private Map<String, String[]> podUsage(KubernetesClient client, String namespace) {
         Map<String, String[]> map = new HashMap<>();
         try {
@@ -1767,9 +1846,11 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     private ResourceData nodes(KubernetesClient client) {
-        List<String> columns = List.of("Name", "Status", "Roles", "Version");
+        List<String> columns = List.of("Name", "Status", "Roles", "CPU", "Mem", "Version");
         List<List<String>> rows = new ArrayList<>();
+        Map<String, double[]> usage = nodeUsage(client); // name -> {cpuMillicores, memMiB}; empty if no metrics
         for (Node n : client.nodes().list().getItems()) {
+            String name = n.getMetadata().getName();
             String status = "Unknown";
             if (n.getStatus() != null && n.getStatus().getConditions() != null) {
                 for (NodeCondition c : n.getStatus().getConditions()) {
@@ -1786,11 +1867,44 @@ public class Fabric8ClusterService implements ClusterService {
             if (roles.isBlank()) {
                 roles = "<none>";
             }
+            // CPU/Mem as a percentage of the node's allocatable, from the Metrics API. "-" if unavailable.
+            String cpuPct = "-", memPct = "-";
+            double[] u = usage.get(name);
+            Map<String, Quantity> alloc = n.getStatus() != null ? n.getStatus().getAllocatable() : null;
+            if (u != null && alloc != null) {
+                double cpuAlloc = millicores(alloc.get("cpu"));
+                double memAlloc = mib(alloc.get("memory"));
+                if (cpuAlloc > 0) {
+                    cpuPct = Math.round(u[0] / cpuAlloc * 100.0) + "%";
+                }
+                if (memAlloc > 0) {
+                    memPct = Math.round(u[1] / memAlloc * 100.0) + "%";
+                }
+            }
             String version = n.getStatus() != null && n.getStatus().getNodeInfo() != null
                     ? n.getStatus().getNodeInfo().getKubeletVersion() : "-";
-            rows.add(List.of(n.getMetadata().getName(), status, roles, version));
+            rows.add(List.of(name, status, roles, cpuPct, memPct, version));
         }
         return new ResourceData(columns, rows);
+    }
+
+    /** Live CPU (millicores) and memory (MiB) usage per node from the Metrics API; empty if unavailable. */
+    private Map<String, double[]> nodeUsage(KubernetesClient client) {
+        Map<String, double[]> map = new HashMap<>();
+        try {
+            var list = client.top().nodes().metrics();
+            if (list != null && list.getItems() != null) {
+                for (var nm : list.getItems()) {
+                    if (nm.getMetadata() != null && nm.getMetadata().getName() != null && nm.getUsage() != null) {
+                        map.put(nm.getMetadata().getName(), new double[]{
+                                millicores(nm.getUsage().get("cpu")), mib(nm.getUsage().get("memory"))});
+                    }
+                }
+            }
+        } catch (Exception ignore) {
+            // metrics-server unavailable — columns fall back to "-"
+        }
+        return map;
     }
 
     private String formatPort(ServicePort port) {

@@ -229,6 +229,24 @@
 .badge-nodes { -fx-background-color: #6b46c1; }
 .badge-namespaces { -fx-background-color: #0891b2; }
 
+/* Overview capacity meters */
+.capacity-label { -fx-font-size: 12.5px; -fx-font-weight: bold; }
+.capacity-value { -fx-font-size: 12.5px; -fx-text-fill: #6b7280; }
+.capacity-bar { -fx-pref-height: 8px; }
+.capacity-bar > .bar {
+    -fx-background-color: #2e7d32;
+    -fx-background-radius: 4px;
+    -fx-background-insets: 0;
+    -fx-padding: 4px;
+}
+.capacity-bar > .track {
+    -fx-background-color: #e3e6ea;
+    -fx-background-radius: 4px;
+    -fx-background-insets: 0;
+}
+.capacity-bar-warn > .bar { -fx-background-color: #ed6c02; }
+.capacity-bar-hot > .bar { -fx-background-color: #d32f2f; }
+
 .stat-clickable {
     -fx-cursor: hand;
 }

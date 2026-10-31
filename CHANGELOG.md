@@ -3,6 +3,26 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.13.0] - 2026-10-31
+
+### Added
+- **Cluster capacity on the Overview.** A new **Capacity** panel shows CPU and memory as *requested*
+  and *used* against the cluster's total allocatable — each a labeled meter (`2.10 / 24  (9%)`) with a
+  fill bar. Requests come from the running pods' container specs; live usage comes from the Metrics API
+  (metrics-server), with a clear note when it isn't installed (requested still works without it).
+- **Per-node usage on the Overview.** A **Nodes** panel beside Capacity lists each node with its status
+  and live **CPU% / Mem%** of allocatable; click a row to open the node's details. The full **Nodes**
+  resource list also gains **CPU** and **Mem** columns.
+- **Traffic-light utilization.** Capacity bars/values and node CPU/Mem percentages are colored by load —
+  **green** under 75%, **orange** 75–90%, **red** at 90%+ — a consistent at-a-glance health cue.
+
+### Changed
+- **Overview layout.** Capacity and Nodes sit side by side (half width each) above the Unhealthy-pods
+  and Warning-events lists.
+- **Registering/switching a cluster lands on its Overview.** Loading a kube.conf, or hitting **Switch**
+  in the cluster editor, now opens the Overview and populates it — previously it could stay on the old
+  view, so the summary (and its unhealthy-pods list) didn't appear until you clicked Overview yourself.
+
 ## [1.12.0] - 2026-10-31
 
 ### Added

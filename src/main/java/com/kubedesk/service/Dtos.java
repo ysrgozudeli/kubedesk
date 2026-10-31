@@ -23,6 +23,24 @@ public final class Dtos {
     public record MetricSample(double cpuMillicores, double memoryMiB) {
     }
 
+    /**
+     * Cluster-wide resource capacity for the Overview dashboard, aggregated across all nodes.
+     *
+     * <p>Three dimensions, each as a triple of <em>requested</em> (sum of pod container requests on
+     * non-terminal pods), <em>used</em> (live usage from the Metrics API) and <em>allocatable</em>
+     * (what the nodes offer to the scheduler). CPU is in millicores, memory in MiB. When
+     * metrics-server is absent {@code metricsAvailable} is false and the {@code *Used} figures are 0.
+     *
+     * <p>Pods are scheduled vs. allocatable slots. Any dimension the cluster can't report is left 0.
+     */
+    public record ClusterCapacity(
+            int nodeCount,
+            double cpuRequestedMillicores, double cpuUsedMillicores, double cpuAllocatableMillicores,
+            double memRequestedMiB, double memUsedMiB, double memAllocatableMiB,
+            int podsScheduled, int podsAllocatable,
+            boolean metricsAvailable) {
+    }
+
     /** One RBAC resource rule from a SelfSubjectRulesReview (verbs × apiGroups × resources). */
     public record ResourceRuleDto(Set<String> verbs, Set<String> apiGroups, Set<String> resources) {
     }

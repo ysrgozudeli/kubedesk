@@ -82,6 +82,14 @@ public interface ClusterService {
     MetricSample podUsageSample(String context, String namespace, String pod);
 
     /**
+     * Aggregate cluster-wide capacity for the Overview dashboard: CPU, memory and pod slots as
+     * requested / used / allocatable, summed across all nodes. Requests come from the running pods'
+     * container specs, usage from the Metrics API (0 and {@code metricsAvailable=false} if
+     * metrics-server isn't installed), and allocatable from each node's {@code status.allocatable}.
+     */
+    Dtos.ClusterCapacity clusterCapacity(String context);
+
+    /**
      * Build a service topology for a namespace: Ingress -> Service -> Workload, derived from ingress
      * backends and label selectors.
      */
