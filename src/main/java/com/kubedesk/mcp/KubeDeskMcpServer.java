@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSeverity;
+import com.kubedesk.service.Dtos.ClusterCapacity;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.ResourceKind;
 import com.sun.net.httpserver.HttpExchange;
@@ -18,6 +19,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -28,6 +30,8 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 /**
  * A tiny, embedded <b>Model Context Protocol</b> server — the v1 "give an AI agent a read-only view
@@ -74,6 +78,12 @@ public final class KubeDeskMcpServer {
 
     /** A single cluster call can hang if the API server is slow/unreachable; bound every tool call. */
     private static final int TOOL_TIMEOUT_SECONDS = 15;
+
+    /** An all-namespaces scan fans out over every namespace, so it gets a larger overall budget. */
+    private static final int ALL_NS_TIMEOUT_SECONDS = 45;
+
+    /** Per-namespace cap inside an all-namespaces scan, so one slow/forbidden namespace is isolated. */
+    private static final int PER_NS_TIMEOUT_SECONDS = 12;
 
     private static final String DESC_CONTEXT =
             "Kube context to use. Defaults to the context currently selected in KubeDesk.";
@@ -235,9 +245,20 @@ public final class KubeDeskMcpServer {
         ObjectNode healthProps = props(health);
         strProp(healthProps, "context", DESC_CONTEXT);
         strProp(healthProps, "namespace", "Namespace to scan. " + DESC_DEFAULT_NS);
+        boolProp(healthProps, "allNamespaces",
+                "When true, scan every visible namespace in one call and return findings tagged with "
+                + "their namespace — the cheapest way to health-check a whole cluster. Overrides "
+                + "'namespace'. Default false.");
         strProp(healthProps, "severity",
                 "Optional: return only findings at this severity (filtered server-side to save tokens).")
                 .putArray("enum").add("critical").add("warning");
+
+        ObjectNode overview = addTool(tools, "cluster_overview",
+                "Cluster-wide capacity snapshot — the data behind KubeDesk's Overview dashboard. Node "
+                + "count, plus CPU, memory and pod slots as requested / used / allocatable with a "
+                + "utilization %. A cheap first call to size up a cluster before drilling in. If "
+                + "metrics-server is absent, 'used' figures are 0 and metricsAvailable is false.");
+        strProp(props(overview), "context", DESC_CONTEXT);
 
         ObjectNode listNs = addTool(tools, "list_namespaces",
                 "List the namespaces visible in a context. Useful for discovering what to scan.");
@@ -255,16 +276,34 @@ public final class KubeDeskMcpServer {
         intProp(listProps, "limit", "Optional max rows to return (the rest are counted as 'truncated').");
 
         ObjectNode describe = addTool(tools, "describe_yaml",
-                "Fetch a single resource's full manifest as YAML (detail on demand). Secret values are "
-                + "redacted — you get the keys and structure, not the secret material.");
+                "Fetch a single resource's manifest as YAML (detail on demand). Secret values are "
+                + "redacted — you get the keys and structure, not the secret material — and the noisy "
+                + "metadata.managedFields block is stripped. For a pod, the status.containerStatuses "
+                + "section carries restartCount and lastState.terminated (exit code/reason), the key to "
+                + "a CrashLoopBackOff.");
         ObjectNode descProps = props(describe);
         strProp(descProps, "kind", "Resource kind, e.g. 'Pods' or 'Deployments'.");
         strProp(descProps, "name", "Resource name.");
         strProp(descProps, "namespace", "Namespace (ignored for Nodes). " + DESC_DEFAULT_NS);
         strProp(descProps, "context", DESC_CONTEXT);
 
+        ObjectNode events = addTool(tools, "events",
+                "List recent Events in a namespace (Type, Reason, Object, Count, Last Seen, Message), "
+                + "most recent first — the primary signal for WHY something happened: FailedScheduling, "
+                + "image-pull errors, probe failures (Unhealthy), OOMKills, restart Back-off, evictions. "
+                + "Filter with nameContains to focus on one resource.");
+        ObjectNode evProps = props(events);
+        strProp(evProps, "namespace", "Namespace. " + DESC_DEFAULT_NS);
+        strProp(evProps, "context", DESC_CONTEXT);
+        strProp(evProps, "nameContains",
+                "Optional case-insensitive substring filter (matches any column — e.g. a pod name or a "
+                + "reason like 'OOMKill'). Applied server-side.");
+        intProp(evProps, "limit", "Optional max rows to return (the rest are counted as 'truncated').");
+
         ObjectNode logs = addTool(tools, "pod_logs",
-                "Fetch the tail of a pod container's logs.");
+                "Fetch the tail of a pod container's logs. Set 'previous' to read the logs of the "
+                + "container's prior, crashed instance — the way to find why a pod is in "
+                + "CrashLoopBackOff or restarted.");
         ObjectNode logProps = props(logs);
         strProp(logProps, "pod", "Pod name.");
         strProp(logProps, "namespace", "Namespace. " + DESC_DEFAULT_NS);
@@ -272,6 +311,16 @@ public final class KubeDeskMcpServer {
                 "Optional container name; defaults to the pod's default container.");
         strProp(logProps, "context", DESC_CONTEXT);
         intProp(logProps, "tailLines", "Trailing lines to return (default 200, max 2000).");
+        boolProp(logProps, "previous",
+                "When true, return the previous (terminated) container instance's logs, like "
+                + "'kubectl logs --previous'. Use this to diagnose a restart/CrashLoopBackOff. "
+                + "Fails if the container has no previous instance. Default false.");
+        boolProp(logProps, "timestamps",
+                "When true, prefix each line with its RFC3339 server timestamp. Default false.");
+        strProp(logProps, "grep",
+                "Optional: return only log lines matching this pattern, applied server-side within the "
+                + "fetched tail (saves tokens vs. returning everything). Case-insensitive; treated as a "
+                + "regular expression when it is valid, otherwise as a literal substring.");
 
         return r;
     }
@@ -282,9 +331,11 @@ public final class KubeDeskMcpServer {
         JsonNode args = params.path("arguments");
         ObjectNode result = switch (name) {
             case "health_scan" -> toolHealthScan(args);
+            case "cluster_overview" -> toolClusterOverview(args);
             case "list_namespaces" -> toolListNamespaces(args);
             case "list_resource" -> toolListResource(args);
             case "describe_yaml" -> toolDescribeYaml(args);
+            case "events" -> toolEvents(args);
             case "pod_logs" -> toolPodLogs(args);
             default -> toolError("Unknown tool: " + name);
         };
@@ -314,6 +365,7 @@ public final class KubeDeskMcpServer {
             String navNamespace = null;
             switch (tool) {
                 case "health_scan" -> summary = "health scan · " + nsLabel(ns);
+                case "cluster_overview" -> summary = "cluster overview";
                 case "list_namespaces" -> summary = "list namespaces";
                 case "list_resource" -> {
                     summary = (kind == null ? "list" : kind.label())
@@ -327,6 +379,7 @@ public final class KubeDeskMcpServer {
                     navName = name;
                     navNamespace = ns;
                 }
+                case "events" -> summary = "events · " + nsLabel(ns);
                 case "pod_logs" -> {
                     summary = "logs " + safe(pod);
                     navKind = ResourceKind.PODS;
@@ -353,6 +406,10 @@ public final class KubeDeskMcpServer {
             }
             if (n.path("namespaces").isArray()) {
                 return n.path("namespaces").size() + " namespaces";
+            }
+            if (n.has("nodeCount")) {
+                int nodes = n.path("nodeCount").asInt();
+                return nodes + (nodes == 1 ? " node" : " nodes");
             }
             if (n.has("total")) {
                 int total = n.path("total").asInt();
@@ -388,14 +445,26 @@ public final class KubeDeskMcpServer {
 
     private ObjectNode toolHealthScan(JsonNode args) {
         String context = text(args, "context", defaultContext.get());
-        String namespace = text(args, "namespace", defaultNamespace.get());
         String severity = text(args, "severity", null);
+        boolean allNamespaces = boolOrFalse(args, "allNamespaces");
+        final String ctx = context;
+        if (allNamespaces) {
+            try {
+                // scanAllNamespaces enforces its own per-namespace and overall deadlines and always
+                // returns partial results, so it isn't wrapped in a single hard outer timeout.
+                return toolText(scanAllNamespaces(ctx, severity), false);
+            } catch (TimeoutException te) {
+                return toolError(timeoutMsg());
+            } catch (Exception e) {
+                return toolError(describeFailure(e, context, null));
+            }
+        }
+        String namespace = text(args, "namespace", defaultNamespace.get());
         if (namespace == null || namespace.isBlank()) {
-            return toolError("No namespace was given and none is selected in KubeDesk — "
-                    + "pass a 'namespace' argument.");
+            return toolError("No namespace was given and none is selected in KubeDesk — pass a "
+                    + "'namespace' argument, or set allNamespaces=true to scan the whole cluster.");
         }
         try {
-            final String ctx = context;
             final String ns = namespace;
             List<HealthFinding> findings = runWithTimeout(() -> service.healthCheck(ctx, ns));
             return toolText(renderFindings(context, namespace, severity, findings), false);
@@ -404,6 +473,149 @@ public final class KubeDeskMcpServer {
         } catch (Exception e) {
             return toolError(describeFailure(e, context, namespace));
         }
+    }
+
+    /**
+     * Health-check every visible namespace and merge the findings into one response, each tagged with
+     * its namespace. Each namespace gets its own timeout, and the scan honours an overall deadline, so a
+     * namespace that is forbidden (RBAC), unreachable, or slow is recorded in {@code namespacesFailed}
+     * and the rest still return — one bad namespace never blanks the cluster view or hangs the call.
+     */
+    private String scanAllNamespaces(String context, String severityFilter) throws Exception {
+        final String ctx = context;
+        List<String> namespaces = runWithTimeout(() -> service.listNamespaces(ctx));
+        long deadlineNanos = System.nanoTime() + ALL_NS_TIMEOUT_SECONDS * 1_000_000_000L;
+        int crit = 0;
+        int warn = 0;
+        ArrayNode arr = json.createArrayNode();
+        List<String> failed = new ArrayList<>();
+        for (String ns : namespaces) {
+            long remainingSec = (deadlineNanos - System.nanoTime()) / 1_000_000_000L;
+            if (remainingSec < 1) {
+                failed.add(ns); // overall deadline reached — record the rest as not scanned
+                continue;
+            }
+            List<HealthFinding> findings;
+            try {
+                final String fns = ns;
+                int budget = (int) Math.min(PER_NS_TIMEOUT_SECONDS, remainingSec);
+                findings = runWithTimeout(() -> service.healthCheck(ctx, fns), budget);
+            } catch (Exception perNs) {
+                failed.add(ns); // forbidden, timed out, or unreachable — isolate and keep going
+                continue;
+            }
+            for (HealthFinding hf : findings) {
+                boolean isCritical = hf.severity() == HealthSeverity.CRITICAL;
+                if (isCritical) {
+                    crit++;
+                } else {
+                    warn++;
+                }
+                if (severityFilter != null) {
+                    if ("critical".equalsIgnoreCase(severityFilter) && !isCritical) {
+                        continue;
+                    }
+                    if ("warning".equalsIgnoreCase(severityFilter) && isCritical) {
+                        continue;
+                    }
+                }
+                ObjectNode o = arr.addObject();
+                o.put("severity", hf.severity().name());
+                o.put("namespace", ns);
+                o.put("kind", hf.kind().label());
+                o.put("name", hf.name());
+                o.put("check", hf.check());
+                o.put("detail", hf.detail());
+            }
+        }
+        ObjectNode root = json.createObjectNode();
+        root.put("context", context);
+        root.put("scope", "all-namespaces");
+        ObjectNode summary = root.putObject("summary");
+        summary.put("critical", crit);
+        summary.put("warning", warn);
+        summary.put("total", crit + warn);
+        root.put("namespacesScanned", namespaces.size());
+        if (!failed.isEmpty()) {
+            ArrayNode fa = root.putArray("namespacesFailed");
+            for (String ns : failed) {
+                fa.add(ns);
+            }
+        }
+        root.set("findings", arr);
+        return json.writeValueAsString(root);
+    }
+
+    private ObjectNode toolEvents(JsonNode args) {
+        String context = text(args, "context", defaultContext.get());
+        String namespace = text(args, "namespace", defaultNamespace.get());
+        if (namespace == null || namespace.isBlank()) {
+            return toolError("No namespace was given and none is selected in KubeDesk — "
+                    + "pass a 'namespace' argument.");
+        }
+        String nameContains = text(args, "nameContains", null);
+        Integer limit = intOrNull(args, "limit");
+        try {
+            final String ctx = context;
+            final String ns = namespace;
+            ResourceData data = runWithTimeout(() -> service.listEvents(ctx, ns));
+            return toolText(renderResource(data, nameContains, limit), false);
+        } catch (TimeoutException te) {
+            return toolError(timeoutMsg());
+        } catch (Exception e) {
+            return toolError(describeFailure(e, context, namespace));
+        }
+    }
+
+    private ObjectNode toolClusterOverview(JsonNode args) {
+        String context = text(args, "context", defaultContext.get());
+        try {
+            final String ctx = context;
+            ClusterCapacity cap = runWithTimeout(() -> service.clusterCapacity(ctx));
+            ObjectNode root = json.createObjectNode();
+            root.put("context", context);
+            root.put("nodeCount", cap.nodeCount());
+            root.put("metricsAvailable", cap.metricsAvailable());
+
+            ObjectNode cpu = root.putObject("cpu");
+            cpu.put("unit", "millicores");
+            cpu.put("requested", Math.round(cap.cpuRequestedMillicores()));
+            cpu.put("used", Math.round(cap.cpuUsedMillicores()));
+            cpu.put("allocatable", Math.round(cap.cpuAllocatableMillicores()));
+            cpu.put("requestedPct", pct(cap.cpuRequestedMillicores(), cap.cpuAllocatableMillicores()));
+            if (cap.metricsAvailable()) {
+                cpu.put("usedPct", pct(cap.cpuUsedMillicores(), cap.cpuAllocatableMillicores()));
+            }
+
+            ObjectNode mem = root.putObject("memory");
+            mem.put("unit", "MiB");
+            mem.put("requested", Math.round(cap.memRequestedMiB()));
+            mem.put("used", Math.round(cap.memUsedMiB()));
+            mem.put("allocatable", Math.round(cap.memAllocatableMiB()));
+            mem.put("requestedPct", pct(cap.memRequestedMiB(), cap.memAllocatableMiB()));
+            if (cap.metricsAvailable()) {
+                mem.put("usedPct", pct(cap.memUsedMiB(), cap.memAllocatableMiB()));
+            }
+
+            ObjectNode pods = root.putObject("pods");
+            pods.put("scheduled", cap.podsScheduled());
+            pods.put("allocatable", cap.podsAllocatable());
+            pods.put("scheduledPct", pct(cap.podsScheduled(), cap.podsAllocatable()));
+
+            return toolText(json.writeValueAsString(root), false);
+        } catch (TimeoutException te) {
+            return toolError(timeoutMsg());
+        } catch (Exception e) {
+            return toolError(describeFailure(e, context, null));
+        }
+    }
+
+    /** Percentage of {@code part} over {@code whole}, rounded to one decimal; 0 when {@code whole<=0}. */
+    private static double pct(double part, double whole) {
+        if (whole <= 0) {
+            return 0d;
+        }
+        return Math.round(part / whole * 1000d) / 10d;
     }
 
     private ObjectNode toolListNamespaces(JsonNode args) {
@@ -471,7 +683,8 @@ public final class KubeDeskMcpServer {
             final ResourceKind k = kind;
             // redactSecrets=true: an agent never receives Secret values, only their keys/structure.
             String yaml = runWithTimeout(() -> service.describeYaml(ctx, ns, k, nm, true));
-            return toolText(yaml == null ? "" : yaml, false);
+            // Drop metadata.managedFields — large, pure apply-bookkeeping noise an agent never needs.
+            return toolText(yaml == null ? "" : stripManagedFields(yaml), false);
         } catch (TimeoutException te) {
             return toolError(timeoutMsg());
         } catch (Exception e) {
@@ -486,6 +699,9 @@ public final class KubeDeskMcpServer {
         String container = text(args, "container", null);
         Integer tail = intOrNull(args, "tailLines");
         int tailLines = tail == null ? 200 : Math.max(1, Math.min(tail, 2000));
+        boolean previous = boolOrFalse(args, "previous");
+        boolean timestamps = boolOrFalse(args, "timestamps");
+        String grep = text(args, "grep", null);
         if (pod == null) {
             return toolError("Missing 'pod'.");
         }
@@ -498,8 +714,25 @@ public final class KubeDeskMcpServer {
             final String p = pod;
             final String c = container;
             final int tl = tailLines;
-            String out = runWithTimeout(() -> service.podLogs(ctx, ns, p, c, tl));
-            return toolText(out == null ? "" : out, false);
+            final boolean prev = previous;
+            final boolean ts = timestamps;
+            String out = runWithTimeout(() -> service.podLogs(ctx, ns, p, c, tl, prev, ts));
+            // --previous fails with no prior instance; the client gets an empty body, so say so plainly.
+            if ((out == null || out.isBlank()) && previous) {
+                return toolError("No previous-instance logs for container '"
+                        + (container == null || container.isBlank() ? "(default)" : container)
+                        + "' in pod '" + pod + "' — it has not restarted, or the prior logs have "
+                        + "been rotated away.");
+            }
+            out = out == null ? "" : out;
+            if (grep != null && !grep.isBlank()) {
+                out = filterLines(out, grep);
+                if (out.isBlank()) {
+                    return toolText("No lines in the " + (previous ? "previous " : "") + "log tail ("
+                            + tailLines + " lines) matched '" + grep + "'.", false);
+                }
+            }
+            return toolText(out, false);
         } catch (TimeoutException te) {
             return toolError(timeoutMsg());
         } catch (Exception e) {
@@ -588,6 +821,76 @@ public final class KubeDeskMcpServer {
         return json.writeValueAsString(root);
     }
 
+    /**
+     * Keep only the lines of {@code text} that match {@code pattern}, case-insensitively. The pattern is
+     * compiled as a regex (matched with {@code find}, so it need not anchor); if it is not valid regex it
+     * falls back to a literal case-insensitive substring match, so a plain word like {@code ERROR} and a
+     * pattern like {@code Caused by|FAILED} both work.
+     */
+    private static String filterLines(String text, String pattern) {
+        Pattern p;
+        try {
+            p = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE);
+        } catch (PatternSyntaxException notRegex) {
+            p = Pattern.compile(Pattern.quote(pattern), Pattern.CASE_INSENSITIVE);
+        }
+        final Pattern compiled = p;
+        return text.lines()
+                .filter(line -> compiled.matcher(line).find())
+                .collect(java.util.stream.Collectors.joining("\n"));
+    }
+
+    /**
+     * Remove the {@code metadata.managedFields} block from a manifest's YAML. It's server-side-apply
+     * bookkeeping — often the bulk of the document — that an agent never needs. Best-effort and
+     * indentation-based: it drops the {@code managedFields:} line and the sequence under it (its deeper
+     * lines plus the {@code - } list items at the same indent), stopping at the next sibling key. If the
+     * expected shape isn't found the text is returned unchanged.
+     */
+    private static String stripManagedFields(String yaml) {
+        if (yaml == null || !yaml.contains("managedFields:")) {
+            return yaml;
+        }
+        String[] lines = yaml.split("\n", -1);
+        StringBuilder out = new StringBuilder(yaml.length());
+        int i = 0;
+        while (i < lines.length) {
+            String line = lines[i];
+            if (line.strip().equals("managedFields:")) {
+                int indent = indentOf(line);
+                i++; // skip the "managedFields:" line itself
+                while (i < lines.length) {
+                    String l = lines[i];
+                    if (l.isBlank()) {
+                        i++;
+                        continue;
+                    }
+                    String t = l.strip();
+                    boolean belongs = indentOf(l) > indent || t.startsWith("- ");
+                    if (!belongs) {
+                        break; // next sibling key at the same indent — block is done
+                    }
+                    i++;
+                }
+                continue; // emit nothing for the block
+            }
+            out.append(line);
+            if (i < lines.length - 1) {
+                out.append('\n');
+            }
+            i++;
+        }
+        return out.toString();
+    }
+
+    private static int indentOf(String s) {
+        int n = 0;
+        while (n < s.length() && s.charAt(n) == ' ') {
+            n++;
+        }
+        return n;
+    }
+
     private static boolean rowContains(List<String> row, String needleLower) {
         for (String cell : row) {
             if (cell != null && cell.toLowerCase().contains(needleLower)) {
@@ -653,6 +956,12 @@ public final class KubeDeskMcpServer {
         p.put("description", description);
     }
 
+    private static void boolProp(ObjectNode props, String name, String description) {
+        ObjectNode p = props.putObject(name);
+        p.put("type", "boolean");
+        p.put("description", description);
+    }
+
     // --- failure mapping --------------------------------------------------------------------
 
     /** Turn a cluster failure into one concise, actionable line (never a stack trace). */
@@ -693,9 +1002,13 @@ public final class KubeDeskMcpServer {
     // --- helpers ----------------------------------------------------------------------------
 
     private <T> T runWithTimeout(Callable<T> task) throws Exception {
+        return runWithTimeout(task, TOOL_TIMEOUT_SECONDS);
+    }
+
+    private <T> T runWithTimeout(Callable<T> task, int seconds) throws Exception {
         Future<T> f = workers.submit(task);
         try {
-            return f.get(TOOL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            return f.get(seconds, TimeUnit.SECONDS);
         } catch (TimeoutException te) {
             f.cancel(true);
             throw te;
@@ -775,6 +1088,20 @@ public final class KubeDeskMcpServer {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    private static boolean boolOrFalse(JsonNode args, String field) {
+        if (args == null) {
+            return false;
+        }
+        JsonNode v = args.get(field);
+        if (v == null || v.isNull()) {
+            return false;
+        }
+        if (v.isBoolean()) {
+            return v.asBoolean();
+        }
+        return "true".equalsIgnoreCase(v.asText().trim());
     }
 
     private static String text(JsonNode node, String field, String fallback) {
