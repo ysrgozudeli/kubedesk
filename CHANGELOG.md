@@ -3,6 +3,37 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.13.2] - 2026-10-31
+
+A fix release, with the MCP diagnostic changes made alongside it.
+
+### Fixed
+- **Quieted benign fabric8 watch log noise.** Closing a client with an active watch (context switch, or a
+  reconnect during an API-server blip) could log a `RejectedExecutionException` at ERROR from fabric8's
+  own thread. A new `simplelogger.properties` silences the watch managers responsible; re-enable them
+  when debugging watch/reconnect issues.
+- **MCP `health_scan` all-namespaces no longer hangs on one slow namespace.** Each namespace gets its own
+  timeout and the scan honors an overall deadline, so a forbidden/unreachable/slow namespace is recorded
+  in `namespacesFailed` and the rest still return as partial results.
+
+### Added
+- **MCP: whole-cluster health scan.** `health_scan` gains `allNamespaces: true` — one call scans every
+  visible namespace, each finding tagged with its namespace.
+- **MCP: `cluster_overview` tool.** The Overview dashboard's capacity — node count and CPU/memory as
+  requested · used · allocatable with a utilization % — returned as data for an agent.
+- **MCP: `events` tool.** Recent namespace Events (FailedScheduling, OOMKilled, probe failures,
+  back-off, evictions), newest first, with a `nameContains` filter — the primary "why" signal.
+- **MCP: `pod_logs` gains `previous`, `timestamps`, and `grep`.** `previous` returns the prior crashed
+  container instance (the key to a CrashLoopBackOff); `grep` filters lines server-side.
+
+### Changed
+- **MCP: richer "High restarts" finding.** Now reports the restart count plus the pod's age, the average
+  rate, and the previous instance's exit code/reason and when — and rises to CRITICAL for a frequent,
+  recent crashloop while occasional restarts stay a warning (so "16 in 2h" reads differently from
+  "16 over 51d").
+- **MCP: `describe_yaml` strips `metadata.managedFields`** from its output (the UI YAML tab is
+  unchanged) — large, non-actionable server-side-apply bookkeeping an agent never needs.
+
 ## [1.13.1] - 2026-10-31
 
 ### Changed
