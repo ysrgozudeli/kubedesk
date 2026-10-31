@@ -130,21 +130,43 @@ public interface ClusterService {
      * @param container the container name, or {@code null}/blank for the pod's default container
      * @param tailLines how many trailing lines to return
      */
-    String podLogs(String context, String namespace, String pod, String container, int tailLines);
+    /** The tail of a pod container's logs (no prior-container logs, no timestamps). */
+    default String podLogs(String context, String namespace, String pod, String container, int tailLines) {
+        return podLogs(context, namespace, pod, container, tailLines, false, false);
+    }
+
+    /**
+     * The tail of a pod container's logs.
+     *
+     * @param previous   when true, return the logs of the <em>previous</em>, terminated container
+     *                   instance ({@code kubectl logs --previous}) — the way to see why a crashed pod
+     *                   died; fails if there is no previous instance
+     * @param timestamps when true, prefix each line with the server's RFC3339 timestamp
+     */
+    String podLogs(String context, String namespace, String pod, String container, int tailLines,
+                   boolean previous, boolean timestamps);
+
+    /** Stream a pod container's logs live (no timestamps). */
+    default AutoCloseable followLogs(String context, String namespace, String pod, String container,
+                                     int tailLines, Consumer<String> onChunk, Consumer<Exception> onClosed) {
+        return followLogs(context, namespace, pod, container, tailLines, false, onChunk, onClosed);
+    }
 
     /**
      * Stream a pod container's logs live, à la {@code kubectl logs -f}: an initial tail followed by
      * every new line as the container emits it. Used by the Logs tab's "Follow" mode.
      *
-     * @param container the container name, or {@code null}/blank for the pod's default container
-     * @param tailLines how many trailing lines to prime the stream with
-     * @param onChunk   invoked (on a background thread) with each chunk of log text as it arrives
-     * @param onClosed  invoked (on a background thread) when the stream ends — {@code null} on a clean
-     *                  end (EOF), or the error that closed it
+     * @param container  the container name, or {@code null}/blank for the pod's default container
+     * @param tailLines  how many trailing lines to prime the stream with
+     * @param timestamps when true, prefix each line with the server's RFC3339 timestamp
+     * @param onChunk    invoked (on a background thread) with each chunk of log text as it arrives
+     * @param onClosed   invoked (on a background thread) when the stream ends — {@code null} on a clean
+     *                   end (EOF), or the error that closed it
      * @return a handle that stops the stream and frees its connection when closed
      */
     AutoCloseable followLogs(String context, String namespace, String pod, String container,
-                             int tailLines, Consumer<String> onChunk, Consumer<Exception> onClosed);
+                             int tailLines, boolean timestamps,
+                             Consumer<String> onChunk, Consumer<Exception> onClosed);
 
     // --- mutations --------------------------------------------------------------------------
 

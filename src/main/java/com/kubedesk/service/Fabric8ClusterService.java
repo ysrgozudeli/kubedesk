@@ -39,9 +39,12 @@ import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.LocalPortForward;
+import io.fabric8.kubernetes.client.dsl.BytesLimitTerminateTimeTailPrettyLoggable;
 import io.fabric8.kubernetes.client.dsl.ExecListener;
 import io.fabric8.kubernetes.client.dsl.ExecWatch;
 import io.fabric8.kubernetes.client.dsl.LogWatch;
+import io.fabric8.kubernetes.client.dsl.TimeTailPrettyLoggable;
+import io.fabric8.kubernetes.client.dsl.TimestampBytesLimitTerminateTimeTailPrettyLoggable;
 import io.fabric8.kubernetes.client.dsl.base.PatchContext;
 import io.fabric8.kubernetes.client.dsl.base.PatchType;
 import io.fabric8.kubernetes.client.Watch;
@@ -512,12 +515,18 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     @Override
-    public String podLogs(String context, String namespace, String pod, String container, int tailLines) {
+    public String podLogs(String context, String namespace, String pod, String container, int tailLines,
+                          boolean previous, boolean timestamps) {
         try (KubernetesClient client = clientFor(context)) {
-            var op = client.pods().inNamespace(namespace).withName(pod);
-            String log = (container == null || container.isBlank())
-                    ? op.tailingLines(tailLines).getLog()
-                    : op.inContainer(container).tailingLines(tailLines).getLog();
+            // PodResource (and inContainer's ContainerResource) support timestamps + the previous
+            // (terminated) instance; apply those options before narrowing to tailingLines().
+            TimestampBytesLimitTerminateTimeTailPrettyLoggable base =
+                    (container == null || container.isBlank())
+                            ? client.pods().inNamespace(namespace).withName(pod)
+                            : client.pods().inNamespace(namespace).withName(pod).inContainer(container);
+            BytesLimitTerminateTimeTailPrettyLoggable withTs = timestamps ? base.usingTimestamps() : base;
+            TimeTailPrettyLoggable withPrev = previous ? withTs.terminated() : withTs;
+            String log = withPrev.tailingLines(tailLines).getLog();
             return (log == null || log.isEmpty()) ? "(no log output)" : log;
         } catch (Exception e) {
             throw new ClusterException("Could not load logs for " + pod + ": " + rootMessage(e), e);
@@ -526,14 +535,17 @@ public class Fabric8ClusterService implements ClusterService {
 
     @Override
     public AutoCloseable followLogs(String context, String namespace, String pod, String container,
-                                    int tailLines, Consumer<String> onChunk, Consumer<Exception> onClosed) {
+                                    int tailLines, boolean timestamps,
+                                    Consumer<String> onChunk, Consumer<Exception> onClosed) {
         // A long-lived client backs the stream; both are closed together via the returned handle.
         KubernetesClient client = clientFor(context);
         try {
-            var op = client.pods().inNamespace(namespace).withName(pod);
-            LogWatch watch = (container == null || container.isBlank())
-                    ? op.tailingLines(tailLines).watchLog()
-                    : op.inContainer(container).tailingLines(tailLines).watchLog();
+            TimestampBytesLimitTerminateTimeTailPrettyLoggable base =
+                    (container == null || container.isBlank())
+                            ? client.pods().inNamespace(namespace).withName(pod)
+                            : client.pods().inNamespace(namespace).withName(pod).inContainer(container);
+            BytesLimitTerminateTimeTailPrettyLoggable withTs = timestamps ? base.usingTimestamps() : base;
+            LogWatch watch = withTs.tailingLines(tailLines).watchLog();
             InputStream in = watch.getOutput();
             // fabric8 hands us an InputStream; pump it on a daemon thread so the FX thread is free.
             Thread reader = new Thread(() -> {

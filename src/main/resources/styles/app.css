@@ -114,6 +114,16 @@
     -fx-pref-height: 32;
 }
 
+/* Pod-status dot shown in the log toolbar (green = Running/Ready, amber = Pending, red = failing). */
+.status-dot {
+    -fx-font-size: 15px;
+    -fx-padding: 0 2 0 2;
+}
+.status-dot.dot-ok { -fx-text-fill: #2e7d32; }
+.status-dot.dot-warn { -fx-text-fill: #ed6c02; }
+.status-dot.dot-bad { -fx-text-fill: #d32f2f; }
+.status-dot.dot-neutral { -fx-text-fill: #9ca3af; }
+
 /* "Jump to latest" pill that floats over the log view while you're scrolled up during a follow. */
 .jump-latest {
     -fx-background-color: #326ce5;

@@ -7,9 +7,11 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.Tooltip;
 import javafx.scene.image.Image;
@@ -50,22 +52,35 @@ public final class LogWindow {
     private final ComboBox<Integer> tailBox = new ComboBox<>();
     private final TextArea logsArea = new TextArea();
     private final TailScroller logTail = new TailScroller(logsArea);
+    private final LogBuffer logBuffer = new LogBuffer(logsArea, logTail);
     private final ToggleButton follow = new ToggleButton("▶");
+    private final CheckBox previousCheck = new CheckBox("Previous");
+    private final CheckBox timestampsCheck = new CheckBox("Timestamps");
+    private final Label statusDot = new Label("●");
 
     private AutoCloseable logStream;
     /** Bumped on each (re)load so callbacks from a superseded stream can be ignored. */
     private int streamGen;
 
     public LogWindow(ClusterService service, String ctxName, String namespace, String pod,
-                     String initialContainer, int initialTail, boolean startFollowing) {
+                     String initialContainer, int initialTail, boolean startFollowing, String status) {
         this.service = service;
         this.ctxName = ctxName;
         this.namespace = namespace;
         this.pod = pod;
-        build(initialContainer, initialTail, startFollowing);
+        build(initialContainer, initialTail, startFollowing, status);
     }
 
-    private void build(String initialContainer, int initialTail, boolean startFollowing) {
+    private void build(String initialContainer, int initialTail, boolean startFollowing, String status) {
+        // Pod-status dot (green Running / amber Pending / red failing), set from the opener's status.
+        statusDot.getStyleClass().add("status-dot");
+        if (status == null || status.isBlank()) {
+            statusDot.setVisible(false);
+        } else {
+            statusDot.getStyleClass().add(dotClassFor(status));
+            statusDot.setTooltip(new Tooltip(status));
+        }
+
         containerBox.setMinWidth(150);
         containerBox.setOnAction(e -> loadLogs());
 
@@ -92,7 +107,7 @@ public final class LogWindow {
         copy.getStyleClass().add("icon-button");
         copy.setTooltip(new Tooltip("Copy the whole log tail to the clipboard"));
         copy.setOnAction(e -> {
-            String text = logsArea.getText();
+            String text = logBuffer.raw();
             if (text == null || text.isBlank()) {
                 return;
             }
@@ -105,6 +120,29 @@ public final class LogWindow {
         save.getStyleClass().add("accent-button");
         save.setOnAction(e -> saveLogs());
 
+        // Filter lines (case-insensitive, hides non-matching lines from view only).
+        TextField filterField = new TextField();
+        filterField.setPromptText("Filter lines…");
+        filterField.setPrefColumnCount(14);
+        filterField.textProperty().addListener((o, a, b) -> logBuffer.setFilter(b));
+
+        ToggleButton wrap = new ToggleButton("⤶");
+        wrap.getStyleClass().add("log-follow");
+        wrap.setTooltip(new Tooltip("Wrap long lines"));
+        logsArea.wrapTextProperty().bind(wrap.selectedProperty());
+
+        Button clear = new Button("⌫");
+        clear.getStyleClass().add("icon-button");
+        clear.setTooltip(new Tooltip("Clear the log view"));
+        clear.setOnAction(e -> logBuffer.clear());
+
+        previousCheck.setTooltip(new Tooltip("Show the previous (crashed/restarted) container's logs"));
+        previousCheck.setOnAction(e -> loadLogs());
+        follow.disableProperty().bind(previousCheck.selectedProperty());
+
+        timestampsCheck.setTooltip(new Tooltip("Prefix each line with the server timestamp"));
+        timestampsCheck.setOnAction(e -> loadLogs());
+
         // A FlowPane so the toolbar wraps to a second line on a narrow window instead of clipping.
         HBox containerGroup = new HBox(6, new Label("Container:"), containerBox);
         containerGroup.setAlignment(Pos.CENTER_LEFT);
@@ -112,13 +150,13 @@ public final class LogWindow {
         tailGroup.setAlignment(Pos.CENTER_LEFT);
 
         FlowPane controls = new FlowPane(8, 8,
-                containerGroup, tailGroup, refresh, follow, copy, save);
+                statusDot, containerGroup, tailGroup, refresh, follow, previousCheck, timestampsCheck,
+                filterField, wrap, clear, copy, save);
         controls.getStyleClass().add("log-toolbar");
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
         logsArea.setEditable(false);
-        logsArea.setWrapText(false);
         logsArea.getStyleClass().addAll("yaml-area", "logs-area");
 
         Button jump = new Button("↓ Jump to latest");
@@ -177,21 +215,23 @@ public final class LogWindow {
         stopStream();
         String container = containerBox.getValue();
         int tail = tailBox.getValue() != null ? tailBox.getValue() : 500;
+        boolean previous = previousCheck.isSelected();
+        boolean timestamps = timestampsCheck.isSelected();
         final int gen = ++streamGen;
 
-        if (follow.isSelected()) {
-            logsArea.clear();
+        if (follow.isSelected() && !previous) {
+            logBuffer.clear();
             try {
-                logStream = service.followLogs(ctxName, namespace, pod, container, tail,
+                logStream = service.followLogs(ctxName, namespace, pod, container, tail, timestamps,
                         chunk -> Platform.runLater(() -> {
                             if (gen != streamGen) {
                                 return; // a newer load superseded this stream
                             }
-                            logTail.appendFollowing(chunk);
+                            logBuffer.append(chunk);
                         }),
                         err -> Platform.runLater(() -> {
                             if (gen == streamGen) {
-                                logTail.appendFollowing("\n[log stream ended"
+                                logBuffer.append("\n[log stream ended"
                                         + (err != null ? ": " + err.getMessage() : "") + "]\n");
                             }
                         }));
@@ -205,14 +245,12 @@ public final class LogWindow {
         logsArea.setText("Loading logs…");
         new Thread(() -> {
             try {
-                String logs = service.podLogs(ctxName, namespace, pod, container, tail);
+                String logs = service.podLogs(ctxName, namespace, pod, container, tail, previous, timestamps);
                 Platform.runLater(() -> {
                     if (gen != streamGen) {
                         return;
                     }
-                    logsArea.setText(logs);
-                    logsArea.positionCaret(logs.length());
-                    logTail.scrollToBottom();
+                    logBuffer.setText(logs);
                 });
             } catch (Exception ex) {
                 Platform.runLater(() -> {
@@ -222,6 +260,22 @@ public final class LogWindow {
                 });
             }
         }, "kubedesk-logwin-" + pod).start();
+    }
+
+    /** Map a pod status/phase string to a status-dot CSS class (mirrors the table's status chips). */
+    private static String dotClassFor(String status) {
+        String v = status.toLowerCase();
+        if (v.contains("running") || v.contains("ready") || v.contains("succeeded") || v.contains("complete")) {
+            return "dot-ok";
+        }
+        if (v.contains("pending") || v.contains("containercreating") || v.contains("terminating")) {
+            return "dot-warn";
+        }
+        if (v.contains("fail") || v.contains("error") || v.contains("crash") || v.contains("backoff")
+                || v.contains("oom") || v.contains("evict") || v.contains("imagepull")) {
+            return "dot-bad";
+        }
+        return "dot-neutral";
     }
 
     private void stopStream() {
@@ -236,7 +290,7 @@ public final class LogWindow {
     }
 
     private void saveLogs() {
-        String content = logsArea.getText();
+        String content = logBuffer.raw();
         if (content == null || content.isBlank()) {
             return;
         }

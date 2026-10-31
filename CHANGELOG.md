@@ -3,6 +3,22 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.0] - 2026-10-31
+
+### Added
+- **Filter log lines.** A case-insensitive "Filter lines" box on the Logs tab (and detached log
+  windows) shows only matching lines. The full log is kept in the background, so Copy and Save still
+  capture everything, not just the filtered view.
+- **Previous container logs.** A **Previous** toggle shows the prior, terminated container's logs
+  (`kubectl logs --previous`) — the way to see why a crashed/restarted pod died. It disables Follow
+  while on, since a dead container can't stream.
+- **Timestamps toggle.** Prefix each log line with the server's timestamp; works both one-shot and
+  while following.
+- **Clear and Wrap controls.** A **⌫ Clear** button empties the view (the stream keeps appending after),
+  and a **⤶ Wrap** toggle wraps long lines.
+- **Pod-status dot in the log header.** A colored dot (green Running / amber Pending / red failing)
+  reflects the pod's phase, mirroring the table's status chips.
+
 ## [1.10.1] - 2026-10-30
 
 ### Changed

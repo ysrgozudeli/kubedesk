@@ -60,6 +60,7 @@ import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableRow;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.ToggleButton;
@@ -187,9 +188,14 @@ public class MainView extends BorderPane {
     private final ComboBox<Integer> tailBox = new ComboBox<>();
     private final TextArea logsArea = new TextArea();
     private final TailScroller logTail = new TailScroller(logsArea);
+    private final LogBuffer logBuffer = new LogBuffer(logsArea, logTail);
+    private final Label logStatusDot = new Label("●");
     private String currentLogPod;
+    private String currentLogPodStatus;
     // Live log follow (kubectl logs -f): a toggle plus the handle to the running stream, if any.
     private final ToggleButton followToggle = new ToggleButton("Follow");
+    private final CheckBox previousCheck = new CheckBox("Previous");
+    private final CheckBox timestampsCheck = new CheckBox("Timestamps");
     private AutoCloseable logStream;
 
     // Shell (exec) controls
@@ -1291,6 +1297,10 @@ public class MainView extends BorderPane {
         tailBox.setValue(500);
         tailBox.setOnAction(e -> loadLogs());
 
+        // A colored dot reflecting the pod's phase (green Running, amber Pending, red failing).
+        logStatusDot.getStyleClass().add("status-dot");
+        logStatusDot.setVisible(false);
+
         Button refresh = new Button("↻");
         refresh.getStyleClass().add("icon-button");
         refresh.setOnAction(e -> loadLogs());
@@ -1312,11 +1322,40 @@ public class MainView extends BorderPane {
         detach.setTooltip(new Tooltip("Open these logs in a separate window (keeps streaming while you work)"));
         detach.setOnAction(e -> detachLogs());
 
+        // Previous = logs of the prior (terminated) container — the way to see why a pod crashed.
+        // A dead container can't stream, so turning this on disables Follow.
+        previousCheck.setTooltip(new Tooltip("Show the previous (crashed/restarted) container's logs"));
+        previousCheck.setOnAction(e -> loadLogs());
+        followToggle.disableProperty().bind(previousCheck.selectedProperty());
+
+        // Timestamps = prefix each line with the server's timestamp (works live and one-shot).
+        timestampsCheck.setTooltip(new Tooltip("Prefix each line with the server timestamp"));
+        timestampsCheck.setOnAction(e -> loadLogs());
+
         Button save = new Button("Save…");
         save.getStyleClass().add("accent-button");
         save.setOnAction(e -> saveLogs());
 
-        Button copy = copyButton("Copy the whole log tail to the clipboard", logsArea::getText, "logs");
+        Button copy = copyButton("Copy the whole log tail to the clipboard", logBuffer::raw, "logs");
+
+        // Filter: a case-insensitive "show only matching lines" box. The full log is kept in logBuffer,
+        // so filtering only hides lines from view (Copy/Save still get everything).
+        TextField filterField = new TextField();
+        filterField.setPromptText("Filter lines…");
+        filterField.setPrefColumnCount(14);
+        filterField.textProperty().addListener((o, a, b) -> logBuffer.setFilter(b));
+
+        // Wrap long lines on/off.
+        ToggleButton wrap = new ToggleButton("⤶");
+        wrap.getStyleClass().add("log-follow");
+        wrap.setTooltip(new Tooltip("Wrap long lines"));
+        logsArea.wrapTextProperty().bind(wrap.selectedProperty());
+
+        // Clear the current view (the stream, if following, keeps appending new lines after).
+        Button clear = new Button("⌫");
+        clear.getStyleClass().add("icon-button");
+        clear.setTooltip(new Tooltip("Clear the log view"));
+        clear.setOnAction(e -> logBuffer.clear());
 
         // A FlowPane so the toolbar wraps to a second line on a narrow window instead of clipping.
         // Label+combo pairs are grouped so they never split across the wrap.
@@ -1326,13 +1365,13 @@ public class MainView extends BorderPane {
         tailGroup.setAlignment(Pos.CENTER_LEFT);
 
         FlowPane controls = new FlowPane(8, 8,
-                containerGroup, tailGroup, refresh, followToggle, detach, copy, save);
+                logStatusDot, containerGroup, tailGroup, refresh, followToggle, previousCheck,
+                timestampsCheck, detach, filterField, wrap, clear, copy, save);
         controls.getStyleClass().add("log-toolbar");
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
         logsArea.setEditable(false);
-        logsArea.setWrapText(false);
         logsArea.getStyleClass().addAll("yaml-area", "logs-area");
 
         // A "jump to latest" pill floats over the bottom-right of the log view while you're scrolled
@@ -1460,6 +1499,7 @@ public class MainView extends BorderPane {
         if (isPod) {
             currentLogPod = name;
             shellPod = name;
+            setLogStatusDot(columnValue(row, "Status"));
             shellArea.clear();
             logsArea.setText("Loading…");
             String ns = namespaceBox.getValue();
@@ -1479,6 +1519,7 @@ public class MainView extends BorderPane {
         } else {
             currentLogPod = null;
             shellPod = null;
+            setLogStatusDot(null);
             stopLogStream();
             stopMetricsPolling();
         }
@@ -1575,35 +1616,36 @@ public class MainView extends BorderPane {
         String pod = currentLogPod;
         String container = containerBox.getValue();
         int tail = tailBox.getValue() != null ? tailBox.getValue() : 500;
+        boolean previous = previousCheck.isSelected();
+        boolean timestamps = timestampsCheck.isSelected();
 
-        if (followToggle.isSelected()) {
-            startFollow(ctx.name(), ns, pod, container, tail);
+        // Follow streams a live container; a previous (terminated) container can't stream.
+        if (followToggle.isSelected() && !previous) {
+            startFollow(ctx.name(), ns, pod, container, tail, timestamps);
             return;
         }
         logsArea.setText("Loading logs…");
-        runAsync(() -> service.podLogs(ctx.name(), ns, pod, container, tail), logs -> {
-            logsArea.setText(logs);
-            logsArea.positionCaret(logs.length());
-            logTail.scrollToBottom();
-        });
+        runAsync(() -> service.podLogs(ctx.name(), ns, pod, container, tail, previous, timestamps),
+                logs -> logBuffer.setText(logs));
     }
 
     /** Open a live log stream (kubectl logs -f) and append chunks as they arrive, auto-scrolling. */
-    private void startFollow(String ctxName, String ns, String pod, String container, int tail) {
-        logsArea.clear();
+    private void startFollow(String ctxName, String ns, String pod, String container, int tail,
+                             boolean timestamps) {
+        logBuffer.clear();
         status("Following logs for " + pod + "… (toggle Follow off to stop)");
         try {
-            logStream = service.followLogs(ctxName, ns, pod, container, tail,
+            logStream = service.followLogs(ctxName, ns, pod, container, tail, timestamps,
                     chunk -> Platform.runLater(() -> {
                         // Ignore late chunks if the user switched pods or turned Follow off meanwhile.
                         if (!followToggle.isSelected() || !pod.equals(currentLogPod)) {
                             return;
                         }
-                        logTail.appendFollowing(chunk);
+                        logBuffer.append(chunk);
                     }),
                     err -> Platform.runLater(() -> {
                         if (pod.equals(currentLogPod) && followToggle.isSelected()) {
-                            logTail.appendFollowing("\n[log stream ended"
+                            logBuffer.append("\n[log stream ended"
                                     + (err != null ? ": " + err.getMessage() : "") + "]\n");
                         }
                     }));
@@ -1611,6 +1653,33 @@ public class MainView extends BorderPane {
             followToggle.setSelected(false);
             statusError("Could not follow logs: " + e.getMessage());
         }
+    }
+
+    /** Set the log-toolbar status dot from a pod status/phase string (null/blank hides it). */
+    private void setLogStatusDot(String status) {
+        currentLogPodStatus = status;
+        logStatusDot.getStyleClass().removeAll("dot-ok", "dot-warn", "dot-bad", "dot-neutral");
+        if (status == null || status.isBlank()) {
+            logStatusDot.setVisible(false);
+            return;
+        }
+        logStatusDot.setVisible(true);
+        logStatusDot.getStyleClass().add(chipClassFor(status).replace("chip-", "dot-"));
+        logStatusDot.setTooltip(new Tooltip(status));
+    }
+
+    /** The value of a named column in a table row (case-insensitive), or null if not present. */
+    private String columnValue(List<String> row, String column) {
+        if (row == null) {
+            return null;
+        }
+        List<String> cols = currentData.columns();
+        for (int i = 0; i < cols.size(); i++) {
+            if (cols.get(i).equalsIgnoreCase(column) && i < row.size()) {
+                return row.get(i);
+            }
+        }
+        return null;
     }
 
     /** Stop and free any running live log stream (on pod change, refresh, panel close, or shutdown). */
@@ -1637,12 +1706,12 @@ public class MainView extends BorderPane {
         }
         int tail = tailBox.getValue() != null ? tailBox.getValue() : 500;
         new LogWindow(service, ctx.name(), namespaceBox.getValue(), currentLogPod,
-                containerBox.getValue(), tail, followToggle.isSelected()).show();
+                containerBox.getValue(), tail, followToggle.isSelected(), currentLogPodStatus).show();
     }
 
-    /** Save the currently displayed log to a .log file the user can share with colleagues. */
+    /** Save the full (unfiltered) log to a .log file the user can share with colleagues. */
     private void saveLogs() {
-        String content = logsArea.getText();
+        String content = logBuffer.raw();
         if (content == null || content.isBlank() || currentLogPod == null) {
             status("Nothing to save — open a pod's logs first.");
             return;
