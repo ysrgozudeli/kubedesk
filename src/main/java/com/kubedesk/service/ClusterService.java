@@ -34,6 +34,13 @@ public interface ClusterService {
     /** Read all contexts defined in the active kube.conf (KUBECONFIG env or ~/.kube/config). */
     List<ContextInfo> listContexts();
 
+    /**
+     * Read the contexts defined in a specific kube.conf file, without changing the active one. Used to
+     * aggregate clusters from several kubeconfig files in the UI. Returns an empty list if the file is
+     * missing or unreadable.
+     */
+    List<ContextInfo> listContexts(File file);
+
     /** List namespace names visible to the given context. */
     List<String> listNamespaces(String context);
 

@@ -50,6 +50,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.Node;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
@@ -124,6 +125,18 @@ public class MainView extends BorderPane {
     private final Label kubeConfigLabel = new Label("(default ~/.kube/config)");
     private final ComboBox<ContextInfo> contextBox = new ComboBox<>();
     private final ComboBox<String> namespaceBox = new ComboBox<>();
+    // Left-edge quick-switch rail: one colored avatar per context (cluster).
+    private final VBox clusterRail = new VBox(8);
+    private Button railToggle;
+    private VBox railBody;
+    private VBox railWrap;
+    private Button loadConfigBtn;            // top-bar "Load kube.conf…" — shown only in the empty state
+    private final Region clusterAccent = new Region(); // thin top strip in the active cluster's color
+    // Clusters aggregated across every loaded kube.conf file (one active at a time). clusterFiles maps a
+    // context name to its source file (null value = default discovery); activeConfigFile is the current one.
+    private final List<ContextInfo> allClusters = new ArrayList<>();
+    private final Map<String, File> clusterFiles = new HashMap<>();
+    private File activeConfigFile;
     private final TextField searchField = new TextField();
 
     // Content. The center is a vertical split: the resource area on top, the kubectl console drawer
@@ -139,9 +152,11 @@ public class MainView extends BorderPane {
     // Read-only TextField (not a Label) so the status message is selectable and copyable.
     private final TextField statusBar = new TextField("Ready.");
     private static final PseudoClass ERROR_PSEUDO = PseudoClass.getPseudoClass("error");
+    // Auto-dismiss a lingering error from the status bar after a while (any new status cancels it).
+    private final PauseTransition statusErrorClear = new PauseTransition(Duration.seconds(15));
 
     // Extra views (topology, health) live in the same center area as the resource table.
-    private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH, EVENTS }
+    private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH, EVENTS, OVERVIEW }
 
     private ViewMode currentView = ViewMode.RESOURCE;
     private final Map<ResourceKind, ToggleButton> navButtons = new EnumMap<>(ResourceKind.class);
@@ -158,6 +173,23 @@ public class MainView extends BorderPane {
     private final VBox eventsView = new VBox(10);
     private final TableView<List<String>> nsEventsTable = new TableView<>();
     private final Label eventsSummary = new Label();
+
+    // Overview dashboard: stat tiles + unhealthy pods + warning events for the selected namespace.
+    private final ToggleButton overviewToggle = new ToggleButton("›  Overview");
+    private final VBox overviewView = new VBox(14);
+    private final StatTile tilePods = new StatTile("Pods", "◉", "badge-pods");
+    private final StatTile tileWarnings = new StatTile("Warnings", "⚠", "badge-warnings");
+    private final StatTile tileDeployments = new StatTile("Deployments", "⬢", "badge-deployments");
+    private final StatTile tileNodes = new StatTile("Nodes", "▤", "badge-nodes");
+    private final StatTile tileNamespaces = new StatTile("Namespaces", "▦", "badge-namespaces");
+    private final VBox overviewUnhealthyBox = new VBox(4);
+    private final VBox overviewEventsBox = new VBox(4);
+    // Overview header: cluster identity (color dot, name, environment chip, config file).
+    private final Label ovDot = new Label("●");
+    private final Label ovName = new Label();
+    private final Label ovEnvChip = new Label();
+    private final Label ovMeta = new Label();
+    private int overviewGen;
 
     // Details panel (right side)
     private final VBox detailsPane = new VBox();
@@ -263,13 +295,23 @@ public class MainView extends BorderPane {
         verticalSplit.setOrientation(Orientation.VERTICAL);
         verticalSplit.setMinHeight(0);
         verticalSplit.getItems().setAll(centerSplit);
-        setLeft(buildSidebar());
-        setCenter(verticalSplit);
+        setLeft(new HBox(buildClusterRail(), buildSidebar()));
+        // The controls toolbar sits above the content area (not a full-width top bar).
+        VBox centerPane = new VBox(buildToolbar(), verticalSplit);
+        VBox.setVgrow(verticalSplit, Priority.ALWAYS);
+        centerPane.setMinHeight(0);
+        setCenter(centerPane);
         setBottom(buildStatusBar());
 
         // Toolbar with the update banner stacked just under it (hidden until an update is found).
         configureUpdateBanner();
-        setTop(new VBox(buildTopBar(), updateBanner));
+        // A thin strip at the very top, tinted with the active cluster's color (environment-aware) —
+        // an always-visible "which cluster am I on" cue (red = PROD, etc.).
+        clusterAccent.setPrefHeight(4);
+        clusterAccent.setMinHeight(4);
+        clusterAccent.setMaxHeight(4);
+        clusterAccent.setStyle("-fx-background-color: transparent;");
+        setTop(new VBox(clusterAccent, updateBanner));
 
         // Ctrl/Cmd+K toggles the kubectl console. Registered on the scene (not the menu item) because a
         // MenuButton item's accelerator only fires while its popup is open — useless as a global shortcut.
@@ -290,8 +332,14 @@ public class MainView extends BorderPane {
     public void init() {
         // When a burst of watch events settles, re-list the current view once.
         autoRefreshPause.setOnFinished(e -> refreshContent());
+        // Clear a stale error back to "Ready." once its pause elapses (no newer status arrived).
+        statusErrorClear.setOnFinished(e -> {
+            statusBar.setText("Ready.");
+            statusBar.pseudoClassStateChanged(ERROR_PSEUDO, false);
+        });
         applySavedKubeConfig();
         loadContexts();
+        reloadClusters();
         checkForUpdates(false);
         maybeStartMcpServer();
     }
@@ -541,8 +589,20 @@ public class MainView extends BorderPane {
             File f = new File(settings.kubeConfigPath);
             if (f.exists()) {
                 service.setKubeConfigFile(f);
+                activeConfigFile = f;
                 kubeConfigLabel.setText(f.getName());
             }
+        }
+        if (activeConfigFile == null) {
+            // No override: the active config is default discovery's file (so the rail can match it).
+            activeConfigFile = defaultKubeConfigFile();
+        }
+        // Migrate older prefs: the single remembered kube.conf becomes part of the loaded-files list,
+        // so a file loaded before multi-config support still appears in the rail and can be removed.
+        if (settings.kubeConfigPath != null && !settings.kubeConfigPath.isBlank()
+                && !settings.kubeConfigPaths.contains(settings.kubeConfigPath)) {
+            settings.kubeConfigPaths.add(settings.kubeConfigPath);
+            saveSettings();
         }
     }
 
@@ -601,13 +661,10 @@ public class MainView extends BorderPane {
 
     // --- top bar ----------------------------------------------------------------------------
 
-    private HBox buildTopBar() {
-        Label brand = new Label("KubeDesk");
-        brand.getStyleClass().add("brand");
-
-        Button loadConfig = new Button("Load kube.conf…");
-        loadConfig.getStyleClass().add("accent-button");
-        loadConfig.setOnAction(e -> chooseKubeConfig());
+    private Region buildToolbar() {
+        loadConfigBtn = new Button("Load kube.conf…");
+        loadConfigBtn.getStyleClass().add("accent-button");
+        loadConfigBtn.setOnAction(e -> chooseKubeConfig());
 
         kubeConfigLabel.getStyleClass().add("muted");
 
@@ -620,6 +677,8 @@ public class MainView extends BorderPane {
             @Override public ContextInfo fromString(String s) { return null; }
         });
         contextBox.setOnAction(e -> onContextChosen());
+        // Keep the cluster rail in sync with the current context (selection + list changes).
+        contextBox.valueProperty().addListener((o, a, b) -> refreshClusterRail());
 
         namespaceBox.setPromptText("Namespace");
         namespaceBox.setMinWidth(180);
@@ -665,18 +724,16 @@ public class MainView extends BorderPane {
         liveBox.setVisible(false);
         liveBox.setManaged(false);
 
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
+        // Label+combo pairs grouped so a wrap never splits a label from its control.
+        HBox ctxGroup = new HBox(6, new Label("Context:"), contextBox);
+        ctxGroup.setAlignment(Pos.CENTER_LEFT);
+        HBox nsGroup = new HBox(6, new Label("Namespace:"), namespaceBox);
+        nsGroup.setAlignment(Pos.CENTER_LEFT);
 
-        HBox bar = new HBox(12,
-                brand,
-                new VSep(),
-                loadConfig, kubeConfigLabel,
-                spacer,
-                liveBox,
-                new Label("Context:"), contextBox,
-                new Label("Namespace:"), namespaceBox,
-                searchField, refresh, pfButton, appMenu);
+        // A FlowPane so the toolbar wraps on a narrow window instead of clipping.
+        FlowPane bar = new FlowPane(10, 8,
+                loadConfigBtn, kubeConfigLabel, ctxGroup, nsGroup,
+                searchField, refresh, liveBox, pfButton, appMenu);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(10, 16, 10, 16));
         bar.getStyleClass().add("top-bar");
@@ -776,6 +833,7 @@ public class MainView extends BorderPane {
             items.add(new CommandPalette.Item("Resource", kind.label(), () -> selectKind(kind)));
         }
         // Views.
+        items.add(new CommandPalette.Item("View", "Overview", this::enterOverview));
         items.add(new CommandPalette.Item("View", "Health", this::enterHealth));
         items.add(new CommandPalette.Item("View", "Topology", this::enterTopology));
         items.add(new CommandPalette.Item("View", "Events", this::enterEvents));
@@ -785,15 +843,22 @@ public class MainView extends BorderPane {
                 items.add(new CommandPalette.Item("Namespace", ns, () -> namespaceBox.setValue(ns)));
             }
         }
-        // Contexts.
-        for (ContextInfo c : contextBox.getItems()) {
-            if (c != null) {
-                items.add(new CommandPalette.Item("Context", c.name(), () -> {
-                    if (!c.equals(contextBox.getValue())) {
-                        contextBox.setValue(c);
-                    }
-                }));
+        // Clusters — every one in the rail (across all loaded kube.conf files). Searchable by the
+        // context name, the custom label, and the environment; selecting switches and shows its Overview.
+        for (ContextInfo c : allClusters) {
+            if (c == null || settings.hiddenClusters.contains(c.name())) {
+                continue;
             }
+            String env = effectiveEnvironment(c.name());
+            String label = settings.clusterLabels.get(c.name());
+            StringBuilder text = new StringBuilder(c.name());
+            if (label != null && !label.isBlank()) {
+                text.append("  (").append(label).append(')');
+            }
+            if (env != null && !env.isBlank()) {
+                text.append("  · ").append(env);
+            }
+            items.add(new CommandPalette.Item("Cluster", text.toString(), () -> switchAndSummarize(c)));
         }
 
         palette.show(this, items);
@@ -808,12 +873,19 @@ public class MainView extends BorderPane {
         }
         File chosen = chooser.showOpenDialog(getScene() != null ? getScene().getWindow() : null);
         if (chosen != null) {
+            // Remember the file so its clusters stay in the rail; switch to it as the active config.
+            String path = chosen.getAbsolutePath();
+            if (!settings.kubeConfigPaths.contains(path)) {
+                settings.kubeConfigPaths.add(path);
+            }
             service.setKubeConfigFile(chosen);
+            activeConfigFile = chosen;
             kubeConfigLabel.setText(chosen.getName());
-            settings.kubeConfigPath = chosen.getAbsolutePath();
+            settings.kubeConfigPath = path;
             saveSettings();
-            status("Loaded kube.conf: " + chosen.getAbsolutePath());
+            status("Loaded kube.conf: " + path);
             loadContexts();
+            reloadClusters();
         }
     }
 
@@ -826,6 +898,18 @@ public class MainView extends BorderPane {
         nav.setMinWidth(190);
 
         ToggleGroup group = new ToggleGroup();
+
+        // Overview dashboard sits at the very top, above the resource kinds.
+        overviewToggle.setToggleGroup(group);
+        overviewToggle.setMaxWidth(Double.MAX_VALUE);
+        overviewToggle.getStyleClass().add("nav-item");
+        overviewToggle.setOnAction(e -> {
+            if (overviewToggle.isSelected()) {
+                enterOverview();
+            }
+        });
+        nav.getChildren().add(overviewToggle);
+
         String lastSection = null;
         for (ResourceKind kind : ResourceKind.values()) {
             if (!kind.section().equals(lastSection)) {
@@ -904,11 +988,492 @@ public class MainView extends BorderPane {
         VBox createBox = new VBox(createBtn);
         createBox.setPadding(new Insets(10, 12, 12, 12));
 
-        VBox left = new VBox(scroll, createBox);
+        // Brand at the top of the sidebar (the old top-bar logo position).
+        Label brand = new Label("KubeDesk");
+        brand.getStyleClass().add("brand");
+        VBox brandBox = new VBox(brand);
+        brandBox.setPadding(new Insets(14, 12, 8, 14));
+
+        VBox left = new VBox(brandBox, scroll, createBox);
         left.getStyleClass().add("sidebar-container");
         left.setMinHeight(0);
         left.setMinWidth(190);
         return left;
+    }
+
+    // --- cluster rail (left-edge quick switch) ----------------------------------------------
+
+    /** Pleasant, high-contrast palette; a context always maps to the same color by its name hash. */
+    private static final String[] CLUSTER_COLORS = {
+            "#326ce5", "#2e7d32", "#ed6c02", "#6b46c1", "#0891b2",
+            "#c2185b", "#00838f", "#5d4037", "#7b1fa2", "#f57f17"
+    };
+
+    private Region buildClusterRail() {
+        clusterRail.getStyleClass().add("cluster-rail");
+        clusterRail.setAlignment(Pos.TOP_CENTER);
+
+        ScrollPane scroll = new ScrollPane(clusterRail);
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        scroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        scroll.getStyleClass().add("cluster-rail-scroll");
+        scroll.setMinHeight(0);
+        VBox.setVgrow(scroll, Priority.ALWAYS);
+
+        // "+" loads another kube.conf (same action as the top-bar button).
+        Button add = new Button("+");
+        add.getStyleClass().add("cluster-add");
+        add.setTooltip(new Tooltip("Load another kube.conf…"));
+        add.setOnAction(e -> chooseKubeConfig());
+
+        railBody = new VBox(10, scroll, add);
+        railBody.setAlignment(Pos.TOP_CENTER);
+        railBody.setMinHeight(0);
+        VBox.setVgrow(railBody, Priority.ALWAYS);
+
+        // Chevron to collapse/expand the rail (state persisted).
+        railToggle = new Button("‹");
+        railToggle.getStyleClass().add("rail-toggle");
+        railToggle.setOnAction(e -> setRailCollapsed(!settings.clusterRailCollapsed));
+
+        railWrap = new VBox(8, railToggle, railBody);
+        railWrap.setAlignment(Pos.TOP_CENTER);
+        railWrap.getStyleClass().add("cluster-rail-wrap");
+        railWrap.setPadding(new Insets(10, 8, 12, 8));
+        railWrap.setMinHeight(0);
+        applyRailCollapsed(settings.clusterRailCollapsed);
+        return railWrap;
+    }
+
+    private void setRailCollapsed(boolean collapsed) {
+        settings.clusterRailCollapsed = collapsed;
+        settingsStore.save(settings);
+        applyRailCollapsed(collapsed);
+    }
+
+    private void applyRailCollapsed(boolean collapsed) {
+        railBody.setVisible(!collapsed);
+        railBody.setManaged(!collapsed);
+        railToggle.setText(collapsed ? "›" : "‹");
+        railToggle.setTooltip(new Tooltip(collapsed ? "Show the cluster rail" : "Collapse the cluster rail"));
+        double w = collapsed ? 28 : 60;
+        railWrap.setMinWidth(w);
+        railWrap.setPrefWidth(w);
+        railWrap.setMaxWidth(w);
+    }
+
+    /**
+     * Re-read every loaded kube.conf (default discovery + each remembered file) and aggregate their
+     * contexts into the rail. One cluster per name (the first source wins); each remembers its file.
+     */
+    private void reloadClusters() {
+        // Always read the TRUE default config (not the active override) + each remembered file.
+        final List<File> sources = new ArrayList<>();
+        sources.add(defaultKubeConfigFile());
+        for (String p : settings.kubeConfigPaths) {
+            if (p != null && !p.isBlank()) {
+                File f = new File(p);
+                if (sources.stream().noneMatch(s -> sameFile(s, f))) {
+                    sources.add(f);
+                }
+            }
+        }
+        runAsync(() -> {
+            List<Object[]> pairs = new ArrayList<>();
+            for (File f : sources) {
+                try {
+                    for (ContextInfo c : service.listContexts(f)) {
+                        pairs.add(new Object[]{c, f});
+                    }
+                } catch (Exception ignore) {
+                    // a missing/broken file just contributes nothing to the rail
+                }
+            }
+            return pairs;
+        }, pairs -> {
+            allClusters.clear();
+            clusterFiles.clear();
+            for (Object[] p : pairs) {
+                ContextInfo c = (ContextInfo) p[0];
+                if (!clusterFiles.containsKey(c.name())) { // first source wins on a name clash
+                    clusterFiles.put(c.name(), (File) p[1]);
+                    allClusters.add(c);
+                }
+            }
+            refreshClusterRail();
+        });
+    }
+
+    /** Rebuild the rail's avatars from the aggregated cluster list, honoring label/color/hidden overrides. */
+    private void refreshClusterRail() {
+        clusterRail.getChildren().clear();
+        ContextInfo current = contextBox.getValue();
+        int hidden = 0;
+        for (ContextInfo c : allClusters) {
+            if (settings.hiddenClusters.contains(c.name())) {
+                hidden++;
+                continue;
+            }
+            Label avatar = new Label(clusterLabel(c.name()));
+            avatar.getStyleClass().add("cluster-avatar");
+            avatar.setStyle("-fx-background-color: " + clusterColorFor(c.name()) + ";");
+            if (current != null && current.name().equals(c.name())) {
+                avatar.getStyleClass().add("cluster-avatar-active");
+            }
+            String env = effectiveEnvironment(c.name());
+            avatar.setTooltip(new Tooltip(c.name() + (env != null && !env.isBlank() ? "  ·  " + env : "")
+                    + "\n(click to switch · right-click to edit)"));
+            // Left-click: switch the whole UI to this cluster and show its Overview.
+            avatar.setOnMouseClicked(e -> {
+                if (e.getButton() == MouseButton.PRIMARY) {
+                    switchAndSummarize(c);
+                }
+            });
+            // Right-click: open the editor (label / color / environment / forget).
+            avatar.setOnContextMenuRequested(e -> {
+                openClusterDialog(c);
+                e.consume();
+            });
+            clusterRail.getChildren().add(avatar);
+        }
+        if (hidden > 0) {
+            Label more = new Label("⋯");
+            more.getStyleClass().add("cluster-add");
+            more.setTooltip(new Tooltip(hidden + " hidden — click to manage"));
+            // A menu (not a one-click unhide-all) so a stray click never wipes the hidden set.
+            ContextMenu hiddenMenu = new ContextMenu();
+            for (ContextInfo c : allClusters) {
+                if (settings.hiddenClusters.contains(c.name())) {
+                    MenuItem show = new MenuItem("Show " + c.name());
+                    show.setOnAction(e -> {
+                        settings.hiddenClusters.remove(c.name());
+                        settingsStore.save(settings);
+                        refreshClusterRail();
+                    });
+                    hiddenMenu.getItems().add(show);
+                }
+            }
+            MenuItem showAll = new MenuItem("Show all hidden");
+            showAll.setOnAction(e -> {
+                settings.hiddenClusters.clear();
+                settingsStore.save(settings);
+                refreshClusterRail();
+            });
+            hiddenMenu.getItems().addAll(new SeparatorMenuItem(), showAll);
+            more.setOnMouseClicked(e -> hiddenMenu.show(more, e.getScreenX(), e.getScreenY()));
+            clusterRail.getChildren().add(more);
+        }
+        updateChrome();
+    }
+
+    /** Keep the empty-state "Load kube.conf…" button and the top accent strip in sync with state. */
+    private void updateChrome() {
+        boolean empty = allClusters.isEmpty();
+        if (loadConfigBtn != null) {
+            loadConfigBtn.setVisible(empty);
+            loadConfigBtn.setManaged(empty);
+            kubeConfigLabel.setVisible(empty);
+            kubeConfigLabel.setManaged(empty);
+        }
+        ContextInfo cur = contextBox.getValue();
+        String color = cur != null ? clusterColorFor(cur.name()) : "transparent";
+        clusterAccent.setStyle("-fx-background-color: " + color + ";");
+    }
+
+    /** The one place to manage a cluster: its config file, label, color, environment — and switch to it. */
+    private void openClusterDialog(ContextInfo c) {
+        String name = c.name();
+        File src = clusterFiles.get(name);
+        boolean fromLoadedFile = src != null
+                && settings.kubeConfigPaths.stream().anyMatch(p -> sameFile(new File(p), src))
+                && !sameFile(src, defaultKubeConfigFile());
+        String fileText = (src == null || sameFile(src, defaultKubeConfigFile()))
+                ? "default  (~/.kube/config)" : src.getAbsolutePath();
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        if (getScene() != null) {
+            dialog.initOwner(getScene().getWindow());
+        }
+        dialog.setTitle("Cluster");
+        dialog.setHeaderText(name);
+        var css = getClass().getResource("/styles/app.css");
+        if (css != null) {
+            dialog.getDialogPane().getStylesheets().add(css.toExternalForm());
+        }
+
+        Label fileVal = new Label(fileText);
+        fileVal.getStyleClass().add("muted");
+        fileVal.setWrapText(true);
+        fileVal.setMaxWidth(380);
+
+        TextField labelField = new TextField(settings.clusterLabels.getOrDefault(name, clusterInitials(name)));
+        labelField.setPromptText("short label, e.g. DEV / PRD");
+
+        ComboBox<String> envBox = new ComboBox<>(FXCollections.observableArrayList(
+                "(none)", "DEV", "DEMO", "STAGING", "PROD"));
+        envBox.setEditable(true);
+        String curEnv = effectiveEnvironment(name); // shows the inferred value when none is set
+        envBox.setValue(curEnv == null || curEnv.isBlank() ? "(none)" : curEnv);
+
+        // Color: an "Auto" option (environment/hash) plus the palette swatches.
+        ToggleGroup colorGroup = new ToggleGroup();
+        FlowPane colorFlow = new FlowPane(6, 6);
+        String curColor = settings.clusterColors.get(name);
+        ToggleButton auto = new ToggleButton("Auto");
+        auto.setToggleGroup(colorGroup);
+        auto.setSelected(curColor == null || curColor.isBlank());
+        colorFlow.getChildren().add(auto);
+        for (String col : CLUSTER_COLORS) {
+            ToggleButton t = new ToggleButton();
+            t.setToggleGroup(colorGroup);
+            t.setUserData(col);
+            t.setMinSize(22, 22);
+            t.setPrefSize(22, 22);
+            t.setStyle("-fx-background-color: " + col + "; -fx-background-radius: 5;");
+            if (col.equals(curColor)) {
+                t.setSelected(true);
+            }
+            colorFlow.getChildren().add(t);
+        }
+
+        GridPane grid = new GridPane();
+        grid.setHgap(12);
+        grid.setVgap(12);
+        grid.setPadding(new Insets(6, 2, 2, 2));
+        grid.addRow(0, new Label("Config file:"), fileVal);
+        grid.addRow(1, new Label("Label:"), labelField);
+        grid.addRow(2, new Label("Environment:"), envBox);
+        grid.addRow(3, new Label("Color:"), colorFlow);
+        dialog.getDialogPane().setContent(grid);
+
+        ButtonType switchBtn = new ButtonType("Switch to this cluster", ButtonBar.ButtonData.OK_DONE);
+        ButtonType saveBtn = new ButtonType("Save", ButtonBar.ButtonData.APPLY);
+        ButtonType hideBtn = new ButtonType("Hide", ButtonBar.ButtonData.LEFT);
+        ButtonType forgetBtn = new ButtonType("Forget this kube.conf", ButtonBar.ButtonData.LEFT);
+        dialog.getDialogPane().getButtonTypes().add(switchBtn);
+        dialog.getDialogPane().getButtonTypes().add(saveBtn);
+        dialog.getDialogPane().getButtonTypes().add(hideBtn);
+        if (fromLoadedFile) {
+            dialog.getDialogPane().getButtonTypes().add(forgetBtn);
+        }
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CANCEL);
+
+        ButtonType result = dialog.showAndWait().orElse(ButtonType.CANCEL);
+        if (result == ButtonType.CANCEL) {
+            return;
+        }
+        if (result == hideBtn) {
+            if (!settings.hiddenClusters.contains(name)) {
+                settings.hiddenClusters.add(name);
+            }
+            settingsStore.save(settings);
+            refreshClusterRail();
+            return;
+        }
+        if (result == forgetBtn) {
+            removeKubeConfigFile(src);
+            return;
+        }
+        // Save or Switch: persist label / environment / color from the fields.
+        String label = labelField.getText() == null ? "" : labelField.getText().trim();
+        if (label.isEmpty()) {
+            settings.clusterLabels.remove(name);
+        } else {
+            settings.clusterLabels.put(name, label);
+        }
+        String env = envBox.getValue() == null ? "" : envBox.getValue().trim();
+        if (env.isEmpty() || "(none)".equals(env)) {
+            settings.clusterEnvironments.remove(name);
+        } else {
+            settings.clusterEnvironments.put(name, env);
+        }
+        var sel = colorGroup.getSelectedToggle();
+        String color = sel == null ? null : (String) sel.getUserData();
+        if (color == null) {
+            settings.clusterColors.remove(name); // Auto (environment/hash)
+        } else {
+            settings.clusterColors.put(name, color);
+        }
+        settingsStore.save(settings);
+        refreshClusterRail();
+        if (result == switchBtn) {
+            switchToCluster(c);
+        }
+    }
+
+    /** Forget a loaded kube.conf: drop it from the remembered list and re-aggregate the rail. */
+    private void removeKubeConfigFile(File file) {
+        settings.kubeConfigPaths.remove(file.getAbsolutePath());
+        settingsStore.save(settings);
+        // If it was the active config, fall back to default discovery.
+        if (sameFile(file, activeConfigFile)) {
+            service.setKubeConfigFile(null);
+            activeConfigFile = null;
+            settings.kubeConfigPath = null;
+            settingsStore.save(settings);
+            kubeConfigLabel.setText("(default ~/.kube/config)");
+            loadContexts();
+        }
+        reloadClusters();
+        status("Removed kube.conf: " + file.getAbsolutePath());
+    }
+
+    /** Left-click behavior: switch the whole UI to this cluster and land on its Overview summary. */
+    private void switchAndSummarize(ContextInfo c) {
+        boolean alreadyActive = contextBox.getValue() != null
+                && c.name().equals(contextBox.getValue().name())
+                && sameFile(clusterFiles.get(c.name()), activeConfigFile);
+        setCenterView(ViewMode.OVERVIEW);
+        overviewToggle.setSelected(true);
+        closeDetails();
+        stopWatch();
+        if (alreadyActive) {
+            loadOverview(); // already on this cluster — just (re)show the summary
+        } else {
+            switchToCluster(c); // changes context → loadNamespaces → onSelectionChanged → loadOverview
+        }
+    }
+
+    /** Switch the active cluster, loading its kube.conf file first if it differs from the active one. */
+    private void switchToCluster(ContextInfo c) {
+        File target = clusterFiles.get(c.name());
+        if (sameFile(target, activeConfigFile)) {
+            // Same file already active — just select the context in the dropdown.
+            contextBox.getItems().stream()
+                    .filter(x -> x.name().equals(c.name())).findFirst()
+                    .ifPresent(match -> {
+                        if (!match.equals(contextBox.getValue())) {
+                            contextBox.setValue(match); // fires onContextChosen → loadNamespaces
+                        }
+                    });
+            return;
+        }
+        if (target != null && !target.exists()) {
+            statusError("kube.conf for '" + c.name() + "' not found at " + target.getAbsolutePath()
+                    + " — it may have moved.");
+            return;
+        }
+        // Point the service at the target file, reload its contexts into the dropdown, then select c.
+        service.setKubeConfigFile(target);
+        activeConfigFile = target;
+        settings.kubeConfigPath = target == null ? null : target.getAbsolutePath();
+        saveSettings();
+        kubeConfigLabel.setText(target == null ? "(default ~/.kube/config)" : target.getName());
+        final String want = c.name();
+        runAsync(service::listContexts, ctxs -> {
+            contextBox.setOnAction(null);
+            contextBox.setItems(FXCollections.observableArrayList(ctxs));
+            ContextInfo match = ctxs.stream().filter(x -> x.name().equals(want)).findFirst()
+                    .orElse(ctxs.isEmpty() ? null : ctxs.get(0));
+            contextBox.setValue(match);
+            contextBox.setOnAction(ev -> onContextChosen());
+            refreshClusterRail();
+            if (match != null) {
+                loadNamespaces(match);
+            }
+        });
+    }
+
+    /** The kube.conf that default discovery would use: $KUBECONFIG's first entry, else ~/.kube/config. */
+    private static File defaultKubeConfigFile() {
+        String env = System.getenv("KUBECONFIG");
+        if (env != null && !env.isBlank()) {
+            String first = env.split(File.pathSeparator)[0].trim();
+            if (!first.isEmpty()) {
+                return new File(first);
+            }
+        }
+        return new File(System.getProperty("user.home"), ".kube" + File.separator + "config");
+    }
+
+    /** Two kube.conf file references point at the same config (both null = default discovery). */
+    private static boolean sameFile(File a, File b) {
+        if (a == null && b == null) {
+            return true;
+        }
+        if (a == null || b == null) {
+            return false;
+        }
+        return a.getAbsolutePath().equals(b.getAbsolutePath());
+    }
+
+    private String clusterLabel(String name) {
+        String override = settings.clusterLabels.get(name);
+        return override != null && !override.isBlank() ? override : clusterInitials(name);
+    }
+
+    /** Avatar color: explicit override, else the environment's color (PROD=red, …), else a name hash. */
+    private String clusterColorFor(String name) {
+        String override = settings.clusterColors.get(name);
+        if (override != null && !override.isBlank()) {
+            return override;
+        }
+        String envColor = environmentColor(effectiveEnvironment(name));
+        return envColor != null ? envColor : clusterColor(name);
+    }
+
+    /** The environment to use: the user's explicit choice if set, else one inferred from the name. */
+    private String effectiveEnvironment(String name) {
+        String override = settings.clusterEnvironments.get(name);
+        if (override != null && !override.isBlank()) {
+            return override;
+        }
+        return inferEnvironment(name);
+    }
+
+    /** Guess an environment from whole words in the context name (prod wins; no substring false hits). */
+    private static String inferEnvironment(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        String s = "-" + name.toLowerCase().replaceAll("[^a-z0-9]+", "-") + "-";
+        if (s.contains("-prod-") || s.contains("-production-") || s.contains("-prd-")) {
+            return "PROD";
+        }
+        if (s.contains("-staging-") || s.contains("-stage-") || s.contains("-stg-")) {
+            return "STAGING";
+        }
+        if (s.contains("-demo-")) {
+            return "DEMO";
+        }
+        if (s.contains("-dev-") || s.contains("-development-") || s.contains("-develop-")) {
+            return "DEV";
+        }
+        return null;
+    }
+
+    private static String environmentColor(String env) {
+        if (env == null) {
+            return null;
+        }
+        return switch (env.trim().toUpperCase()) {
+            case "PROD", "PRODUCTION" -> "#e11900"; // red
+            case "STAGING", "STAGE" -> "#f9a825";   // amber
+            case "DEMO" -> "#ed6c02";               // orange
+            case "DEV", "DEVELOPMENT" -> "#2e7d32"; // green
+            default -> null;
+        };
+    }
+
+    private static String clusterColor(String name) {
+        return CLUSTER_COLORS[Math.floorMod(name.hashCode(), CLUSTER_COLORS.length)];
+    }
+
+    /** Two-letter badge: first letters of the first two name parts, else the first two characters. */
+    private static String clusterInitials(String name) {
+        String[] parts = name.split("[-_.:/ ]+");
+        StringBuilder sb = new StringBuilder();
+        if (parts.length >= 2) {
+            for (int i = 0; i < parts.length && sb.length() < 2; i++) {
+                if (!parts[i].isEmpty()) {
+                    sb.append(Character.toUpperCase(parts[i].charAt(0)));
+                }
+            }
+        } else if (parts.length == 1 && !parts[0].isEmpty()) {
+            sb.append(parts[0].substring(0, Math.min(2, parts[0].length())).toUpperCase());
+        }
+        return sb.length() == 0 ? "?" : sb.toString();
     }
 
     // --- center content ---------------------------------------------------------------------
@@ -941,7 +1506,13 @@ public class MainView extends BorderPane {
         eventsView.setManaged(false);
         VBox.setVgrow(eventsView, Priority.ALWAYS);
 
-        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView, healthView, eventsView);
+        buildOverviewView();
+        overviewView.setVisible(false);
+        overviewView.setManaged(false);
+        VBox.setVgrow(overviewView, Priority.ALWAYS);
+
+        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView, healthView,
+                eventsView, overviewView);
         content.setPadding(new Insets(16));
         content.getStyleClass().add("content");
         content.setMinWidth(320); // keep the table usable no matter how wide the details pane gets
@@ -1366,7 +1937,7 @@ public class MainView extends BorderPane {
 
         FlowPane controls = new FlowPane(8, 8,
                 logStatusDot, containerGroup, tailGroup, refresh, followToggle, previousCheck,
-                timestampsCheck, detach, filterField, wrap, clear, copy, save);
+                timestampsCheck, filterField, wrap, clear, copy, save, detach);
         controls.getStyleClass().add("log-toolbar");
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
@@ -2432,6 +3003,7 @@ public class MainView extends BorderPane {
             contextBox.setItems(FXCollections.observableArrayList(contexts));
             contextBox.setValue(current);
             contextBox.setOnAction(e -> onContextChosen());
+            refreshClusterRail();
             if (current != null) {
                 loadNamespaces(current);
             } else {
@@ -2598,6 +3170,7 @@ public class MainView extends BorderPane {
             case TOPOLOGY -> loadTopology();
             case HEALTH -> loadHealth();
             case EVENTS -> loadEvents();
+            case OVERVIEW -> loadOverview();
             default -> {
                 refreshContent();
                 if (paused) {
@@ -2697,6 +3270,14 @@ public class MainView extends BorderPane {
         loadHealth();
     }
 
+    private void enterOverview() {
+        setCenterView(ViewMode.OVERVIEW);
+        overviewToggle.setSelected(true);
+        closeDetails();
+        stopWatch();
+        loadOverview();
+    }
+
     private void enterEvents() {
         setCenterView(ViewMode.EVENTS);
         eventsToggle.setSelected(true);
@@ -2722,6 +3303,8 @@ public class MainView extends BorderPane {
         healthView.setManaged(mode == ViewMode.HEALTH);
         eventsView.setVisible(mode == ViewMode.EVENTS);
         eventsView.setManaged(mode == ViewMode.EVENTS);
+        overviewView.setVisible(mode == ViewMode.OVERVIEW);
+        overviewView.setManaged(mode == ViewMode.OVERVIEW);
     }
 
     private void loadTopology() {
@@ -2846,6 +3429,212 @@ public class MainView extends BorderPane {
             status("Health scan complete — " + findings.size() + " finding(s). Double-click to inspect, "
                     + "right-click to act.");
         });
+    }
+
+    // --- overview dashboard -----------------------------------------------------------------
+
+    private void buildOverviewView() {
+        // Cluster header: color dot + name + environment chip, with the config file beneath.
+        ovDot.getStyleClass().add("ov-dot");
+        ovName.getStyleClass().add("ov-cluster-name");
+        ovEnvChip.getStyleClass().add("ov-env-chip");
+        ovEnvChip.setVisible(false);
+        ovEnvChip.setManaged(false);
+        ovMeta.getStyleClass().add("muted");
+        HBox titleRow = new HBox(10, ovDot, ovName, ovEnvChip);
+        titleRow.setAlignment(Pos.CENTER_LEFT);
+        VBox header = new VBox(2, titleRow, ovMeta);
+        header.setPadding(new Insets(0, 0, 4, 0));
+
+        FlowPane tiles = new FlowPane(12, 12,
+                tilePods.box, tileWarnings.box, tileDeployments.box, tileNodes.box, tileNamespaces.box);
+        tiles.getStyleClass().add("stat-tiles");
+
+        // Tiles double as navigation: jump to the matching resource list or the health view.
+        tilePods.onClick(() -> selectKind(ResourceKind.PODS));
+        tileDeployments.onClick(() -> selectKind(ResourceKind.DEPLOYMENTS));
+        tileNodes.onClick(() -> selectKind(ResourceKind.NODES));
+        tileWarnings.onClick(this::enterHealth);
+
+        Label unhealthyHeader = new Label("Unhealthy pods");
+        unhealthyHeader.getStyleClass().add("overview-section");
+        Label eventsHeader = new Label("Warning events");
+        eventsHeader.getStyleClass().add("overview-section");
+
+        VBox lists = new VBox(10, unhealthyHeader, overviewUnhealthyBox, eventsHeader, overviewEventsBox);
+        ScrollPane scroll = new ScrollPane(lists);
+        scroll.setFitToWidth(true);
+        scroll.getStyleClass().add("overview-scroll");
+        VBox.setVgrow(scroll, Priority.ALWAYS);
+
+        overviewView.getChildren().setAll(header, tiles, scroll);
+    }
+
+    private void loadOverview() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        if (allNsMode.get()) {
+            status("Pick a single namespace for the overview.");
+            return;
+        }
+        String ns = namespaceBox.getValue();
+        contentTitle.setText("Overview · " + safeNamespace());
+
+        // Cluster-identity header (color, name, environment, config file).
+        String cn = ctx.name();
+        ovName.setText(cn);
+        ovDot.setStyle("-fx-text-fill: " + clusterColorFor(cn) + ";");
+        String env = effectiveEnvironment(cn);
+        boolean hasEnv = env != null && !env.isBlank();
+        ovEnvChip.setText(hasEnv ? env : "");
+        ovEnvChip.setVisible(hasEnv);
+        ovEnvChip.setManaged(hasEnv);
+        if (hasEnv) {
+            String ec = environmentColor(env);
+            ovEnvChip.setStyle("-fx-background-color: " + (ec != null ? ec : clusterColorFor(cn)) + ";");
+        }
+        File src = clusterFiles.get(cn);
+        String fileText = (src == null || sameFile(src, defaultKubeConfigFile()))
+                ? "default ~/.kube/config" : src.getAbsolutePath();
+        ovMeta.setText("namespace: " + safeNamespace() + "    ·    " + fileText);
+
+        final int gen = ++overviewGen;
+        tilePods.set("…", "");
+        tileWarnings.set("…", "");
+        tileDeployments.set("…", "");
+        tileNodes.set("…", "");
+        tileNamespaces.set("…", "");
+        overviewUnhealthyBox.getChildren().setAll(mutedLabel("Loading…"));
+        overviewEventsBox.getChildren().setAll(mutedLabel("Loading…"));
+        status("Loading overview…");
+
+        // Pods tile from the pod-phase summary.
+        runAsync(() -> service.podHealth(ctx.name(), ns), hs -> {
+            if (gen != overviewGen) {
+                return;
+            }
+            int total = hs.total();
+            int running = hs.phaseCounts().getOrDefault("Running", 0);
+            int pending = hs.phaseCounts().getOrDefault("Pending", 0);
+            int failed = hs.phaseCounts().getOrDefault("Failed", 0)
+                    + hs.phaseCounts().getOrDefault("Unknown", 0);
+            tilePods.set(running + "/" + total,
+                    failed > 0 ? failed + " failing" : (pending > 0 ? pending + " pending" : "all running"));
+        });
+
+        // Deployments tile: how many are fully available.
+        runAsync(() -> service.listResource(ctx.name(), ns, ResourceKind.DEPLOYMENTS), rd -> {
+            if (gen != overviewGen) {
+                return;
+            }
+            int total = rd.rows().size();
+            int avail = 0;
+            for (List<String> row : rd.rows()) {
+                String[] parts = cell(row, rd.columns(), "Ready").split("/");
+                if (parts.length == 2 && parts[0].equals(parts[1]) && !"0".equals(parts[1])) {
+                    avail++;
+                }
+            }
+            tileDeployments.set(avail + "/" + total, total == 0 ? "none" : (total - avail) + " not ready");
+        });
+
+        // Nodes tile (cluster-wide; the namespace is ignored for this kind).
+        runAsync(() -> service.listResource(ctx.name(), ns, ResourceKind.NODES), rd -> {
+            if (gen != overviewGen) {
+                return;
+            }
+            int total = rd.rows().size();
+            long ready = rd.rows().stream()
+                    .filter(r -> "Ready".equalsIgnoreCase(cell(r, rd.columns(), "Status"))).count();
+            tileNodes.set(ready + "/" + total, ready == total ? "all ready" : (total - ready) + " not ready");
+        });
+
+        // Namespaces tile (cluster-wide count).
+        runAsync(() -> service.listNamespaces(ctx.name()), names -> {
+            if (gen != overviewGen) {
+                return;
+            }
+            tileNamespaces.set(String.valueOf(names.size()), "in the cluster");
+        });
+
+        // Health findings → Warnings tile + the unhealthy-pods list.
+        runAsync(() -> service.healthCheck(ctx.name(), ns), findings -> {
+            if (gen != overviewGen) {
+                return;
+            }
+            long crit = findings.stream().filter(h -> h.severity() == HealthSeverity.CRITICAL).count();
+            tileWarnings.set(String.valueOf(findings.size()), crit + " critical");
+            List<HealthFinding> pods = findings.stream()
+                    .filter(h -> h.kind() == ResourceKind.PODS).limit(12).toList();
+            if (pods.isEmpty()) {
+                overviewUnhealthyBox.getChildren().setAll(mutedLabel("No unhealthy pods ✓"));
+            } else {
+                overviewUnhealthyBox.getChildren().setAll(
+                        pods.stream().map(this::overviewUnhealthyRow).toList());
+            }
+        });
+
+        // Warning events (most-recent first, capped).
+        runAsync(() -> service.listEvents(ctx.name(), ns), rd -> {
+            if (gen != overviewGen) {
+                return;
+            }
+            List<Node> lines = new ArrayList<>();
+            for (List<String> row : rd.rows()) {
+                if ("Warning".equalsIgnoreCase(cell(row, rd.columns(), "Type"))) {
+                    lines.add(overviewEventLine(row, rd.columns()));
+                    if (lines.size() >= 12) {
+                        break;
+                    }
+                }
+            }
+            overviewEventsBox.getChildren().setAll(
+                    lines.isEmpty() ? List.of(mutedLabel("No warning events ✓")) : lines);
+            status("Overview ready.");
+        });
+    }
+
+    private Label mutedLabel(String text) {
+        Label l = new Label(text);
+        l.getStyleClass().add("muted");
+        return l;
+    }
+
+    /** A clickable unhealthy-pod row (opens the pod's details on click). */
+    private Node overviewUnhealthyRow(HealthFinding f) {
+        Label name = new Label(f.name());
+        name.getStyleClass().add("overview-row-title");
+        Label detail = new Label(f.check() + " — " + f.detail());
+        detail.getStyleClass().add("muted");
+        detail.setWrapText(true);
+        VBox box = new VBox(1, name, detail);
+        box.getStyleClass().add("overview-row");
+        box.setOnMouseClicked(e ->
+                openDetails(f.kind(), f.name(), null, kindHasEvents(f.kind()) ? eventsTab : yamlTab));
+        return box;
+    }
+
+    private Node overviewEventLine(List<String> row, List<String> cols) {
+        Label head = new Label(cell(row, cols, "Reason") + "   " + cell(row, cols, "Object"));
+        head.getStyleClass().add("overview-row-title");
+        Label body = new Label(cell(row, cols, "Message"));
+        body.getStyleClass().add("muted");
+        body.setWrapText(true);
+        VBox box = new VBox(1, head, body);
+        box.getStyleClass().add("overview-row");
+        return box;
+    }
+
+    /** The value of a named column in a (columns, row) pair, case-insensitive; "" if absent. */
+    private static String cell(List<String> row, List<String> cols, String name) {
+        for (int i = 0; i < cols.size(); i++) {
+            if (cols.get(i).equalsIgnoreCase(name) && i < row.size()) {
+                return row.get(i);
+            }
+        }
+        return "";
     }
 
     // --- events view ------------------------------------------------------------------------
@@ -3387,11 +4176,50 @@ public class MainView extends BorderPane {
         Runnable apply = () -> {
             statusBar.setText(message);
             statusBar.pseudoClassStateChanged(ERROR_PSEUDO, error);
+            // Errors would otherwise sit red in the bar forever; auto-reset to "Ready." after a pause.
+            // Any newer status (incl. one from navigating to another view) restarts/cancels this.
+            statusErrorClear.stop();
+            if (error) {
+                statusErrorClear.playFromStart();
+            }
         };
         if (Platform.isFxApplicationThread()) {
             apply.run();
         } else {
             Platform.runLater(apply);
+        }
+    }
+
+    /** A dashboard stat tile: a colored icon badge, a title, a big value, and a muted subtitle. */
+    private static final class StatTile {
+        final HBox box = new HBox(12);
+        final Label value = new Label("—");
+        final Label subtitle = new Label();
+
+        StatTile(String title, String icon, String badgeClass) {
+            Label badge = new Label(icon);
+            badge.getStyleClass().addAll("stat-badge", badgeClass);
+
+            Label titleLabel = new Label(title);
+            titleLabel.getStyleClass().add("stat-title");
+            value.getStyleClass().add("stat-value");
+            subtitle.getStyleClass().add("stat-subtitle");
+
+            VBox text = new VBox(1, titleLabel, value, subtitle);
+            box.getChildren().setAll(badge, text);
+            box.setAlignment(Pos.CENTER_LEFT);
+            box.getStyleClass().add("stat-tile");
+        }
+
+        void set(String v, String sub) {
+            value.setText(v);
+            subtitle.setText(sub == null ? "" : sub);
+        }
+
+        /** Make the tile act as a button that navigates somewhere (adds a hand cursor + hover). */
+        void onClick(Runnable action) {
+            box.getStyleClass().add("stat-clickable");
+            box.setOnMouseClicked(e -> action.run());
         }
     }
 
@@ -3401,15 +4229,5 @@ public class MainView extends BorderPane {
             t.setDaemon(true);
             return t;
         };
-    }
-
-    /** Thin vertical separator used in the top bar. */
-    private static class VSep extends Region {
-        VSep() {
-            setMinWidth(1);
-            setPrefWidth(1);
-            setMaxHeight(22);
-            getStyleClass().add("vsep");
-        }
     }
 }

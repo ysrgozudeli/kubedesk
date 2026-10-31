@@ -115,9 +115,13 @@ public class Fabric8ClusterService implements ClusterService {
 
     @Override
     public List<ContextInfo> listContexts() {
+        return listContexts(kubeConfigFile());
+    }
+
+    @Override
+    public List<ContextInfo> listContexts(File file) {
         try {
-            File file = kubeConfigFile();
-            if (!file.exists()) {
+            if (file == null || !file.exists()) {
                 return List.of();
             }
             io.fabric8.kubernetes.api.model.Config kc = KubeConfigUtils.parseConfig(file);

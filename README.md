@@ -31,7 +31,8 @@ feels at home, positioned as a **lighter, free alternative to Lens**.
 - 🔌 **No kubectl required** — every read and action goes over the API. (There's an *optional* embedded kubectl console for the long tail — and it works even without kubectl on your PATH.)
 - 🔍 **See your cluster** — live resource tables, a real dependency **topology map**, a one-screen **health scan**, and live **CPU/memory** charts.
 - 🛠️ **Act safely** — delete, restart, scale, exec, port-forward, and apply YAML with **dry-run validation** — all with confirmations.
-- ⌨️ **Move fast** — a **command palette** (`Ctrl`/`Cmd`+`P`) to jump to any context, namespace, resource kind, or view without the mouse.
+- ⌨️ **Move fast** — a **command palette** (`Ctrl`/`Cmd`+`P`) to jump to any cluster, namespace, resource kind, or view without the mouse.
+- 🗂️ **Juggle many clusters** — a **cluster rail** of colored avatars (across several kube.conf files), an **environment** tag per cluster (`DEV`/`STAGING`/`PROD`, auto-detected) that color-codes it, and a per-cluster **Overview** dashboard.
 - 🧳 **Runs anywhere** — including a **portable zip** for locked-down machines (VDIs) where you can't run an installer.
 
 ## ✨ In action
@@ -199,11 +200,11 @@ Convenience scripts do the work: **`scripts/package.ps1`** (Windows) and **`scri
 
 # Portable zip — no installer, no admin, no Java. Unzip and run KubeDesk.exe.
 # Ideal for locked-down machines (e.g. a VDI).
-./scripts/package.ps1 -Zip          # -> dist\KubeDesk-1.11.0-windows-portable.zip
+./scripts/package.ps1 -Zip          # -> dist\KubeDesk-1.12.0-windows-portable.zip
 
 # Installer (.exe or .msi) — requires the WiX Toolset v3 on PATH.
-./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-1.11.0.exe
-./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-1.11.0.msi
+./scripts/package.ps1 -Type exe     # -> dist\KubeDesk-1.12.0.exe
+./scripts/package.ps1 -Type msi     # -> dist\KubeDesk-1.12.0.msi
 ```
 
 Installers (`exe`/`msi`) need the **[WiX Toolset v3](https://wixtoolset.org/)** on the `PATH`:
@@ -219,8 +220,8 @@ The installer adds a Start-menu entry, a desktop shortcut, and an install-locati
 ```bash
 chmod +x scripts/package.sh          # once
 ./scripts/package.sh                  # app-image -> dist/KubeDesk.app
-./scripts/package.sh dmg              # -> dist/KubeDesk-1.11.0.dmg
-./scripts/package.sh pkg              # -> dist/KubeDesk-1.11.0.pkg
+./scripts/package.sh dmg              # -> dist/KubeDesk-1.12.0.dmg
+./scripts/package.sh pkg              # -> dist/KubeDesk-1.12.0.pkg
 ```
 
 Needs **Xcode Command Line Tools** (`xcode-select --install`). For distribution *outside* your own
@@ -232,8 +233,8 @@ signing options to jpackage (`--mac-sign --mac-signing-key-user-name ...`) once 
 ```bash
 chmod +x scripts/package.sh          # once
 ./scripts/package.sh                  # app-image -> dist/KubeDesk/
-./scripts/package.sh deb              # -> dist/kubedesk_1.11.0_amd64.deb   (needs dpkg + fakeroot)
-./scripts/package.sh rpm              # -> dist/kubedesk-1.11.0.x86_64.rpm  (needs rpmbuild)
+./scripts/package.sh deb              # -> dist/kubedesk_1.12.0_amd64.deb   (needs dpkg + fakeroot)
+./scripts/package.sh rpm              # -> dist/kubedesk-1.12.0.x86_64.rpm  (needs rpmbuild)
 ```
 
 - `.deb` needs `dpkg-deb` + `fakeroot` (`sudo apt install fakeroot`).
@@ -270,8 +271,8 @@ platforms on their own runners (jpackage can't cross-compile):
 **Cut a release:**
 
 ```bash
-git tag v1.11.0
-git push origin v1.11.0
+git tag v1.12.0
+git push origin v1.12.0
 ```
 
 Pushing a `v*` tag builds every installer and publishes a **GitHub Release** with them attached (using
@@ -281,7 +282,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.11.0**: 12 resource kinds, live watches, details panel (exec + logs + live
+Shipped through **v1.12.0**: 12 resource kinds, live watches, details panel (exec + logs + live
 metrics), pod diagnostics, live log follow + detachable log windows, management actions (incl. pod
 restart), Create/Apply with lint + dry-run, port-forwarding, topology view, health scan, Events view,
 embedded kubectl console, a command palette, the experimental read-only **MCP server with a live UI

@@ -3,6 +3,33 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.12.0] - 2026-10-31
+
+### Added
+- **Cluster rail + multi-kubeconfig.** A colored avatar per cluster runs down the left edge, with the
+  active one highlighted. **Left-click** switches the whole UI to that cluster and opens its Overview;
+  **right-click** opens a per-cluster editor (label, color, environment, Hide, Forget). The **＋** at the
+  bottom *adds* a kube.conf (instead of replacing), so clusters from several config files are aggregated
+  in the rail — one active at a time; each remembers its source file. The rail collapses, and clusters
+  can be hidden (reversibly) or a loaded file forgotten (KubeDesk only — your kube.conf is never edited).
+- **Per-cluster environment + colors.** Tag a cluster `DEV` / `DEMO` / `STAGING` / `PROD` (auto-inferred
+  from the context name when not set, matched on whole words), which colors its avatar — **green / orange
+  / amber / red** — plus a thin **accent strip across the top of the window** in the active cluster's
+  color, an at-a-glance "which cluster am I on" (and a red "you're in PROD") cue.
+- **Overview dashboard.** A new **Overview** view (top of the sidebar) with a cluster header, stat tiles
+  (Pods, Warnings, Deployments, Nodes, Namespaces — each clickable to jump), and compact Unhealthy-pods
+  and Warning-events lists, all from data KubeDesk already computes.
+- **Command palette covers clusters.** `Ctrl`/`Cmd`+`P` now lists every cluster (across all loaded
+  configs), searchable by context name, custom label, and environment, plus the Overview view.
+
+### Changed
+- **Layout: no more full-width top bar.** The brand moves into the sidebar and the context/namespace/
+  search/live/menu controls become a wrapping toolbar above the content — more vertical room, and the
+  controls share a consistent height.
+- **Status-bar errors no longer linger.** An error now auto-clears back to "Ready." after ~15s (and is
+  replaced the moment any new status arrives), instead of staying red indefinitely.
+- **Logs: the Detach button moved** to the end of the toolbar.
+
 ## [1.11.0] - 2026-10-31
 
 ### Added

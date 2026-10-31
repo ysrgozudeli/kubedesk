@@ -14,6 +14,22 @@
     -fx-border-width: 0 0 1 0;
 }
 
+/* Give every control in the toolbar the same height so combos, search, buttons and the Live/pause
+   control line up (min/pref only — no max, which would clip labels). */
+.top-bar .button,
+.top-bar .toggle-button,
+.top-bar .menu-button,
+.top-bar .combo-box,
+.top-bar .text-field {
+    -fx-min-height: 32;
+    -fx-pref-height: 32;
+}
+.top-bar .button,
+.top-bar .toggle-button,
+.top-bar .menu-button {
+    -fx-padding: 4 12 4 12;
+}
+
 .brand {
     -fx-font-size: 18px;
     -fx-font-weight: bold;
@@ -112,6 +128,149 @@
 .log-toolbar .combo-box {
     -fx-min-height: 32;
     -fx-pref-height: 32;
+}
+
+/* ---- cluster rail (left-edge quick switch) ---- */
+.cluster-rail-wrap {
+    -fx-background-color: #e9ecf1;
+    -fx-min-width: 60;
+    -fx-pref-width: 60;
+}
+.cluster-rail-scroll,
+.cluster-rail-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.cluster-avatar {
+    -fx-min-width: 42;
+    -fx-min-height: 42;
+    -fx-pref-width: 42;
+    -fx-pref-height: 42;
+    -fx-alignment: center;
+    -fx-background-radius: 12;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-font-size: 13px;
+    -fx-cursor: hand;
+    -fx-opacity: 0.72;
+}
+.cluster-avatar:hover {
+    -fx-opacity: 1;
+}
+.cluster-avatar-active {
+    -fx-opacity: 1;
+    -fx-border-color: #1f2937;
+    -fx-border-width: 2.5;
+    -fx-border-radius: 13;
+}
+.cluster-add {
+    -fx-min-width: 42;
+    -fx-min-height: 42;
+    -fx-background-color: transparent;
+    -fx-border-color: #b9c0cc;
+    -fx-border-width: 1.5;
+    -fx-border-radius: 12;
+    -fx-text-fill: #6b7280;
+    -fx-font-size: 20px;
+    -fx-cursor: hand;
+}
+.cluster-add:hover {
+    -fx-border-color: #326ce5;
+    -fx-text-fill: #326ce5;
+}
+.rail-toggle {
+    -fx-background-color: transparent;
+    -fx-text-fill: #6b7280;
+    -fx-font-size: 16px;
+    -fx-padding: 0 6 0 6;
+    -fx-cursor: hand;
+}
+.rail-toggle:hover {
+    -fx-text-fill: #326ce5;
+}
+
+/* ---- Overview dashboard ---- */
+.ov-dot {
+    -fx-font-size: 16px;
+}
+.ov-cluster-name {
+    -fx-font-size: 18px;
+    -fx-font-weight: bold;
+}
+.ov-env-chip {
+    -fx-text-fill: white;
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+    -fx-padding: 2 9 2 9;
+    -fx-background-radius: 10;
+    -fx-background-color: #6b7280;
+}
+.stat-tile {
+    -fx-background-color: -color-bg-subtle, #f6f8fa;
+    -fx-background-radius: 10;
+    -fx-border-color: #e1e4e8;
+    -fx-border-radius: 10;
+    -fx-padding: 12 16 12 16;
+    -fx-min-width: 180;
+    -fx-pref-width: 200;
+}
+.stat-badge {
+    -fx-min-width: 38;
+    -fx-min-height: 38;
+    -fx-pref-width: 38;
+    -fx-pref-height: 38;
+    -fx-alignment: center;
+    -fx-background-radius: 9;
+    -fx-text-fill: white;
+    -fx-font-size: 18px;
+}
+.badge-pods { -fx-background-color: #326ce5; }
+.badge-warnings { -fx-background-color: #ed6c02; }
+.badge-deployments { -fx-background-color: #2e7d32; }
+.badge-nodes { -fx-background-color: #6b46c1; }
+.badge-namespaces { -fx-background-color: #0891b2; }
+
+.stat-clickable {
+    -fx-cursor: hand;
+}
+.stat-clickable:hover {
+    -fx-border-color: #326ce5;
+    -fx-background-color: #eef2fb;
+}
+
+.stat-title {
+    -fx-font-size: 12px;
+    -fx-text-fill: #6b7280;
+}
+.stat-value {
+    -fx-font-size: 26px;
+    -fx-font-weight: bold;
+}
+.stat-subtitle {
+    -fx-font-size: 11px;
+    -fx-text-fill: #9ca3af;
+}
+.overview-section {
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-padding: 8 0 2 0;
+}
+.overview-scroll {
+    -fx-background-color: transparent;
+}
+.overview-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.overview-row {
+    -fx-padding: 6 10 6 10;
+    -fx-background-radius: 8;
+    -fx-cursor: hand;
+}
+.overview-row:hover {
+    -fx-background-color: #eef2fb;
+}
+.overview-row-title {
+    -fx-font-family: "monospace";
+    -fx-font-size: 12px;
 }
 
 /* Pod-status dot shown in the log toolbar (green = Running/Ready, amber = Pending, red = failing). */

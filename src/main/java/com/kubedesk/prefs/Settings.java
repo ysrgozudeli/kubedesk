@@ -11,8 +11,11 @@ import java.util.Map;
  */
 public class Settings {
 
-    /** Path to a user-chosen kube.conf, or {@code null} to use default discovery. */
+    /** Path to the currently active user-chosen kube.conf, or {@code null} to use default discovery. */
     public String kubeConfigPath;
+
+    /** Every kube.conf file the user has loaded; their clusters are aggregated in the left rail. */
+    public List<String> kubeConfigPaths = new ArrayList<>();
 
     /** Last selected context / namespace, restored on launch. */
     public String lastContext;
@@ -45,6 +48,13 @@ public class Settings {
 
     /** Live mirror: reflect each agent tool call in the window (status line + reveal the resource). */
     public boolean mcpFollow = true;
+
+    /** Cluster rail (left edge): per-context display overrides, hidden contexts, and collapsed state. */
+    public Map<String, String> clusterLabels = new HashMap<>();
+    public Map<String, String> clusterColors = new HashMap<>();
+    public Map<String, String> clusterEnvironments = new HashMap<>();
+    public List<String> hiddenClusters = new ArrayList<>();
+    public boolean clusterRailCollapsed = false;
 
     /** A saved port-forward. */
     public record PortForwardPref(String context, String namespace, String pod,
