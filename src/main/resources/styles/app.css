@@ -279,13 +279,19 @@
     -fx-background-color: transparent;
 }
 .overview-row {
-    -fx-padding: 6 10 6 10;
+    -fx-padding: 6 10 6 12;
     -fx-background-radius: 8;
+    -fx-border-width: 0 0 0 3;
+    -fx-border-color: #cbd5e1; /* neutral accent (e.g. nodes) */
+    -fx-border-insets: 1 0 1 0;
     -fx-cursor: hand;
 }
 .overview-row:hover {
     -fx-background-color: #eef2fb;
 }
+/* Left-accent colors that tell the two Overview lists apart at a glance. */
+.overview-row-danger { -fx-border-color: #d32f2f; } /* unhealthy pods */
+.overview-row-warn   { -fx-border-color: #ed6c02; } /* warning events */
 .overview-row-title {
     -fx-font-family: "monospace";
     -fx-font-size: 12px;

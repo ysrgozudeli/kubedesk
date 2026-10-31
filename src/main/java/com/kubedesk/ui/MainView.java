@@ -246,6 +246,8 @@ public class MainView extends BorderPane {
     private ResourceKind detailKind = ResourceKind.PODS;
 
     private ResourceKind currentKind = ResourceKind.PODS;
+    /** A resource name to select + open once the next resource-table load finishes (deep-link from Overview). */
+    private String pendingSelectName;
 
     // "Search all listed namespaces" mode: a sentinel entry in the namespace dropdown. In this mode
     // the table gains a leading Namespace column, is read-only (view YAML only), and has no live watch.
@@ -734,11 +736,20 @@ public class MainView extends BorderPane {
         HBox nsGroup = new HBox(6, new Label("Namespace:"), namespaceBox);
         nsGroup.setAlignment(Pos.CENTER_LEFT);
 
-        // A FlowPane so the toolbar wraps on a narrow window instead of clipping.
-        FlowPane bar = new FlowPane(10, 8,
-                loadConfigBtn, kubeConfigLabel, ctxGroup, nsGroup,
-                searchField, refresh, liveBox, pfButton, appMenu);
-        bar.setAlignment(Pos.CENTER_LEFT);
+        // Left: cluster identity + selectors (a FlowPane so they wrap on a narrow window instead of
+        // clipping). Right: search + actions + menu, pinned to the right edge.
+        FlowPane left = new FlowPane(10, 8, loadConfigBtn, kubeConfigLabel, ctxGroup, nsGroup);
+        left.setAlignment(Pos.CENTER_LEFT);
+        HBox right = new HBox(10, searchField, refresh, liveBox, pfButton, appMenu);
+        right.setAlignment(Pos.CENTER_RIGHT);
+        right.setMinWidth(Region.USE_PREF_SIZE); // never let the right cluster shrink below its controls
+
+        BorderPane bar = new BorderPane();
+        bar.setCenter(left);   // takes the remaining width and wraps within it
+        bar.setRight(right);
+        BorderPane.setAlignment(left, Pos.CENTER_LEFT);
+        BorderPane.setAlignment(right, Pos.CENTER_RIGHT);
+        BorderPane.setMargin(right, new Insets(0, 0, 0, 12));
         bar.setPadding(new Insets(10, 16, 10, 16));
         bar.getStyleClass().add("top-bar");
         return bar;
@@ -3094,6 +3105,7 @@ public class MainView extends BorderPane {
             renderTable(data);
             applyFilter();
             status(data.rows().size() + " " + currentKind.label().toLowerCase() + " loaded.");
+            applyPendingSelection();
         });
 
         if (currentKind == ResourceKind.PODS) {
@@ -3800,10 +3812,38 @@ public class MainView extends BorderPane {
         detail.getStyleClass().add("muted");
         detail.setWrapText(true);
         VBox box = new VBox(1, name, detail);
-        box.getStyleClass().add("overview-row");
-        box.setOnMouseClicked(e ->
-                openDetails(f.kind(), f.name(), null, kindHasEvents(f.kind()) ? eventsTab : yamlTab));
+        box.getStyleClass().addAll("overview-row", "overview-row-danger");
+        // Deep-link into the resource list for this kind, with the row selected and its details open.
+        box.setOnMouseClicked(e -> openInResourceView(f.kind(), f.name()));
         return box;
+    }
+
+    /**
+     * Switch to the resource list for {@code kind}, then (once it loads) select the named row and open
+     * its details panel — used to deep-link from the Overview's unhealthy-pods list.
+     */
+    private void openInResourceView(ResourceKind kind, String name) {
+        pendingSelectName = name;
+        selectKind(kind); // sets the view + triggers an async table load; applyPendingSelection runs after
+    }
+
+    /** After a resource-table load, honor a pending deep-link: select the row and reveal its details. */
+    private void applyPendingSelection() {
+        if (pendingSelectName == null) {
+            return;
+        }
+        String want = pendingSelectName;
+        pendingSelectName = null;
+        for (List<String> row : currentData.rows()) {
+            if (want.equals(nameOfRow(row))) {
+                table.getSelectionModel().select(row);
+                table.scrollTo(row);
+                showDetails(row, kindHasEvents(currentKind) ? eventsTab : yamlTab);
+                return;
+            }
+        }
+        // Not in the table (e.g. filtered out or already gone) — still open details by name.
+        openDetails(currentKind, want, null, kindHasEvents(currentKind) ? eventsTab : yamlTab);
     }
 
     private Node overviewEventLine(List<String> row, List<String> cols) {
@@ -3813,8 +3853,38 @@ public class MainView extends BorderPane {
         body.getStyleClass().add("muted");
         body.setWrapText(true);
         VBox box = new VBox(1, head, body);
-        box.getStyleClass().add("overview-row");
+        box.getStyleClass().addAll("overview-row", "overview-row-warn");
+        // Deep-link to the event's object (Pod/Deployment/…), like the unhealthy-pods list. When the
+        // object isn't a kind KubeDesk browses, fall back to the full Events view.
+        String object = cell(row, cols, "Object"); // "Kind/name"
+        int slash = object.indexOf('/');
+        String objName = slash >= 0 ? object.substring(slash + 1) : object;
+        ResourceKind rk = slash > 0 ? resourceKindForEventKind(object.substring(0, slash)) : null;
+        if (rk != null && !objName.isBlank()) {
+            box.setOnMouseClicked(e -> openInResourceView(rk, objName));
+        } else {
+            box.setOnMouseClicked(e -> enterEvents());
+        }
         return box;
+    }
+
+    /** Map an event involvedObject Kind ("Pod", "Deployment", …) to a browsable kind; null if none. */
+    private static ResourceKind resourceKindForEventKind(String kind) {
+        return switch (kind) {
+            case "Pod" -> ResourceKind.PODS;
+            case "Deployment" -> ResourceKind.DEPLOYMENTS;
+            case "StatefulSet" -> ResourceKind.STATEFULSETS;
+            case "DaemonSet" -> ResourceKind.DAEMONSETS;
+            case "Job" -> ResourceKind.JOBS;
+            case "CronJob" -> ResourceKind.CRONJOBS;
+            case "Service" -> ResourceKind.SERVICES;
+            case "Ingress" -> ResourceKind.INGRESSES;
+            case "ConfigMap" -> ResourceKind.CONFIGMAPS;
+            case "Secret" -> ResourceKind.SECRETS;
+            case "PersistentVolumeClaim" -> ResourceKind.PVCS;
+            case "Node" -> ResourceKind.NODES;
+            default -> null;
+        };
     }
 
     /** The value of a named column in a (columns, row) pair, case-insensitive; "" if absent. */

@@ -3,6 +3,21 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.13.1] - 2026-10-31
+
+### Changed
+- **Toolbar: search + actions pinned right.** The top bar now keeps cluster identity and the
+  Context/Namespace selectors on the left (still wrapping on a narrow window) and right-aligns Search,
+  refresh, the live toggle, port-forwards, and the ☰ menu.
+- **Overview lists are clickable deep-links.** Clicking an **Unhealthy pod** — or a **Warning event**'s
+  object — jumps to that resource's list with the row selected and its details open (Events tab). A
+  warning event whose object isn't a browsable kind falls back to the full Events view.
+- **Overview row accents.** Each Overview row gets a colored left bar so the lists are distinct at a
+  glance: red for unhealthy pods, amber for warning events, neutral for nodes.
+
+### Fixed
+- Warning-event rows showed a clickable (hand) cursor but did nothing — they now deep-link.
+
 ## [1.13.0] - 2026-10-31
 
 ### Added
