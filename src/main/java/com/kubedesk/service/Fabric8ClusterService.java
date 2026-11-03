@@ -1164,6 +1164,117 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     @Override
+    public Dtos.WorkloadRef ownerWorkload(String context, String namespace, String podName) {
+        try (KubernetesClient client = clientFor(context)) {
+            Pod p = client.pods().inNamespace(namespace).withName(podName).get();
+            if (p == null || p.getMetadata() == null || p.getMetadata().getOwnerReferences() == null
+                    || p.getMetadata().getOwnerReferences().isEmpty()) {
+                return null;
+            }
+            var refs = p.getMetadata().getOwnerReferences();
+            var ctrl = refs.stream()
+                    .filter(r -> Boolean.TRUE.equals(r.getController()))
+                    .findFirst()
+                    .orElse(refs.get(0));
+            switch (ctrl.getKind()) {
+                case "ReplicaSet" -> {
+                    // Pods of a Deployment are owned by a ReplicaSet; hop up to the Deployment so we
+                    // land on a view the sidebar actually has (there's no ReplicaSet view).
+                    var rs = client.apps().replicaSets().inNamespace(namespace)
+                            .withName(ctrl.getName()).get();
+                    if (rs != null && rs.getMetadata() != null
+                            && rs.getMetadata().getOwnerReferences() != null) {
+                        var dep = rs.getMetadata().getOwnerReferences().stream()
+                                .filter(o -> "Deployment".equals(o.getKind()))
+                                .findFirst().orElse(null);
+                        if (dep != null) {
+                            return new Dtos.WorkloadRef(ResourceKind.DEPLOYMENTS, dep.getName());
+                        }
+                    }
+                    return null; // bare ReplicaSet — nothing browsable to jump to
+                }
+                case "StatefulSet" -> {
+                    return new Dtos.WorkloadRef(ResourceKind.STATEFULSETS, ctrl.getName());
+                }
+                case "DaemonSet" -> {
+                    return new Dtos.WorkloadRef(ResourceKind.DAEMONSETS, ctrl.getName());
+                }
+                case "Job" -> {
+                    return new Dtos.WorkloadRef(ResourceKind.JOBS, ctrl.getName());
+                }
+                default -> {
+                    return null;
+                }
+            }
+        } catch (Exception e) {
+            throw new ClusterException("Could not resolve pod owner: " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public List<String> servicesForPod(String context, String namespace, String podName) {
+        try (KubernetesClient client = clientFor(context)) {
+            Pod p = client.pods().inNamespace(namespace).withName(podName).get();
+            if (p == null || p.getMetadata() == null) {
+                return List.of();
+            }
+            Map<String, String> labels = p.getMetadata().getLabels();
+            List<String> out = new ArrayList<>();
+            for (Service s : client.services().inNamespace(namespace).list().getItems()) {
+                Map<String, String> sel = s.getSpec() != null ? s.getSpec().getSelector() : null;
+                if (sel != null && !sel.isEmpty() && selectorMatches(sel, labels)) {
+                    out.add(s.getMetadata().getName());
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            throw new ClusterException("Could not match services: " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public List<String> podsForWorkload(String context, String namespace, ResourceKind kind, String name) {
+        try (KubernetesClient client = clientFor(context)) {
+            Map<String, String> selector = switch (kind) {
+                case DEPLOYMENTS -> {
+                    var d = client.apps().deployments().inNamespace(namespace).withName(name).get();
+                    yield d != null && d.getSpec() != null && d.getSpec().getSelector() != null
+                            ? d.getSpec().getSelector().getMatchLabels() : null;
+                }
+                case STATEFULSETS -> {
+                    var s = client.apps().statefulSets().inNamespace(namespace).withName(name).get();
+                    yield s != null && s.getSpec() != null && s.getSpec().getSelector() != null
+                            ? s.getSpec().getSelector().getMatchLabels() : null;
+                }
+                case DAEMONSETS -> {
+                    var ds = client.apps().daemonSets().inNamespace(namespace).withName(name).get();
+                    yield ds != null && ds.getSpec() != null && ds.getSpec().getSelector() != null
+                            ? ds.getSpec().getSelector().getMatchLabels() : null;
+                }
+                case JOBS -> {
+                    var j = client.batch().v1().jobs().inNamespace(namespace).withName(name).get();
+                    yield j != null && j.getSpec() != null && j.getSpec().getSelector() != null
+                            ? j.getSpec().getSelector().getMatchLabels() : null;
+                }
+                default -> null;
+            };
+            if (selector == null || selector.isEmpty()) {
+                return List.of();
+            }
+            List<String> out = new ArrayList<>();
+            for (Pod p : client.pods().inNamespace(namespace).list().getItems()) {
+                Map<String, String> labels = p.getMetadata() != null ? p.getMetadata().getLabels() : null;
+                if (selectorMatches(selector, labels)) {
+                    out.add(p.getMetadata().getName());
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            throw new ClusterException("Could not list workload pods: " + rootMessage(e), e);
+        }
+    }
+
+    @Override
     public List<HealthFinding> healthCheck(String context, String namespace) {
         try (KubernetesClient client = clientFor(context)) {
             List<HealthFinding> f = new ArrayList<>();

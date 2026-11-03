@@ -19,6 +19,7 @@ import com.kubedesk.update.UpdateService;
 import com.kubedesk.util.YamlLint;
 import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
+import com.kubedesk.service.Dtos.WorkloadRef;
 import com.kubedesk.service.ResourceKind;
 import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
@@ -43,6 +44,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckMenuItem;
+import javafx.scene.control.ChoiceDialog;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Dialog;
@@ -248,6 +250,14 @@ public class MainView extends BorderPane {
     private ResourceKind currentKind = ResourceKind.PODS;
     /** A resource name to select + open once the next resource-table load finishes (deep-link from Overview). */
     private String pendingSelectName;
+
+    // "Show pods" workload filter: when set, the Pods table shows only these pod names (a snapshot
+    // taken when the user picked "Show pods" on a workload). A dismissible bar above the table makes
+    // it visible and clearable. Cleared whenever the user navigates to a kind or changes namespace.
+    private Set<String> workloadPodFilter;
+    private String workloadFilterLabel; // e.g. "Deployment web", for the filter bar
+    private final HBox filterBar = new HBox(8);
+    private final Label filterBarLabel = new Label();
 
     // "Search all listed namespaces" mode: a sentinel entry in the namespace dropdown. In this mode
     // the table gains a leading Namespace column, is read-only (view YAML only), and has no live watch.
@@ -1507,7 +1517,13 @@ public class MainView extends BorderPane {
         healthRing.setPadding(new Insets(4, 0, 8, 0));
 
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        // Pin the row height so rows paint at their final size immediately instead of being
+        // measured from cell content (which made chip rows grow taller after a refresh/screen
+        // change). Only affects vertical size — column widths and names are unaffected.
+        table.setFixedCellSize(30);
         table.setPlaceholder(new Label("No resources to display."));
+
+        buildFilterBar();
         table.setRowFactory(tv -> buildRow());
         // The "+" button at the top-right of the header lets the user show/hide any column.
         table.setTableMenuButtonVisible(true);
@@ -1532,7 +1548,7 @@ public class MainView extends BorderPane {
         overviewView.setManaged(false);
         VBox.setVgrow(overviewView, Priority.ALWAYS);
 
-        VBox content = new VBox(12, contentTitle, healthRing, table, topologyView, healthView,
+        VBox content = new VBox(12, contentTitle, healthRing, filterBar, table, topologyView, healthView,
                 eventsView, overviewView);
         content.setPadding(new Insets(16));
         content.getStyleClass().add("content");
@@ -1550,6 +1566,38 @@ public class MainView extends BorderPane {
         box.setPadding(new Insets(6, 16, 6, 16));
         box.getStyleClass().add("status-bar");
         return box;
+    }
+
+    /** The "Showing pods of …" bar above the table; hidden until a workload-pod filter is active. */
+    private void buildFilterBar() {
+        filterBarLabel.getStyleClass().add("filter-bar-label");
+        Button clear = new Button("Clear");
+        clear.getStyleClass().add("filter-bar-clear");
+        clear.setOnAction(e -> {
+            clearWorkloadFilter();
+            applyFilter();
+        });
+        filterBar.setAlignment(Pos.CENTER_LEFT);
+        filterBar.getStyleClass().add("filter-bar");
+        filterBar.getChildren().setAll(filterBarLabel, clear);
+        filterBar.setVisible(false);
+        filterBar.setManaged(false);
+    }
+
+    private void updateFilterBar() {
+        boolean active = workloadPodFilter != null;
+        filterBar.setVisible(active);
+        filterBar.setManaged(active);
+        if (active) {
+            filterBarLabel.setText("Showing pods of " + workloadFilterLabel);
+        }
+    }
+
+    /** Drop any active "Show pods" workload filter (does not re-render — caller applies the filter). */
+    private void clearWorkloadFilter() {
+        workloadPodFilter = null;
+        workloadFilterLabel = null;
+        updateFilterBar();
     }
 
     // --- row interactions (context menu + double-click) -------------------------------------
@@ -1573,6 +1621,16 @@ public class MainView extends BorderPane {
         MenuItem portForward = new MenuItem("Port forward…");
         portForward.setOnAction(e -> openPortForwardDialog(resourceName(row.getItem())));
 
+        // Navigation: pod → its controller / Service, and workload → its pods.
+        MenuItem goToOwner = new MenuItem("Go to controller");
+        goToOwner.setOnAction(e -> goToOwnerAction(resourceName(row.getItem())));
+
+        MenuItem goToService = new MenuItem("Go to Service");
+        goToService.setOnAction(e -> goToServiceAction(resourceName(row.getItem())));
+
+        MenuItem showPods = new MenuItem("Show pods");
+        showPods.setOnAction(e -> showPodsForWorkload(currentKind, resourceName(row.getItem())));
+
         MenuItem copyName = new MenuItem("Copy name");
         copyName.setOnAction(e -> copyToClipboard(resourceName(row.getItem())));
 
@@ -1594,6 +1652,7 @@ public class MainView extends BorderPane {
         delete.setOnAction(e -> deleteAction(currentKind, resourceName(row.getItem())));
 
         ContextMenu menu = new ContextMenu(details, yaml, events, logs, portForward,
+                goToOwner, goToService, showPods,
                 new SeparatorMenuItem(), copyName, copyYaml,
                 new SeparatorMenuItem(), restart, restartPod, scale, delete);
         menu.setOnShowing(e -> {
@@ -1602,6 +1661,13 @@ public class MainView extends BorderPane {
             logs.setVisible(isPod);
             portForward.setVisible(isPod);
             events.setVisible(kindHasEvents(currentKind));
+            // Pod → controller/Service navigation; workload → its pods.
+            goToOwner.setVisible(isPod);
+            goToService.setVisible(isPod);
+            showPods.setVisible(currentKind == ResourceKind.DEPLOYMENTS
+                    || currentKind == ResourceKind.STATEFULSETS
+                    || currentKind == ResourceKind.DAEMONSETS
+                    || currentKind == ResourceKind.JOBS);
             boolean isDeployment = currentKind == ResourceKind.DEPLOYMENTS;
             restart.setVisible(isDeployment);
             scale.setVisible(isDeployment);
@@ -3173,6 +3239,8 @@ public class MainView extends BorderPane {
 
     /** Called when the user changes context/namespace/kind: reload data and (re)start the watch. */
     private void onSelectionChanged() {
+        // A context/namespace/kind change invalidates any "Show pods" snapshot.
+        clearWorkloadFilter();
         ContextInfo c = contextBox.getValue();
         String ns = namespaceBox.getValue();
         boolean sentinel = ALL_NAMESPACES.equals(ns);
@@ -3265,6 +3333,9 @@ public class MainView extends BorderPane {
 
     /** Switch to a resource-kind table view (also used by topology/health node clicks). */
     private void selectKind(ResourceKind kind) {
+        // Navigating to a kind clears any "Show pods" filter; showPodsForWorkload() re-sets it
+        // immediately after calling this, before the async pod load delivers data to applyFilter().
+        clearWorkloadFilter();
         currentKind = kind;
         contentTitle.setText(kind.label());
         ToggleButton btn = navButtons.get(kind);
@@ -3367,6 +3438,7 @@ public class MainView extends BorderPane {
         controls.setAlignment(Pos.CENTER_LEFT);
 
         healthTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        healthTable.setFixedCellSize(30); // see note on `table`: stable row height, no content re-measure
         healthTable.setPlaceholder(new Label("No issues found ✓"));
         VBox.setVgrow(healthTable, Priority.ALWAYS);
 
@@ -3827,6 +3899,79 @@ public class MainView extends BorderPane {
         selectKind(kind); // sets the view + triggers an async table load; applyPendingSelection runs after
     }
 
+    /** Pod menu: jump to the workload that owns this pod (Deployment/StatefulSet/DaemonSet/Job). */
+    private void goToOwnerAction(String podName) {
+        ContextInfo ctx = contextBox.getValue();
+        String ns = effectiveNamespace();
+        if (ctx == null || podName == null || podName.isBlank() || ns == null || ns.isBlank()) {
+            return;
+        }
+        runAsync(() -> service.ownerWorkload(ctx.name(), ns, podName), ref -> {
+            if (ref == null) {
+                status("“" + podName + "” has no controller to jump to (it's a bare pod).");
+            } else {
+                openInResourceView(ref.kind(), ref.name());
+            }
+        });
+    }
+
+    /** Pod menu: jump to the Service(s) whose selector matches this pod's labels. */
+    private void goToServiceAction(String podName) {
+        ContextInfo ctx = contextBox.getValue();
+        String ns = effectiveNamespace();
+        if (ctx == null || podName == null || podName.isBlank() || ns == null || ns.isBlank()) {
+            return;
+        }
+        runAsync(() -> service.servicesForPod(ctx.name(), ns, podName), svcs -> {
+            if (svcs == null || svcs.isEmpty()) {
+                status("No Service selects “" + podName + "”.");
+            } else if (svcs.size() == 1) {
+                openInResourceView(ResourceKind.SERVICES, svcs.get(0));
+            } else {
+                ChoiceDialog<String> dlg = new ChoiceDialog<>(svcs.get(0), svcs);
+                dlg.setTitle("Go to Service");
+                dlg.setHeaderText(svcs.size() + " services select this pod");
+                dlg.setContentText("Service:");
+                if (getScene() != null) {
+                    dlg.initOwner(getScene().getWindow());
+                }
+                dlg.showAndWait().ifPresent(s -> openInResourceView(ResourceKind.SERVICES, s));
+            }
+        });
+    }
+
+    /** Workload menu: switch to Pods filtered to just the pods this workload owns (its label selector). */
+    private void showPodsForWorkload(ResourceKind kind, String name) {
+        ContextInfo ctx = contextBox.getValue();
+        String ns = effectiveNamespace();
+        if (ctx == null || name == null || name.isBlank()) {
+            return;
+        }
+        if (ns == null || ns.isBlank()) {
+            status("Pick a namespace first to list a workload's pods.");
+            return;
+        }
+        status("Finding pods of " + singularKind(kind) + " " + name + "…");
+        runAsync(() -> service.podsForWorkload(ctx.name(), ns, kind, name), names -> {
+            if (names == null || names.isEmpty()) {
+                status(singularKind(kind) + " “" + name + "” has no matching pods.");
+                return;
+            }
+            selectKind(ResourceKind.PODS); // clears any prior filter, starts the async pod load
+            // Set the snapshot AFTER selectKind so it survives for the pending async load's applyFilter.
+            workloadPodFilter = new HashSet<>(names);
+            workloadFilterLabel = singularKind(kind) + " " + name;
+            updateFilterBar();
+            applyFilter();
+        });
+    }
+
+    /** The singular display name for a workload kind, for filter-bar text (e.g. "Deployments" → "Deployment"). */
+    private String singularKind(ResourceKind kind) {
+        String label = kind.label();
+        return label.endsWith("s") ? label.substring(0, label.length() - 1) : label;
+    }
+
     /** After a resource-table load, honor a pending deep-link: select the row and reveal its details. */
     private void applyPendingSelection() {
         if (pendingSelectName == null) {
@@ -3911,6 +4056,7 @@ public class MainView extends BorderPane {
         controls.setAlignment(Pos.CENTER_LEFT);
 
         nsEventsTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        nsEventsTable.setFixedCellSize(30); // see note on `table`: stable row height, no content re-measure
         nsEventsTable.setPlaceholder(new Label("No events (Kubernetes keeps them for only ~1 hour)."));
         VBox.setVgrow(nsEventsTable, Priority.ALWAYS);
 
@@ -4370,14 +4516,15 @@ public class MainView extends BorderPane {
     /** Client-side filter across all columns of the current data. */
     private void applyFilter() {
         String q = searchField.getText() == null ? "" : searchField.getText().trim().toLowerCase();
-        if (q.isEmpty()) {
-            table.setItems(FXCollections.observableArrayList(currentData.rows()));
-            return;
+        java.util.stream.Stream<List<String>> rows = currentData.rows().stream();
+        // "Show pods" workload filter (a snapshot of owned pod names), ANDed with the text search.
+        if (workloadPodFilter != null) {
+            rows = rows.filter(row -> workloadPodFilter.contains(nameOfRow(row)));
         }
-        List<List<String>> filtered = currentData.rows().stream()
-                .filter(row -> row.stream().anyMatch(c -> c != null && c.toLowerCase().contains(q)))
-                .toList();
-        table.setItems(FXCollections.observableArrayList(filtered));
+        if (!q.isEmpty()) {
+            rows = rows.filter(row -> row.stream().anyMatch(c -> c != null && c.toLowerCase().contains(q)));
+        }
+        table.setItems(FXCollections.observableArrayList(rows.toList()));
     }
 
     // --- async plumbing ---------------------------------------------------------------------

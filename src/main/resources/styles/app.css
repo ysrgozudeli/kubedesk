@@ -508,6 +508,25 @@
     -fx-text-fill: #6b7280;
 }
 
+/* ---- "Show pods" workload filter bar ---- */
+.filter-bar {
+    -fx-background-color: #eef2ff;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-border-color: #c7d2fe;
+    -fx-border-width: 1;
+    -fx-padding: 5 10 5 12;
+}
+.filter-bar-label {
+    -fx-font-size: 12px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #3730a3;
+}
+.filter-bar-clear {
+    -fx-font-size: 11px;
+    -fx-padding: 2 10 2 10;
+}
+
 /* ---- status chips ---- */
 .chip {
     -fx-alignment: center;

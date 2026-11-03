@@ -69,6 +69,22 @@ public interface ClusterService {
     HealthSummary podHealth(String context, String namespace);
 
     /**
+     * The top-level workload that owns a pod, by following ownerReferences up the controller chain
+     * (ReplicaSet → Deployment, or a StatefulSet/DaemonSet/Job owner directly). Returns {@code null}
+     * for a bare pod or one whose owner isn't a browsable workload (e.g. a stray ReplicaSet).
+     */
+    Dtos.WorkloadRef ownerWorkload(String context, String namespace, String podName);
+
+    /** Names of the Services whose selector matches a pod's labels (may be empty). */
+    List<String> servicesForPod(String context, String namespace, String podName);
+
+    /**
+     * Names of the pods selected by a workload's pod label selector (what {@code kubectl get pods -l}
+     * would return). Supports Deployment/StatefulSet/DaemonSet/Job; other kinds return an empty list.
+     */
+    List<String> podsForWorkload(String context, String namespace, ResourceKind kind, String name);
+
+    /**
      * List all events in a namespace (the practical "namespace log"), most-recent first, as
      * table-shaped data: Type, Reason, Object, Count, Last Seen, Message.
      */

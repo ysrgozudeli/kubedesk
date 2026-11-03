@@ -19,6 +19,14 @@ public final class Dtos {
     public record ContextInfo(String name, String cluster, String user, String namespace, boolean current) {
     }
 
+    /**
+     * A navigable workload reference (kind + name) — e.g. the Deployment that ultimately owns a pod,
+     * resolved by following ownerReferences (Pod → ReplicaSet → Deployment, or straight to a
+     * StatefulSet/DaemonSet/Job). Used to deep-link from a pod to its controller.
+     */
+    public record WorkloadRef(ResourceKind kind, String name) {
+    }
+
     /** A point-in-time resource usage sample for a pod (summed across its containers). */
     public record MetricSample(double cpuMillicores, double memoryMiB) {
     }
