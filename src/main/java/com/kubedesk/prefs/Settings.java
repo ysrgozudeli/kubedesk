@@ -56,6 +56,9 @@ public class Settings {
     public List<String> hiddenClusters = new ArrayList<>();
     public boolean clusterRailCollapsed = false;
 
+    /** User-defined rail order (context names, top→bottom). Clusters not listed fall to the end in kube.conf order. */
+    public List<String> clusterOrder = new ArrayList<>();
+
     /** A saved port-forward. */
     public record PortForwardPref(String context, String namespace, String pod,
                                   int remotePort, int localPort) {

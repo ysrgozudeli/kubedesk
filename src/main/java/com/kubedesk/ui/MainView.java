@@ -72,6 +72,8 @@ import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.Dragboard;
+import javafx.scene.input.TransferMode;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
@@ -1141,7 +1143,7 @@ public class MainView extends BorderPane {
         clusterRail.getChildren().clear();
         ContextInfo current = contextBox.getValue();
         int hidden = 0;
-        for (ContextInfo c : allClusters) {
+        for (ContextInfo c : orderedClusters()) {
             if (settings.hiddenClusters.contains(c.name())) {
                 hidden++;
                 continue;
@@ -1154,7 +1156,7 @@ public class MainView extends BorderPane {
             }
             String env = effectiveEnvironment(c.name());
             avatar.setTooltip(new Tooltip(c.name() + (env != null && !env.isBlank() ? "  ·  " + env : "")
-                    + "\n(click to switch · right-click to edit)"));
+                    + "\n(click to switch · drag to reorder · right-click to edit)"));
             // Left-click: switch the whole UI to this cluster and show its Overview.
             avatar.setOnMouseClicked(e -> {
                 if (e.getButton() == MouseButton.PRIMARY) {
@@ -1166,6 +1168,7 @@ public class MainView extends BorderPane {
                 openClusterDialog(c);
                 e.consume();
             });
+            enableClusterReorder(avatar, c);
             clusterRail.getChildren().add(avatar);
         }
         if (hidden > 0) {
@@ -1196,6 +1199,88 @@ public class MainView extends BorderPane {
             clusterRail.getChildren().add(more);
         }
         updateChrome();
+    }
+
+    /**
+     * {@link #allClusters} sorted by the user's saved rail order ({@code settings.clusterOrder}).
+     * Clusters not in that list fall to the end, keeping their original kube.conf order.
+     */
+    private List<ContextInfo> orderedClusters() {
+        List<String> order = settings.clusterOrder;
+        List<ContextInfo> out = new ArrayList<>(allClusters);
+        out.sort((a, b) -> {
+            int ia = order.indexOf(a.name());
+            int ib = order.indexOf(b.name());
+            if (ia < 0) {
+                ia = Integer.MAX_VALUE;
+            }
+            if (ib < 0) {
+                ib = Integer.MAX_VALUE;
+            }
+            if (ia != ib) {
+                return Integer.compare(ia, ib);
+            }
+            // Both unlisted (or a tie): preserve the aggregated kube.conf order.
+            return Integer.compare(allClusters.indexOf(a), allClusters.indexOf(b));
+        });
+        return out;
+    }
+
+    /** Make a rail avatar draggable so the user can reorder clusters; the new order persists. */
+    private void enableClusterReorder(Label avatar, ContextInfo c) {
+        avatar.setOnDragDetected(e -> {
+            Dragboard db = avatar.startDragAndDrop(TransferMode.MOVE);
+            ClipboardContent content = new ClipboardContent();
+            content.putString(c.name());
+            db.setContent(content);
+            db.setDragView(avatar.snapshot(null, null));
+            e.consume();
+        });
+        avatar.setOnDragOver(e -> {
+            if (e.getGestureSource() != avatar && e.getDragboard().hasString()) {
+                e.acceptTransferModes(TransferMode.MOVE);
+            }
+            e.consume();
+        });
+        avatar.setOnDragEntered(e -> {
+            if (e.getGestureSource() != avatar && e.getDragboard().hasString()) {
+                avatar.getStyleClass().add("cluster-avatar-drop");
+            }
+        });
+        avatar.setOnDragExited(e -> avatar.getStyleClass().remove("cluster-avatar-drop"));
+        avatar.setOnDragDropped(e -> {
+            Dragboard db = e.getDragboard();
+            boolean done = false;
+            if (db.hasString()) {
+                boolean after = e.getY() > avatar.getHeight() / 2;
+                moveClusterRelativeTo(db.getString(), c.name(), after);
+                done = true;
+            }
+            e.setDropCompleted(done);
+            e.consume();
+        });
+    }
+
+    /** Reorder the rail so {@code dragged} sits just before/after {@code target}, then persist and redraw. */
+    private void moveClusterRelativeTo(String dragged, String target, boolean after) {
+        if (dragged == null || dragged.equals(target)) {
+            return;
+        }
+        List<String> names = new ArrayList<>();
+        for (ContextInfo c : orderedClusters()) {
+            names.add(c.name());
+        }
+        names.remove(dragged);
+        int idx = names.indexOf(target);
+        if (idx < 0) {
+            idx = names.size();
+        } else if (after) {
+            idx++;
+        }
+        names.add(Math.min(idx, names.size()), dragged);
+        settings.clusterOrder = names;
+        settingsStore.save(settings);
+        refreshClusterRail();
     }
 
     /** Keep the empty-state "Load kube.conf…" button and the top accent strip in sync with state. */

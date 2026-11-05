@@ -162,6 +162,13 @@
     -fx-border-width: 2.5;
     -fx-border-radius: 13;
 }
+.cluster-avatar-drop {
+    -fx-opacity: 1;
+    -fx-border-color: -color-accent-emphasis, #2f81f7;
+    -fx-border-width: 2.5;
+    -fx-border-radius: 13;
+    -fx-border-style: dashed;
+}
 .cluster-add {
     -fx-min-width: 42;
     -fx-min-height: 42;
