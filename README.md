@@ -286,12 +286,13 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.15.0**: 12 resource kinds, live watches, details panel (exec + logs + live
+Shipped through **v1.16.0**: 12 resource kinds, live watches, details panel (exec + logs + live
 metrics), pod diagnostics, live log follow + detachable log windows, management actions (incl. pod
 restart), Create/Apply with lint + dry-run, port-forwarding, topology view, health scan, Events view,
 a read-only **Helm releases** view with a revision diff, an Overview dashboard with cluster capacity +
-per-node usage, embedded kubectl console, a command palette, the experimental read-only **MCP server
-with a live UI mirror**, and cross-platform native packaging.
+per-node usage + **live CPU/memory charts**, a **Settings** dialog, embedded kubectl console, a command
+palette, the experimental read-only **MCP server with a live UI mirror**, and cross-platform native
+packaging.
 
 Candidate next:
 - **MCP server — write actions.** The read-only server and its live UI mirror already exist

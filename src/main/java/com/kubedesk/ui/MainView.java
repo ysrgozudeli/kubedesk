@@ -254,6 +254,26 @@ public class MainView extends BorderPane {
     private String metricsPod;
     private String metricsNs;
 
+    // Overview live cluster metrics (CPU demand + memory), polled from clusterCapacity while the
+    // Overview is open. Sample model {epochSeconds, cpuMillicores, memMiB} is the source of truth for
+    // both charts and the optional on-disk history.
+    private final XYChart.Series<Number, Number> clusterCpuSeries = new XYChart.Series<>();
+    private final XYChart.Series<Number, Number> clusterMemSeries = new XYChart.Series<>();
+    private LineChart<Number, Number> clusterCpuChart;
+    private LineChart<Number, Number> clusterMemChart;
+    private final VBox overviewMetricsBox = new VBox(10);
+    private final Label overviewMetricsHint = new Label();
+    private final List<double[]> clusterSamples = new ArrayList<>();
+    private Timeline overviewMetricsTimeline;
+    private String overviewMetricsContext;
+    private int overviewMetricsSaveTick;
+    // Chart X values are plotted as seconds RELATIVE to this base epoch (kept small). Plotting raw
+    // epoch seconds (~1.7e9) on a JavaFX NumberAxis makes its tick loop lose float precision and spin
+    // the CPU. The tick formatter adds the base back to show wall-clock HH:mm.
+    private long metricsBaseEpochSec;
+    private final com.kubedesk.prefs.MetricsHistoryStore metricsHistoryStore =
+            new com.kubedesk.prefs.MetricsHistoryStore();
+
     // Logs view controls
     private final ComboBox<String> containerBox = new ComboBox<>();
     private final ComboBox<Integer> tailBox = new ComboBox<>();
@@ -757,12 +777,17 @@ public class MainView extends BorderPane {
         MenuItem mcpServerItem = new MenuItem("MCP server…");
         mcpServerItem.setOnAction(e -> McpServerPanel.show(getScene() == null ? null : getScene().getWindow(),
                 mcpServer(), settings, () -> pool.submit(() -> settingsStore.save(settings))));
+        MenuItem settingsItem = new MenuItem("Settings…");
+        settingsItem.setOnAction(e -> SettingsPanel.show(
+                getScene() == null ? null : getScene().getWindow(), settings,
+                () -> pool.submit(() -> settingsStore.save(settings)),
+                this::applyOverviewMetricsSettings));
         MenuItem checkUpdates = new MenuItem("Check for updates…");
         checkUpdates.setOnAction(e -> checkForUpdates(true));
         MenuItem about = new MenuItem("About KubeDesk");
         about.setOnAction(e -> showAboutDialog());
-        appMenu.getItems().setAll(consoleMenuItem, mcpServerItem, new SeparatorMenuItem(), checkUpdates,
-                new SeparatorMenuItem(), about);
+        appMenu.getItems().setAll(consoleMenuItem, mcpServerItem, settingsItem,
+                new SeparatorMenuItem(), checkUpdates, new SeparatorMenuItem(), about);
 
         liveLabel.getStyleClass().add("live-indicator");
         pauseButton.getStyleClass().add("live-toggle");
@@ -3544,6 +3569,9 @@ public class MainView extends BorderPane {
         overviewView.setManaged(mode == ViewMode.OVERVIEW);
         helmView.setVisible(mode == ViewMode.HELM);
         helmView.setManaged(mode == ViewMode.HELM);
+        if (mode != ViewMode.OVERVIEW) {
+            stopOverviewMetrics();
+        }
     }
 
     private void loadTopology() {
@@ -3717,13 +3745,181 @@ public class MainView extends BorderPane {
         HBox.setHgrow(nodesCol, Priority.ALWAYS);
         HBox topRow = new HBox(24, capacityCol, nodesCol);
 
-        VBox lists = new VBox(14, topRow, unhealthyHeader, overviewUnhealthyBox, eventsHeader, overviewEventsBox);
+        buildOverviewMetricsSection();
+
+        VBox lists = new VBox(14, overviewMetricsBox, topRow, unhealthyHeader, overviewUnhealthyBox,
+                eventsHeader, overviewEventsBox);
         ScrollPane scroll = new ScrollPane(lists);
         scroll.setFitToWidth(true);
         scroll.getStyleClass().add("overview-scroll");
         VBox.setVgrow(scroll, Priority.ALWAYS);
 
         overviewView.getChildren().setAll(header, tiles, scroll);
+    }
+
+    // --- Overview live cluster metrics -------------------------------------------------------
+
+    private void buildOverviewMetricsSection() {
+        Label metricsHeader = new Label("Live infrastructure metrics");
+        metricsHeader.getStyleClass().add("overview-section");
+
+        clusterCpuChart = wallClockChart("Cluster CPU demand", "millicores", clusterCpuSeries);
+        clusterMemChart = wallClockChart("Memory allocation", "MiB", clusterMemSeries);
+        clusterCpuChart.setPrefHeight(200);
+        clusterMemChart.setPrefHeight(200);
+        clusterCpuChart.setMaxWidth(Double.MAX_VALUE);
+        clusterMemChart.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(clusterCpuChart, Priority.ALWAYS);
+        HBox.setHgrow(clusterMemChart, Priority.ALWAYS);
+        HBox charts = new HBox(24, clusterCpuChart, clusterMemChart);
+
+        overviewMetricsHint.getStyleClass().add("muted");
+        overviewMetricsHint.setWrapText(true);
+
+        overviewMetricsBox.getChildren().setAll(metricsHeader, charts, overviewMetricsHint);
+    }
+
+    private LineChart<Number, Number> wallClockChart(String title, String yLabel,
+                                                     XYChart.Series<Number, Number> series) {
+        NumberAxis x = new NumberAxis();
+        x.setForceZeroInRange(false);
+        x.setAnimated(false);
+        x.setMinorTickVisible(false);
+        x.setTickLabelFormatter(new javafx.util.StringConverter<>() {
+            private final java.time.format.DateTimeFormatter fmt =
+                    java.time.format.DateTimeFormatter.ofPattern("HH:mm");
+
+            @Override
+            public String toString(Number v) {
+                return java.time.Instant.ofEpochSecond(v.longValue() + metricsBaseEpochSec)
+                        .atZone(java.time.ZoneId.systemDefault()).format(fmt);
+            }
+
+            @Override
+            public Number fromString(String s) {
+                return null;
+            }
+        });
+        NumberAxis y = new NumberAxis();
+        y.setLabel(yLabel);
+        y.setForceZeroInRange(true);
+        y.setAnimated(false);
+        y.setMinorTickVisible(false);
+        LineChart<Number, Number> chart = new LineChart<>(x, y);
+        chart.setTitle(title);
+        chart.setLegendVisible(false);
+        chart.setAnimated(false);
+        chart.setCreateSymbols(false);
+        chart.getData().add(series);
+        return chart;
+    }
+
+    /** Start polling if not already running for this context; re-entering the Overview won't churn it. */
+    private void startOverviewMetrics(String ctxName) {
+        startOverviewMetrics(ctxName, false);
+    }
+
+    /** Start (or restart) polling cluster CPU/memory while the Overview is open, honoring settings. */
+    private void startOverviewMetrics(String ctxName, boolean force) {
+        boolean on = settings.metricsChartsEnabled;
+        if (!force && on && overviewMetricsTimeline != null && ctxName != null
+                && ctxName.equals(overviewMetricsContext)) {
+            overviewMetricsBox.setVisible(true);
+            overviewMetricsBox.setManaged(true);
+            return; // already sampling this context — leave the running timer alone
+        }
+        stopOverviewMetrics();
+        overviewMetricsBox.setVisible(on);
+        overviewMetricsBox.setManaged(on);
+        if (!on || ctxName == null) {
+            return;
+        }
+        if (metricsBaseEpochSec == 0) {
+            metricsBaseEpochSec = System.currentTimeMillis() / 1000L;
+        }
+        if (!ctxName.equals(overviewMetricsContext)) {
+            clusterSamples.clear();
+            overviewMetricsContext = ctxName;
+        }
+        if (clusterSamples.isEmpty() && settings.metricsPersist) {
+            clusterSamples.addAll(metricsHistoryStore.load(ctxName));
+            trimClusterSamples();
+        }
+        rebuildClusterSeries();
+        overviewMetricsHint.setText("Live · sampling cluster-wide usage every "
+                + settings.metricsIntervalSeconds + "s (needs metrics-server).");
+        sampleClusterMetrics(ctxName); // first sample immediately
+        overviewMetricsTimeline = new Timeline(new KeyFrame(
+                Duration.seconds(settings.metricsIntervalSeconds), e -> sampleClusterMetrics(ctxName)));
+        overviewMetricsTimeline.setCycleCount(Timeline.INDEFINITE);
+        overviewMetricsTimeline.play();
+    }
+
+    private void stopOverviewMetrics() {
+        if (overviewMetricsTimeline != null) {
+            overviewMetricsTimeline.stop();
+            overviewMetricsTimeline = null;
+        }
+        if (settings.metricsPersist && overviewMetricsContext != null && !clusterSamples.isEmpty()) {
+            String ctx = overviewMetricsContext;
+            List<double[]> copy = new ArrayList<>(clusterSamples);
+            pool.submit(() -> metricsHistoryStore.save(ctx, copy));
+        }
+    }
+
+    /** Re-apply metrics settings to the running Overview (called when the Settings dialog changes them). */
+    private void applyOverviewMetricsSettings() {
+        if (currentView == ViewMode.OVERVIEW) {
+            ContextInfo ctx = contextBox.getValue();
+            startOverviewMetrics(ctx == null ? null : ctx.name(), true);
+        } else {
+            overviewMetricsBox.setVisible(settings.metricsChartsEnabled);
+            overviewMetricsBox.setManaged(settings.metricsChartsEnabled);
+        }
+    }
+
+    private void sampleClusterMetrics(String ctxName) {
+        runAsync(() -> service.clusterCapacity(ctxName), cap -> {
+            if (!ctxName.equals(overviewMetricsContext)) {
+                return; // context switched since this sample was requested
+            }
+            if (cap == null || !cap.metricsAvailable()) {
+                overviewMetricsHint.setText("No live metrics — metrics-server isn't available on this "
+                        + "cluster. (The charts need it; everything else still works.)");
+                return;
+            }
+            long nowSec = System.currentTimeMillis() / 1000L;
+            clusterSamples.add(new double[]{nowSec, cap.cpuUsedMillicores(), cap.memUsedMiB()});
+            trimClusterSamples();
+            rebuildClusterSeries();
+            overviewMetricsHint.setText("Live · sampling cluster-wide usage every "
+                    + settings.metricsIntervalSeconds + "s · showing the last "
+                    + windowLabel(settings.metricsWindowMinutes)
+                    + " (metrics-server keeps no history, so this builds up while the app is open).");
+            if (settings.metricsPersist && (++overviewMetricsSaveTick % 3 == 0)) {
+                List<double[]> copy = new ArrayList<>(clusterSamples);
+                pool.submit(() -> metricsHistoryStore.save(ctxName, copy));
+            }
+        });
+    }
+
+    private void trimClusterSamples() {
+        long cutoff = System.currentTimeMillis() / 1000L - settings.metricsWindowMinutes * 60L;
+        clusterSamples.removeIf(s -> s[0] < cutoff);
+    }
+
+    private void rebuildClusterSeries() {
+        clusterCpuSeries.getData().clear();
+        clusterMemSeries.getData().clear();
+        for (double[] s : clusterSamples) {
+            double x = s[0] - metricsBaseEpochSec; // relative seconds; small values keep the axis sane
+            clusterCpuSeries.getData().add(new XYChart.Data<>(x, s[1]));
+            clusterMemSeries.getData().add(new XYChart.Data<>(x, s[2]));
+        }
+    }
+
+    private static String windowLabel(int minutes) {
+        return minutes >= 60 ? (minutes / 60) + "h" : minutes + "m";
     }
 
     private void loadOverview() {
@@ -3755,6 +3951,8 @@ public class MainView extends BorderPane {
         String fileText = (src == null || sameFile(src, defaultKubeConfigFile()))
                 ? "default ~/.kube/config" : src.getAbsolutePath();
         ovMeta.setText("namespace: " + safeNamespace() + "    ·    " + fileText);
+
+        startOverviewMetrics(ctx.name());
 
         final int gen = ++overviewGen;
         tilePods.set("…", "");
@@ -4940,6 +5138,15 @@ public class MainView extends BorderPane {
         closeExec();
         stopLogStream();
         stopMetricsPolling();
+        // Stop the Overview metrics timer and persist synchronously (pool is about to be killed below,
+        // so an async save would be lost).
+        if (overviewMetricsTimeline != null) {
+            overviewMetricsTimeline.stop();
+            overviewMetricsTimeline = null;
+        }
+        if (settings.metricsPersist && overviewMetricsContext != null && !clusterSamples.isEmpty()) {
+            metricsHistoryStore.save(overviewMetricsContext, new ArrayList<>(clusterSamples));
+        }
         if (console != null) {
             console.shutdown();
         }

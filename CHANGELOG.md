@@ -3,6 +3,24 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.16.0] - 2026-11-07
+
+Adds live cluster metrics charts to the Overview, plus a Settings dialog to configure them.
+
+### Added
+- **Live infrastructure metrics on the Overview.** Two live line charts — **Cluster CPU demand** and
+  **Memory allocation** — poll the Metrics API while the Overview is open and build a rolling window
+  client-side (metrics-server keeps no history). Honest empty-state when metrics-server isn't present.
+- **Settings dialog** (**☰ → Settings…**). A home for app-wide preferences, starting with the metrics
+  charts: enable/disable, sample interval (5s/10s/30s), rolling window (5m/15m/1h), and an optional
+  **keep history across restarts** that persists samples to `~/.kubedesk` so the chart refills on
+  relaunch. Changes apply live.
+
+### Fixed
+- **High CPU / fan spin from the new charts.** Plotting epoch timestamps directly on a JavaFX
+  `NumberAxis` made it thrash tick/layout every frame; the charts now plot relative time (wall-clock
+  labels reconstructed in the formatter) with minor ticks disabled.
+
 ## [1.15.0] - 2026-11-07
 
 Adds a read-only **Helm** view, plus two cross-cutting UX fixes.

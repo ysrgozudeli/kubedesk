@@ -59,6 +59,16 @@ public class Settings {
     /** User-defined rail order (context names, top→bottom). Clusters not listed fall to the end in kube.conf order. */
     public List<String> clusterOrder = new ArrayList<>();
 
+    /**
+     * Live cluster CPU/memory charts on the Overview. They poll the Metrics API while the Overview is
+     * open and build a rolling window client-side (metrics-server keeps no history). {@code persist}
+     * keeps the collected samples on disk so the chart refills after a restart.
+     */
+    public boolean metricsChartsEnabled = true;
+    public int metricsIntervalSeconds = 10;   // 5 / 10 / 30
+    public int metricsWindowMinutes = 15;      // 5 / 15 / 60
+    public boolean metricsPersist = false;
+
     /** A saved port-forward. */
     public record PortForwardPref(String context, String namespace, String pod,
                                   int remotePort, int localPort) {
