@@ -9,6 +9,7 @@ import com.kubedesk.service.Dtos.MetricSample;
 import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSeverity;
+import com.kubedesk.service.Dtos.HelmRelease;
 import com.kubedesk.service.Dtos.TopoNode;
 import com.kubedesk.prefs.Settings;
 import com.kubedesk.prefs.SettingsStore;
@@ -50,6 +51,7 @@ import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListView;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressBar;
@@ -161,7 +163,7 @@ public class MainView extends BorderPane {
     private final PauseTransition statusErrorClear = new PauseTransition(Duration.seconds(15));
 
     // Extra views (topology, health) live in the same center area as the resource table.
-    private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH, EVENTS, OVERVIEW }
+    private enum ViewMode { RESOURCE, TOPOLOGY, HEALTH, EVENTS, OVERVIEW, HELM }
 
     private ViewMode currentView = ViewMode.RESOURCE;
     private final Map<ResourceKind, ToggleButton> navButtons = new EnumMap<>(ResourceKind.class);
@@ -178,6 +180,35 @@ public class MainView extends BorderPane {
     private final VBox eventsView = new VBox(10);
     private final TableView<List<String>> nsEventsTable = new TableView<>();
     private final Label eventsSummary = new Label();
+
+    // Helm releases view: a master table of releases (latest revision each) + a tabbed detail panel
+    // (Overview / History / Values / Manifest / Notes), read straight from Helm's storage Secrets.
+    private final ToggleButton helmToggle = new ToggleButton("›  Releases");
+    private final VBox helmView = new VBox(10);
+    private final TableView<HelmRelease> helmTable = new TableView<>();
+    private final Label helmSummary = new Label();
+    private final TabPane helmTabs = new TabPane();
+    private final VBox helmOverviewBox = new VBox(6);
+    private final TableView<HelmRelease> helmHistoryTable = new TableView<>();
+    private final TextArea helmValuesArea = new TextArea();
+    private final TextArea helmManifestArea = new TextArea();
+    private final TextArea helmNotesArea = new TextArea();
+    private final Label helmDetailTitle = new Label();
+    // The full (unfiltered) release list backing the table, so the search box can re-filter in place.
+    private List<HelmRelease> helmAllReleases = List.of();
+    private SplitPane helmSplit;
+    private VBox helmDetailPane;
+    // Guards against a slow history fetch landing on the detail pane after the user picked another release.
+    private int helmDetailGen;
+
+    // "Changes" tab: diff two revisions. Plain-English settings diff on top (overview), raw manifest
+    // diff below (detail). Pickers default to "previous → latest" so you see the most recent change.
+    private final ComboBox<Integer> helmFromRev = new ComboBox<>();
+    private final ComboBox<Integer> helmToRev = new ComboBox<>();
+    private final VBox helmPlainDiffBox = new VBox(2);
+    private final ListView<String> helmManifestDiffList = new ListView<>();
+    private List<HelmRelease> helmHistoryList = List.of();
+    private boolean helmDiffSuppress; // suppress diff recompute while repopulating the pickers
 
     // Overview dashboard: stat tiles + unhealthy pods + warning events for the selected namespace.
     private final ToggleButton overviewToggle = new ToggleButton("›  Overview");
@@ -707,7 +738,7 @@ public class MainView extends BorderPane {
 
         searchField.setPromptText("Search…");
         searchField.setMinWidth(180);
-        searchField.textProperty().addListener((o, a, b) -> applyFilter());
+        searchField.textProperty().addListener((o, a, b) -> onSearchChanged());
 
         Button refresh = new Button("↻");
         refresh.getStyleClass().add("icon-button");
@@ -925,9 +956,9 @@ public class MainView extends BorderPane {
     // --- sidebar ----------------------------------------------------------------------------
 
     private Region buildSidebar() {
-        VBox nav = new VBox(4);
+        VBox nav = new VBox(2);
         nav.getStyleClass().add("sidebar");
-        nav.setPadding(new Insets(16, 8, 16, 8));
+        nav.setPadding(new Insets(6, 8, 10, 8));
         nav.setMinWidth(190);
 
         ToggleGroup group = new ToggleGroup();
@@ -1003,6 +1034,21 @@ public class MainView extends BorderPane {
         });
         nav.getChildren().add(eventsToggle);
 
+        // Helm gets its own section — releases aren't a Kubernetes API kind, and this keeps them out
+        // of the native-kinds list while reusing the same table + detail scaffolding.
+        Label helmSection = new Label("HELM");
+        helmSection.getStyleClass().add("nav-section");
+        nav.getChildren().add(helmSection);
+        helmToggle.setToggleGroup(group);
+        helmToggle.setMaxWidth(Double.MAX_VALUE);
+        helmToggle.getStyleClass().add("nav-item");
+        helmToggle.setOnAction(e -> {
+            if (helmToggle.isSelected()) {
+                enterHelm();
+            }
+        });
+        nav.getChildren().add(helmToggle);
+
         // Make the nav scrollable so a short window (e.g. a small VDI screen) shrinks/scrolls the
         // list instead of forcing the whole layout taller than the screen and hiding the status bar.
         ScrollPane scroll = new ScrollPane(nav);
@@ -1025,7 +1071,7 @@ public class MainView extends BorderPane {
         Label brand = new Label("KubeDesk");
         brand.getStyleClass().add("brand");
         VBox brandBox = new VBox(brand);
-        brandBox.setPadding(new Insets(14, 12, 8, 14));
+        brandBox.setPadding(new Insets(10, 12, 2, 14));
 
         VBox left = new VBox(brandBox, scroll, createBox);
         left.getStyleClass().add("sidebar-container");
@@ -1633,8 +1679,13 @@ public class MainView extends BorderPane {
         overviewView.setManaged(false);
         VBox.setVgrow(overviewView, Priority.ALWAYS);
 
+        buildHelmView();
+        helmView.setVisible(false);
+        helmView.setManaged(false);
+        VBox.setVgrow(helmView, Priority.ALWAYS);
+
         VBox content = new VBox(12, contentTitle, healthRing, filterBar, table, topologyView, healthView,
-                eventsView, overviewView);
+                eventsView, overviewView, helmView);
         content.setPadding(new Insets(16));
         content.getStyleClass().add("content");
         content.setMinWidth(320); // keep the table usable no matter how wide the details pane gets
@@ -3464,6 +3515,14 @@ public class MainView extends BorderPane {
         loadEvents();
     }
 
+    private void enterHelm() {
+        setCenterView(ViewMode.HELM);
+        helmToggle.setSelected(true);
+        closeDetails();
+        stopWatch();
+        loadHelm();
+    }
+
     /** Show exactly one of the resource table (+ring), the topology, health, or events view. */
     private void setCenterView(ViewMode mode) {
         currentView = mode;
@@ -3483,6 +3542,8 @@ public class MainView extends BorderPane {
         eventsView.setManaged(mode == ViewMode.EVENTS);
         overviewView.setVisible(mode == ViewMode.OVERVIEW);
         overviewView.setManaged(mode == ViewMode.OVERVIEW);
+        helmView.setVisible(mode == ViewMode.HELM);
+        helmView.setManaged(mode == ViewMode.HELM);
     }
 
     private void loadTopology() {
@@ -4154,6 +4215,9 @@ public class MainView extends BorderPane {
             col.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
                     c.getValue() != null && idx < c.getValue().size() ? c.getValue().get(idx) : ""));
             col.setPrefWidth(widths[i]);
+            if (isAgeColumn(headers[i])) {
+                col.setComparator(AGE_COMPARATOR);
+            }
             nsEventsTable.getColumns().add(col);
         }
 
@@ -4208,6 +4272,503 @@ public class MainView extends BorderPane {
                     + " warning" + (warns == 1 ? "" : "s"));
             status(data.rows().size() + " events in " + namespace + ".");
         });
+    }
+
+    // --- Helm releases view -----------------------------------------------------------------
+
+    private void buildHelmView() {
+        Button refresh = new Button("↻ Refresh");
+        refresh.getStyleClass().add("accent-button");
+        refresh.setOnAction(e -> loadHelm());
+
+        helmSummary.getStyleClass().add("muted");
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox controls = new HBox(10, helmSummary, spacer, refresh);
+        controls.setAlignment(Pos.CENTER_LEFT);
+
+        // Master: releases table (latest revision per release).
+        helmTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        helmTable.setFixedCellSize(30); // stable row height, no content re-measure (see note on `table`)
+        helmTable.setPlaceholder(new Label("No Helm releases in this scope."));
+        helmTable.getColumns().setAll(List.of(
+                helmCol("Name", HelmRelease::name, 180),
+                helmCol("Namespace", HelmRelease::namespace, 130),
+                helmCol("Revision", r -> String.valueOf(r.revision()), 80),
+                helmStatusCol(),
+                helmCol("Chart", r -> r.chart() + (r.chartVersion().isBlank() ? "" : "-" + r.chartVersion()), 180),
+                helmCol("App version", HelmRelease::appVersion, 110),
+                helmCol("Updated", HelmRelease::updated, 90)));
+        helmTable.getSelectionModel().selectedItemProperty().addListener(
+                (o, a, b) -> showHelmRelease(b));
+        VBox.setVgrow(helmTable, Priority.ALWAYS);
+
+        // Detail: tabbed panel that reuses the resource details look.
+        helmDetailTitle.getStyleClass().add("details-title");
+        configureHelmTextArea(helmValuesArea);
+        configureHelmTextArea(helmManifestArea);
+        configureHelmTextArea(helmNotesArea);
+
+        helmHistoryTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        helmHistoryTable.setFixedCellSize(30);
+        helmHistoryTable.setPlaceholder(new Label("Select a release to see its revision history."));
+        helmHistoryTable.getColumns().setAll(List.of(
+                helmCol("Rev", r -> String.valueOf(r.revision()), 60),
+                helmStatusCol(),
+                helmCol("Updated", HelmRelease::updated, 90),
+                helmCol("Chart ver", HelmRelease::chartVersion, 100),
+                helmCol("Description", HelmRelease::description, 320)));
+
+        ScrollPane overviewScroll = new ScrollPane(helmOverviewBox);
+        overviewScroll.setFitToWidth(true);
+        overviewScroll.getStyleClass().add("details-scroll");
+        helmOverviewBox.setPadding(new Insets(4));
+
+        Tab ovTab = new Tab("Overview", overviewScroll);
+        Tab changesTab = new Tab("Changes", buildHelmChangesPane());
+        Tab histTab = new Tab("History", helmHistoryTable);
+        Tab valTab = new Tab("Values", helmValuesArea);
+        Tab manTab = new Tab("Manifest", helmManifestArea);
+        Tab notesTab = new Tab("Notes", helmNotesArea);
+        for (Tab t : List.of(ovTab, changesTab, histTab, valTab, manTab, notesTab)) {
+            t.setClosable(false);
+        }
+        helmTabs.getTabs().setAll(ovTab, changesTab, histTab, valTab, manTab, notesTab);
+        VBox.setVgrow(helmTabs, Priority.ALWAYS);
+
+        // Detail header: title + a close button that collapses the pane to a full-width table.
+        Button closeDetail = new Button("✕");
+        closeDetail.getStyleClass().add("icon-button");
+        closeDetail.setTooltip(new Tooltip("Close detail panel"));
+        closeDetail.setOnAction(e -> {
+            helmTable.getSelectionModel().clearSelection();
+            helmCloseDetail();
+        });
+        Region titleSpacer = new Region();
+        HBox.setHgrow(titleSpacer, Priority.ALWAYS);
+        HBox detailHeader = new HBox(8, helmDetailTitle, titleSpacer, closeDetail);
+        detailHeader.setAlignment(Pos.CENTER_LEFT);
+
+        helmDetailPane = new VBox(8, detailHeader, helmTabs);
+        helmDetailPane.setPadding(new Insets(0, 0, 0, 8));
+        VBox.setVgrow(helmTabs, Priority.ALWAYS);
+
+        helmSplit = new SplitPane(new VBox(helmTable), helmDetailPane);
+        helmSplit.setDividerPositions(0.42);
+        VBox.setVgrow(helmSplit, Priority.ALWAYS);
+        VBox.setVgrow(helmTable, Priority.ALWAYS);
+
+        helmView.getChildren().setAll(controls, helmSplit);
+        showHelmRelease(null); // start with the detail pane closed
+    }
+
+    /** Filter the releases table by the global search box, matching name / namespace / chart / status. */
+    private void helmApplyFilter() {
+        String q = searchField.getText() == null ? "" : searchField.getText().trim().toLowerCase();
+        List<HelmRelease> shown;
+        if (q.isEmpty()) {
+            shown = helmAllReleases;
+        } else {
+            shown = helmAllReleases.stream()
+                    .filter(r -> (r.name() + " " + r.namespace() + " " + r.chart() + " " + r.status())
+                            .toLowerCase().contains(q))
+                    .toList();
+        }
+        helmTable.setItems(FXCollections.observableArrayList(shown));
+    }
+
+    /** Collapse the detail pane so the releases table uses the full width. */
+    private void helmCloseDetail() {
+        if (helmSplit != null && helmSplit.getItems().contains(helmDetailPane)) {
+            helmSplit.getItems().remove(helmDetailPane);
+        }
+    }
+
+    /** Re-show the detail pane (after it was closed) when a release is opened. */
+    private void helmOpenDetail() {
+        if (helmSplit != null && !helmSplit.getItems().contains(helmDetailPane)) {
+            helmSplit.getItems().add(helmDetailPane);
+            helmSplit.setDividerPositions(0.42);
+        }
+    }
+
+    /** The "Changes" tab: revision pickers, a plain settings diff, and a raw manifest diff. */
+    private javafx.scene.Node buildHelmChangesPane() {
+        Label compareLabel = new Label("Compare revision");
+        Label arrow = new Label("→");
+        helmFromRev.setMinWidth(70);
+        helmToRev.setMinWidth(70);
+        helmFromRev.valueProperty().addListener((o, a, b) -> { if (!helmDiffSuppress) helmComputeDiff(); });
+        helmToRev.valueProperty().addListener((o, a, b) -> { if (!helmDiffSuppress) helmComputeDiff(); });
+        HBox picker = new HBox(8, compareLabel, helmFromRev, arrow, helmToRev);
+        picker.setAlignment(Pos.CENTER_LEFT);
+
+        Label plainHeader = new Label("What changed · settings");
+        plainHeader.getStyleClass().add("kv-key");
+        helmPlainDiffBox.setPadding(new Insets(4, 0, 4, 0));
+        ScrollPane plainScroll = new ScrollPane(helmPlainDiffBox);
+        plainScroll.setFitToWidth(true);
+        plainScroll.setPrefHeight(160);
+        plainScroll.setMinHeight(90);
+
+        Label manifestHeader = new Label("What changed · rendered manifest");
+        manifestHeader.getStyleClass().add("kv-key");
+        Button copyDiff = new Button("⧉ Copy all");
+        copyDiff.getStyleClass().add("icon-button");
+        copyDiff.setTooltip(new Tooltip("Copy the whole manifest diff"));
+        copyDiff.setOnAction(e -> copyToClipboard(String.join("\n", helmManifestDiffList.getItems())));
+        Region mhSpacer = new Region();
+        HBox.setHgrow(mhSpacer, Priority.ALWAYS);
+        HBox manifestHeaderRow = new HBox(8, manifestHeader, mhSpacer, copyDiff);
+        manifestHeaderRow.setAlignment(Pos.CENTER_LEFT);
+
+        helmManifestDiffList.getStyleClass().add("diff-list");
+        helmManifestDiffList.setPlaceholder(new Label(""));
+        helmManifestDiffList.getSelectionModel().setSelectionMode(
+                javafx.scene.control.SelectionMode.MULTIPLE);
+        // Color each line by its unified-diff prefix: "+ " added (green), "- " removed (red),
+        // "  " context (plain), elision/"(identical)" markers muted.
+        helmManifestDiffList.setCellFactory(lv -> new javafx.scene.control.ListCell<>() {
+            @Override
+            protected void updateItem(String line, boolean empty) {
+                super.updateItem(line, empty);
+                getStyleClass().removeAll("diff-add", "diff-del", "diff-ctx", "diff-meta");
+                if (empty || line == null) {
+                    setText(null);
+                    return;
+                }
+                setText(line);
+                if (line.startsWith("+ ")) {
+                    getStyleClass().add("diff-add");
+                } else if (line.startsWith("- ")) {
+                    getStyleClass().add("diff-del");
+                } else if (line.startsWith("  ")) {
+                    getStyleClass().add("diff-ctx");
+                } else {
+                    getStyleClass().add("diff-meta");
+                }
+            }
+        });
+        // Ctrl+C copies the selected lines (Copy all button grabs everything).
+        helmManifestDiffList.setOnKeyPressed(e -> {
+            if (e.isControlDown() && e.getCode() == javafx.scene.input.KeyCode.C) {
+                copyToClipboard(String.join("\n",
+                        helmManifestDiffList.getSelectionModel().getSelectedItems()));
+            }
+        });
+        VBox.setVgrow(helmManifestDiffList, Priority.ALWAYS);
+
+        VBox box = new VBox(8, picker, plainHeader, plainScroll, manifestHeaderRow, helmManifestDiffList);
+        box.setPadding(new Insets(4));
+        VBox.setVgrow(box, Priority.ALWAYS);
+        return box;
+    }
+
+    /** Populate the revision pickers from the loaded history and show the latest change by default. */
+    private void helmPopulateDiffPickers() {
+        helmDiffSuppress = true;
+        List<Integer> revs = helmHistoryList.stream()
+                .map(HelmRelease::revision)
+                .sorted(java.util.Comparator.reverseOrder())
+                .toList();
+        helmFromRev.setItems(FXCollections.observableArrayList(revs));
+        helmToRev.setItems(FXCollections.observableArrayList(revs));
+        if (revs.isEmpty()) {
+            helmFromRev.setValue(null);
+            helmToRev.setValue(null);
+        } else {
+            Integer latest = revs.get(0);
+            Integer prev = revs.size() > 1 ? revs.get(1) : latest;
+            helmToRev.setValue(latest);
+            helmFromRev.setValue(prev);
+        }
+        helmDiffSuppress = false;
+        helmComputeDiff();
+    }
+
+    private HelmRelease helmRevision(Integer rev) {
+        if (rev == null) {
+            return null;
+        }
+        return helmHistoryList.stream().filter(h -> h.revision() == rev).findFirst().orElse(null);
+    }
+
+    /** Compute and render the plain settings diff and the manifest diff for the chosen revisions. */
+    private void helmComputeDiff() {
+        HelmRelease from = helmRevision(helmFromRev.getValue());
+        HelmRelease to = helmRevision(helmToRev.getValue());
+        helmPlainDiffBox.getChildren().clear();
+
+        if (to == null) {
+            helmPlainDiffBox.getChildren().add(mutedLabel("Select a release to compare revisions."));
+            helmManifestDiffList.getItems().clear();
+            return;
+        }
+        if (from == null || from.revision() == to.revision()) {
+            String msg = (helmHistoryList.size() <= 1)
+                    ? "This release has only one revision — nothing to compare yet."
+                    : "Pick two different revisions to see what changed.";
+            helmPlainDiffBox.getChildren().add(mutedLabel(msg));
+            helmManifestDiffList.getItems().clear();
+            return;
+        }
+
+        // Plain settings diff (valuesFlat: dotted path → value), ordered: changed, added, removed.
+        Map<String, String> a = from.valuesFlat();
+        Map<String, String> b = to.valuesFlat();
+        java.util.TreeSet<String> keys = new java.util.TreeSet<>();
+        keys.addAll(a.keySet());
+        keys.addAll(b.keySet());
+        List<Label> changed = new ArrayList<>();
+        List<Label> added = new ArrayList<>();
+        List<Label> removed = new ArrayList<>();
+        for (String k : keys) {
+            String av = a.get(k);
+            String bv = b.get(k);
+            if (av == null && bv != null) {
+                added.add(diffLabel("+ " + k + " = " + bv, "#3fb950"));
+            } else if (av != null && bv == null) {
+                removed.add(diffLabel("− " + k + " = " + av, "#f85149"));
+            } else if (av != null && !av.equals(bv)) {
+                changed.add(diffLabel("~ " + k + ":  " + av + "  →  " + bv, "#d29922"));
+            }
+        }
+        if (changed.isEmpty() && added.isEmpty() && removed.isEmpty()) {
+            helmPlainDiffBox.getChildren().add(mutedLabel(
+                    "No user-supplied settings changed between revision " + from.revision()
+                            + " and " + to.revision() + "."));
+        } else {
+            helmPlainDiffBox.getChildren().addAll(changed);
+            helmPlainDiffBox.getChildren().addAll(added);
+            helmPlainDiffBox.getChildren().addAll(removed);
+        }
+
+        // Raw manifest diff (unified, with context); colored per line and copyable (Copy all / Ctrl+C).
+        String diff = unifiedDiff(from.manifestYaml(), to.manifestYaml());
+        helmManifestDiffList.setItems(FXCollections.observableArrayList(diff.split("\n")));
+    }
+
+    private Label diffLabel(String text, String colorHex) {
+        Label l = new Label(text);
+        l.setStyle("-fx-font-family: monospace; -fx-text-fill: " + colorHex + ";");
+        l.setWrapText(true);
+        return l;
+    }
+
+    /**
+     * A unified line diff (LCS-based) of two texts, with up to 3 lines of context around each change
+     * and long unchanged runs elided. Cheap enough for rendered Helm manifests; falls back to a size
+     * summary for pathologically large inputs.
+     */
+    private static String unifiedDiff(String fromText, String toText) {
+        String f = fromText == null ? "" : fromText;
+        String t = toText == null ? "" : toText;
+        if (f.isBlank() && t.isBlank()) {
+            return "(no manifest recorded for either revision)";
+        }
+        if (f.equals(t)) {
+            return "(manifests are identical)";
+        }
+        String[] fa = f.split("\n", -1);
+        String[] fb = t.split("\n", -1);
+        if (fa.length > 3000 || fb.length > 3000) {
+            return "Manifest too large to diff inline (" + fa.length + " vs " + fb.length
+                    + " lines). Use the Manifest tab on each revision.";
+        }
+        int n = fa.length, m = fb.length;
+        int[][] c = new int[n + 1][m + 1];
+        for (int i = n - 1; i >= 0; i--) {
+            for (int j = m - 1; j >= 0; j--) {
+                c[i][j] = fa[i].equals(fb[j]) ? c[i + 1][j + 1] + 1 : Math.max(c[i + 1][j], c[i][j + 1]);
+            }
+        }
+        // Build the edit sequence: '=' equal, '-' only-in-from, '+' only-in-to.
+        List<String> lines = new ArrayList<>();
+        List<Character> types = new ArrayList<>();
+        int i = 0, j = 0;
+        while (i < n && j < m) {
+            if (fa[i].equals(fb[j])) {
+                types.add('='); lines.add(fa[i]); i++; j++;
+            } else if (c[i + 1][j] >= c[i][j + 1]) {
+                types.add('-'); lines.add(fa[i]); i++;
+            } else {
+                types.add('+'); lines.add(fb[j]); j++;
+            }
+        }
+        while (i < n) { types.add('-'); lines.add(fa[i++]); }
+        while (j < m) { types.add('+'); lines.add(fb[j++]); }
+
+        // Keep changed lines plus up to CTX context lines around them; elide the rest.
+        final int ctx = 3;
+        int size = types.size();
+        boolean[] keep = new boolean[size];
+        for (int k = 0; k < size; k++) {
+            if (types.get(k) != '=') {
+                for (int d = Math.max(0, k - ctx); d <= Math.min(size - 1, k + ctx); d++) {
+                    keep[d] = true;
+                }
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        int k = 0;
+        while (k < size) {
+            if (keep[k]) {
+                char ty = types.get(k);
+                String prefix = ty == '=' ? "  " : (ty == '-' ? "- " : "+ ");
+                sb.append(prefix).append(lines.get(k)).append('\n');
+                k++;
+            } else {
+                int run = 0;
+                while (k < size && !keep[k]) { k++; run++; }
+                sb.append("⋯ ").append(run).append(" unchanged line").append(run == 1 ? "" : "s").append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    private TableColumn<HelmRelease, String> helmCol(String title,
+                                                     java.util.function.Function<HelmRelease, String> get,
+                                                     double width) {
+        TableColumn<HelmRelease, String> col = new TableColumn<>(title);
+        col.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                c.getValue() == null ? "" : nullToDash(get.apply(c.getValue()))));
+        col.setPrefWidth(width);
+        if (isAgeColumn(title)) {
+            col.setComparator(AGE_COMPARATOR);
+        }
+        return col;
+    }
+
+    /** Status column with a subtle traffic-light color (deployed green, failed red, else muted). */
+    private TableColumn<HelmRelease, String> helmStatusCol() {
+        TableColumn<HelmRelease, String> col = new TableColumn<>("Status");
+        col.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                c.getValue() == null ? "" : nullToDash(c.getValue().status())));
+        col.setPrefWidth(110);
+        col.setCellFactory(c -> new TableCell<>() {
+            @Override
+            protected void updateItem(String value, boolean empty) {
+                super.updateItem(value, empty);
+                if (empty || value == null) {
+                    setText(null);
+                    setStyle("");
+                    return;
+                }
+                setText(value);
+                String v = value.toLowerCase();
+                if (v.equals("deployed")) {
+                    setStyle("-fx-text-fill: #3fb950;");
+                } else if (v.equals("failed") || v.startsWith("pending") && v.contains("fail")) {
+                    setStyle("-fx-text-fill: #f85149;");
+                } else {
+                    setStyle("-fx-text-fill: -color-fg-muted;");
+                }
+            }
+        });
+        return col;
+    }
+
+    private void configureHelmTextArea(TextArea area) {
+        area.setEditable(false);
+        area.setWrapText(false);
+        area.getStyleClass().add("yaml-area");
+    }
+
+    private static String nullToDash(String s) {
+        return (s == null || s.isBlank()) ? "-" : s;
+    }
+
+    private void loadHelm() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String nsSel = namespaceBox.getValue();
+        boolean all = allNsMode.get() || ALL_NAMESPACES.equals(nsSel);
+        String ns = all ? "" : nsSel;
+        String scope = all ? "all namespaces" : (ns == null || ns.isBlank() ? "all namespaces" : ns);
+        contentTitle.setText("Helm releases · " + scope);
+        helmSummary.setText("Loading…");
+        status("Loading Helm releases…");
+        helmTable.getSelectionModel().clearSelection();
+        showHelmRelease(null);
+        runAsync(() -> service.listHelmReleases(ctx.name(), ns), releases -> {
+            helmAllReleases = releases;
+            helmApplyFilter();
+            helmSummary.setText(releases.size() + " release" + (releases.size() == 1 ? "" : "s")
+                    + " · " + scope);
+            status(releases.size() + " Helm release" + (releases.size() == 1 ? "" : "s") + " in " + scope
+                    + ".  Click a release to see its history and values.");
+        });
+    }
+
+    /** Populate the detail tabs for the selected release; fetches full revision payloads async. */
+    private void showHelmRelease(HelmRelease r) {
+        int gen = ++helmDetailGen;
+        helmOverviewBox.getChildren().clear();
+        if (r == null) {
+            helmDetailTitle.setText("");
+            helmHistoryTable.setItems(FXCollections.observableArrayList());
+            helmValuesArea.clear();
+            helmManifestArea.clear();
+            helmNotesArea.clear();
+            helmHistoryList = List.of();
+            helmPopulateDiffPickers();
+            helmCloseDetail();
+            return;
+        }
+        helmOpenDetail();
+        helmDetailTitle.setText(r.name() + "  ·  " + r.namespace());
+
+        // Overview rows from the list data we already have (instant), reusing the kv-row look.
+        helmOverviewBox.getChildren().setAll(
+                helmKv("Status", r.status()),
+                helmKv("Revision", String.valueOf(r.revision())),
+                helmKv("Chart", r.chart() + (r.chartVersion().isBlank() ? "" : "-" + r.chartVersion())),
+                helmKv("App version", r.appVersion()),
+                helmKv("Updated", r.updated()),
+                helmKv("Description", r.description()));
+
+        helmValuesArea.setText("Loading…");
+        helmManifestArea.setText("Loading…");
+        helmNotesArea.setText("Loading…");
+        helmHistoryTable.setItems(FXCollections.observableArrayList());
+
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        runAsync(() -> service.helmHistory(ctx.name(), r.namespace(), r.name()), history -> {
+            if (gen != helmDetailGen) {
+                return; // a newer selection superseded this fetch
+            }
+            helmHistoryList = history;
+            helmHistoryTable.setItems(FXCollections.observableArrayList(history));
+            helmPopulateDiffPickers();
+            // The full payload for the selected revision (history is newest-first).
+            HelmRelease full = history.stream()
+                    .filter(h -> h.revision() == r.revision())
+                    .findFirst()
+                    .orElse(history.isEmpty() ? null : history.get(0));
+            if (full != null) {
+                helmValuesArea.setText(blankToPlaceholder(full.valuesYaml(), "# (no values)\n"));
+                helmManifestArea.setText(blankToPlaceholder(full.manifestYaml(), "# (empty manifest)\n"));
+                helmNotesArea.setText(blankToPlaceholder(full.notes(), "(no NOTES.txt for this release)"));
+            }
+        });
+    }
+
+    private HBox helmKv(String key, String value) {
+        Label k = new Label(key);
+        k.getStyleClass().add("kv-key");
+        k.setMinWidth(110);
+        HBox line = new HBox(10, k, copyableValue(nullToDash(value)));
+        line.setAlignment(Pos.CENTER_LEFT);
+        return line;
+    }
+
+    private static String blankToPlaceholder(String s, String placeholder) {
+        return (s == null || s.isBlank()) ? placeholder : s;
     }
 
     /** Clicking a topology node opens its details in place (the topology view stays visible). */
@@ -4425,6 +4986,9 @@ public class MainView extends BorderPane {
             if (isStatusColumn(name)) {
                 col.setCellFactory(c -> statusChipCell());
             }
+            if (isAgeColumn(name)) {
+                col.setComparator(AGE_COMPARATOR);
+            }
             // Restore the user's show/hide choice and keep tracking it for this kind.
             col.setVisible(!hidden.contains(name));
             col.visibleProperty().addListener((obs, was, isVisible) -> {
@@ -4442,6 +5006,46 @@ public class MainView extends BorderPane {
 
     private boolean isStatusColumn(String name) {
         return name.equalsIgnoreCase("Status");
+    }
+
+    /** Columns rendered as a compact age ("24d", "3h", "12m") that must sort by real elapsed time. */
+    private boolean isAgeColumn(String name) {
+        return name != null && (name.equalsIgnoreCase("Age")
+                || name.equalsIgnoreCase("Updated")
+                || name.equalsIgnoreCase("Last Seen")
+                || name.equalsIgnoreCase("Last Schedule"));
+    }
+
+    /** Sorts the compact age strings by real magnitude, so "2d" precedes "24d" (not lexicographically). */
+    private static final java.util.Comparator<String> AGE_COMPARATOR =
+            java.util.Comparator.comparingLong(MainView::ageToSeconds);
+
+    /**
+     * Parse a compact age string ("24d", "3h", "12m", "30s", "-") back into seconds for sorting.
+     * Unknown/blank/"-" sort last (treated as {@link Long#MAX_VALUE}). Mirrors the units emitted by
+     * {@code Fabric8ClusterService.age(...)}.
+     */
+    private static long ageToSeconds(String age) {
+        if (age == null) {
+            return Long.MAX_VALUE;
+        }
+        String s = age.trim();
+        if (s.isEmpty() || s.equals("-") || s.equalsIgnoreCase("<none>")) {
+            return Long.MAX_VALUE;
+        }
+        try {
+            char unit = s.charAt(s.length() - 1);
+            long n = Long.parseLong(s.substring(0, s.length() - 1).trim());
+            return switch (unit) {
+                case 'd' -> n * 86_400L;
+                case 'h' -> n * 3_600L;
+                case 'm' -> n * 60L;
+                case 's' -> n;
+                default -> Long.MAX_VALUE;
+            };
+        } catch (RuntimeException e) {
+            return Long.MAX_VALUE;
+        }
     }
 
     /** Preferred starting width per column; the constrained policy grows these to fill the table. */
@@ -4599,6 +5203,15 @@ public class MainView extends BorderPane {
     }
 
     /** Client-side filter across all columns of the current data. */
+    /** Route the global search box to whichever view is active (resource table vs. Helm releases). */
+    private void onSearchChanged() {
+        if (currentView == ViewMode.HELM) {
+            helmApplyFilter();
+        } else {
+            applyFilter();
+        }
+    }
+
     private void applyFilter() {
         String q = searchField.getText() == null ? "" : searchField.getText().trim().toLowerCase();
         java.util.stream.Stream<List<String>> rows = currentData.rows().stream();

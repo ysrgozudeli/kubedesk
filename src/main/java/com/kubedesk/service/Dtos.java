@@ -89,6 +89,27 @@ public final class Dtos {
     public record ResourceData(List<String> columns, List<List<String>> rows) {
     }
 
+    /**
+     * One Helm 3 release revision, decoded from its storage Secret
+     * ({@code sh.helm.release.v1.<release>.v<n>}, type {@code helm.sh/release.v1}). Helm persists each
+     * revision in the cluster, so KubeDesk reads these directly — no {@code helm} CLI needed.
+     *
+     * <p>{@code valuesYaml}, {@code manifestYaml}, {@code notes} and {@code valuesFlat} are populated
+     * only when a single release/revision is fetched in full (the details panel); a list row leaves
+     * them blank/empty to stay cheap. {@code description} is Helm's human-readable "what changed"
+     * (e.g. "Upgrade complete", "Rollback to 2").
+     *
+     * <p>{@code valuesFlat} is the user-supplied values flattened to dotted leaf paths
+     * (e.g. {@code image.tag -> "v1.3"}, {@code ingress.hosts[0] -> "app.example.com"}), insertion-
+     * ordered. It lets the UI show a plain-English diff between two revisions without re-parsing YAML.
+     */
+    public record HelmRelease(String name, String namespace, int revision, String status,
+                              String chart, String chartVersion, String appVersion,
+                              String updated, String description,
+                              String valuesYaml, String manifestYaml, String notes,
+                              Map<String, String> valuesFlat) {
+    }
+
     /** Pod phase counts used to draw the health ring (e.g. Running=10, Pending=1, Failed=0). */
     public record HealthSummary(Map<String, Integer> phaseCounts, int total) {
     }

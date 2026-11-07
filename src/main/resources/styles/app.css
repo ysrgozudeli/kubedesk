@@ -456,13 +456,13 @@
     -fx-text-fill: #9ca3af;
     -fx-font-size: 11px;
     -fx-font-weight: bold;
-    -fx-padding: 4 8 6 10;
+    -fx-padding: 2 8 2 10;
 }
 
 .nav-item {
     -fx-background-color: transparent;
     -fx-alignment: center-left;
-    -fx-padding: 8 12 8 12;
+    -fx-padding: 5 12 5 12;
     -fx-background-radius: 6;
     -fx-text-fill: #374151;
     -fx-font-size: 13px;
@@ -602,6 +602,42 @@
 .yaml-area {
     -fx-font-family: "Consolas", "Menlo", "monospace";
     -fx-font-size: 12px;
+}
+
+/* Colored, copyable manifest diff (Helm Changes tab). Line color by unified-diff prefix. */
+.diff-list {
+    -fx-background-color: #fbfbfc;
+    -fx-border-color: #e3e6ea;
+    -fx-border-width: 1;
+    -fx-border-radius: 6;
+    -fx-background-radius: 6;
+}
+.diff-list .list-cell {
+    -fx-font-family: "Consolas", "Menlo", "monospace";
+    -fx-font-size: 12px;
+    -fx-padding: 0 8;
+    -fx-background-color: transparent;
+    -fx-text-fill: #374151;
+}
+.diff-list .list-cell.diff-add {
+    -fx-background-color: #e6ffec;
+    -fx-text-fill: #1a7f37;
+}
+.diff-list .list-cell.diff-del {
+    -fx-background-color: #ffebe9;
+    -fx-text-fill: #cf222e;
+}
+.diff-list .list-cell.diff-ctx {
+    -fx-text-fill: #57606a;
+}
+.diff-list .list-cell.diff-meta {
+    -fx-text-fill: #8c959f;
+    -fx-font-style: italic;
+}
+/* Keep the colors readable when a line is selected for copying. */
+.diff-list .list-cell:filled:selected {
+    -fx-background-color: #d0d7de;
+    -fx-text-fill: #1f2328;
 }
 
 .yaml-area .content {

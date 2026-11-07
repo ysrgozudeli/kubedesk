@@ -1,7 +1,10 @@
 package com.kubedesk.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthFinding;
+import com.kubedesk.service.Dtos.HelmRelease;
 import com.kubedesk.service.Dtos.MetricSample;
 import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.ResourceRuleDto;
@@ -69,8 +72,10 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Base64;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import java.util.zip.GZIPInputStream;
 
 /**
  * {@link ClusterService} implementation backed by the fabric8 Kubernetes client.
@@ -2112,6 +2117,222 @@ public class Fabric8ClusterService implements ClusterService {
             sb.append('/').append(port.getProtocol());
         }
         return sb.toString();
+    }
+
+    // --- Helm releases ----------------------------------------------------------------------
+
+    /** Jackson is already on the classpath via the fabric8 client; reused for Helm payload JSON. */
+    private final ObjectMapper helmJson = new ObjectMapper();
+
+    @Override
+    public List<HelmRelease> listHelmReleases(String context, String namespace) {
+        try (KubernetesClient client = clientFor(context)) {
+            var secretsOp = (namespace == null || namespace.isBlank())
+                    ? client.secrets().inAnyNamespace()
+                    : client.secrets().inNamespace(namespace);
+            List<Secret> stored = secretsOp.withLabel("owner", "helm").list().getItems();
+
+            // Pick the highest-revision Secret per (namespace, release) using the cheap Helm labels
+            // (name/version), WITHOUT decoding — so we gunzip + parse only one payload per release,
+            // not one per historical revision.
+            Map<String, Secret> latestSecret = new LinkedHashMap<>();
+            Map<String, Integer> latestVer = new HashMap<>();
+            for (Secret s : stored) {
+                if (s.getMetadata() == null || s.getMetadata().getLabels() == null) {
+                    continue;
+                }
+                Map<String, String> labels = s.getMetadata().getLabels();
+                String relName = labels.get("name");
+                String verStr = labels.get("version");
+                if (relName == null || verStr == null) {
+                    continue;
+                }
+                int ver;
+                try {
+                    ver = Integer.parseInt(verStr.trim());
+                } catch (NumberFormatException nfe) {
+                    continue;
+                }
+                String key = s.getMetadata().getNamespace() + "/" + relName;
+                Integer cur = latestVer.get(key);
+                if (cur == null || ver > cur) {
+                    latestVer.put(key, ver);
+                    latestSecret.put(key, s);
+                }
+            }
+
+            List<HelmRelease> out = new ArrayList<>();
+            for (Secret s : latestSecret.values()) {
+                HelmRelease r = decodeRelease(s, false);
+                if (r != null) {
+                    out.add(r);
+                }
+            }
+            out.sort(Comparator.comparing(HelmRelease::namespace).thenComparing(HelmRelease::name));
+            return out;
+        } catch (Exception e) {
+            throw new ClusterException("Could not list Helm releases: " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public List<HelmRelease> helmHistory(String context, String namespace, String release) {
+        try (KubernetesClient client = clientFor(context)) {
+            var secretsOp = (namespace == null || namespace.isBlank())
+                    ? client.secrets().inAnyNamespace()
+                    : client.secrets().inNamespace(namespace);
+            List<Secret> stored = secretsOp
+                    .withLabel("owner", "helm")
+                    .withLabel("name", release)
+                    .list().getItems();
+
+            List<HelmRelease> out = new ArrayList<>();
+            for (Secret s : stored) {
+                HelmRelease r = decodeRelease(s, true);
+                if (r != null) {
+                    out.add(r);
+                }
+            }
+            // Newest revision first.
+            out.sort(Comparator.comparingInt(HelmRelease::revision).reversed());
+            return out;
+        } catch (Exception e) {
+            throw new ClusterException("Could not read history for Helm release '" + release + "': "
+                    + rootMessage(e), e);
+        }
+    }
+
+    /**
+     * Decode one Helm storage Secret into a {@link HelmRelease}. Returns {@code null} if the secret is
+     * not a Helm release or its payload can't be read (so a stray/corrupt secret never breaks the list).
+     * When {@code full} is false, the heavy fields (values/manifest/notes) are left blank.
+     */
+    private HelmRelease decodeRelease(Secret s, boolean full) {
+        try {
+            if (s == null || s.getMetadata() == null) {
+                return null;
+            }
+            if (!"helm.sh/release.v1".equals(s.getType())) {
+                return null;
+            }
+            Map<String, String> data = s.getData();
+            if (data == null || !data.containsKey("release")) {
+                return null;
+            }
+            JsonNode root = helmJson.readTree(decodeHelmPayload(data.get("release")));
+
+            String name = text(root, "name");
+            String ns = text(root, "namespace");
+            if (ns.isBlank() && s.getMetadata().getNamespace() != null) {
+                ns = s.getMetadata().getNamespace();
+            }
+            int revision = root.path("version").asInt(0);
+
+            JsonNode info = root.path("info");
+            String status = text(info, "status");
+            String description = text(info, "description");
+            String lastDeployed = text(info, "last_deployed");
+
+            JsonNode chart = root.path("chart").path("metadata");
+            String chartName = text(chart, "name");
+            String chartVersion = text(chart, "version");
+            String appVersion = text(chart, "appVersion");
+
+            String valuesYaml = "";
+            String manifestYaml = "";
+            String notes = "";
+            Map<String, String> valuesFlat = Map.of();
+            if (full) {
+                JsonNode config = root.path("config");
+                boolean noValues = config.isMissingNode() || config.isNull() || config.isEmpty();
+                valuesYaml = noValues
+                        ? "# (no user-supplied values)\n"
+                        : io.fabric8.kubernetes.client.utils.Serialization.asYaml(config);
+                manifestYaml = text(root, "manifest");
+                notes = text(info, "notes");
+                if (!noValues) {
+                    Map<String, String> flat = new LinkedHashMap<>();
+                    flatten("", config, flat);
+                    valuesFlat = flat;
+                }
+            }
+            return new HelmRelease(name, ns, revision, status, chartName, chartVersion, appVersion,
+                    age(helmInstant(lastDeployed)), description, valuesYaml, manifestYaml, notes,
+                    valuesFlat);
+        } catch (Exception e) {
+            return null; // skip unreadable/non-Helm secrets rather than failing the whole list
+        }
+    }
+
+    /**
+     * Decode Helm's release payload. There are two base64 layers plus gzip: the Kubernetes API server
+     * base64-encodes every Secret {@code data} value (fabric8 hands it back still encoded), and Helm
+     * itself stores the release body as {@code base64(gzip(JSON))}. So we base64-decode the k8s layer,
+     * base64-decode Helm's layer, gunzip, and the result is the release JSON.
+     */
+    private byte[] decodeHelmPayload(String stored) throws IOException {
+        // fabric8's Secret.getData() returns the API server's base64-encoded values verbatim.
+        byte[] k8sDecoded = Base64.getDecoder().decode(stored);
+        // That yields Helm's own base64 text of gzip(JSON).
+        byte[] gzipped = Base64.getDecoder().decode(new String(k8sDecoded, StandardCharsets.UTF_8).trim());
+        try (GZIPInputStream gz = new GZIPInputStream(new ByteArrayInputStream(gzipped))) {
+            return gz.readAllBytes();
+        }
+    }
+
+    private static String text(JsonNode node, String field) {
+        JsonNode v = node.path(field);
+        return v.isMissingNode() || v.isNull() ? "" : v.asText("");
+    }
+
+    /**
+     * Normalize a Helm RFC3339 timestamp (which may carry a non-UTC offset such as {@code -07:00},
+     * unlike Kubernetes' always-UTC {@code ...Z}) to a UTC instant string that {@code age(...)} can
+     * parse. Returns "" if it can't be parsed, so the age renders as "-" rather than crashing.
+     */
+    private static String helmInstant(String ts) {
+        if (ts == null || ts.isBlank()) {
+            return "";
+        }
+        try {
+            return java.time.OffsetDateTime.parse(ts).toInstant().toString();
+        } catch (RuntimeException e) {
+            try {
+                return java.time.Instant.parse(ts).toString();
+            } catch (RuntimeException e2) {
+                return "";
+            }
+        }
+    }
+
+    /**
+     * Flatten a Helm values tree to dotted leaf paths: objects become {@code parent.child}, arrays
+     * become {@code parent[i]}, and scalars become their text. Used to diff two revisions' settings in
+     * plain terms. {@code prefix} is the path accumulated so far ("" at the root).
+     */
+    private static void flatten(String prefix, JsonNode node, Map<String, String> out) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            out.put(prefix, "null");
+        } else if (node.isObject()) {
+            if (node.isEmpty()) {
+                out.put(prefix, "{}");
+                return;
+            }
+            node.fields().forEachRemaining(e -> {
+                String key = prefix.isEmpty() ? e.getKey() : prefix + "." + e.getKey();
+                flatten(key, e.getValue(), out);
+            });
+        } else if (node.isArray()) {
+            if (node.isEmpty()) {
+                out.put(prefix, "[]");
+                return;
+            }
+            for (int i = 0; i < node.size(); i++) {
+                flatten(prefix + "[" + i + "]", node.get(i), out);
+            }
+        } else {
+            out.put(prefix, node.asText(""));
+        }
     }
 
     // --- helpers ----------------------------------------------------------------------------

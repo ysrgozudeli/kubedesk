@@ -3,6 +3,27 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.15.0] - 2026-11-07
+
+Adds a read-only **Helm** view, plus two cross-cutting UX fixes.
+
+### Added
+- **Helm releases (read-only).** A new **Helm** section lists Helm 3 releases (latest revision each),
+  read straight from Helm's release Secrets in the cluster — no `helm` CLI required. The global search
+  box filters the list, and the detail pane (closable) has tabs: **Overview / Changes / History /
+  Values / Manifest / Notes**.
+- **Helm "Changes" tab — see what changed between revisions.** Pick two revisions (defaults to
+  *previous → latest*) and get both a **plain-English settings diff** (added / removed / changed values,
+  color-coded) and a **color-coded, copyable unified diff of the rendered manifest** (Copy-all button or
+  Ctrl+C). Only the default Secret storage backend is covered.
+
+### Changed
+- **Age/date columns sort by real elapsed time** in every view (resource tables, Events, Helm) — so
+  `2d` now sorts before `24d` instead of lexicographically. Applies to Age, Updated, Last Seen, and
+  Last Schedule.
+- **More compact left sidebar** so the new Helm section is visible without scrolling (tighter nav-row
+  padding, section spacing, and logo gap; no change to font sizes).
+
 ## [1.13.2] - 2026-10-31
 
 A fix release, with the MCP diagnostic changes made alongside it.

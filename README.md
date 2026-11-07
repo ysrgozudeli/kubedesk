@@ -99,6 +99,10 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   right-click to act.
 - **Events view** — the namespace event stream as a table (Type, Reason, Object, Count, Last Seen,
   Message), most-recent first, Warnings tinted — the practical "namespace log."
+- **Helm releases (read-only)** — list Helm 3 releases read straight from their in-cluster Secrets
+  (**no `helm` CLI**), with tabs for Overview / **Changes** / History / Values / Manifest / Notes. The
+  **Changes** tab compares any two revisions: a plain-English settings diff (added/removed/changed) and
+  a color-coded, copyable diff of the rendered manifest.
 
 ### Act (all over the API — no kubectl)
 - **Management actions**: delete, rollout restart, scale, and edit-YAML-and-apply — with confirmations
@@ -282,12 +286,12 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.13.2**: 12 resource kinds, live watches, details panel (exec + logs + live
+Shipped through **v1.15.0**: 12 resource kinds, live watches, details panel (exec + logs + live
 metrics), pod diagnostics, live log follow + detachable log windows, management actions (incl. pod
 restart), Create/Apply with lint + dry-run, port-forwarding, topology view, health scan, Events view,
-an Overview dashboard with cluster capacity + per-node usage, embedded kubectl console, a command
-palette, the experimental read-only **MCP server with a live UI mirror**, and cross-platform native
-packaging.
+a read-only **Helm releases** view with a revision diff, an Overview dashboard with cluster capacity +
+per-node usage, embedded kubectl console, a command palette, the experimental read-only **MCP server
+with a live UI mirror**, and cross-platform native packaging.
 
 Candidate next:
 - **MCP server — write actions.** The read-only server and its live UI mirror already exist

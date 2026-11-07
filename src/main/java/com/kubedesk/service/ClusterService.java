@@ -3,6 +3,7 @@ package com.kubedesk.service;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSummary;
+import com.kubedesk.service.Dtos.HelmRelease;
 import com.kubedesk.service.Dtos.MetricSample;
 import com.kubedesk.service.Dtos.Permissions;
 import com.kubedesk.service.Dtos.ResourceData;
@@ -110,6 +111,23 @@ public interface ClusterService {
      * backends and label selectors.
      */
     TopologyData getTopology(String context, String namespace);
+
+    /**
+     * List Helm 3 releases in a namespace (or all namespaces when {@code namespace} is blank), one
+     * entry per release at its <em>latest</em> revision. Read directly from Helm's storage Secrets
+     * (type {@code helm.sh/release.v1}); no {@code helm} CLI is involved. Each {@link HelmRelease} in
+     * this list has {@code valuesYaml}/{@code manifestYaml}/{@code notes} left blank — call
+     * {@link #helmHistory} for the full revision payloads. Returns an empty list if none are found or
+     * the user can't read Secrets.
+     */
+    List<HelmRelease> listHelmReleases(String context, String namespace);
+
+    /**
+     * The full revision history of a single Helm release, newest revision first, each entry fully
+     * populated (values, rendered manifest, notes). This is both the "History" tab and the source for
+     * a revision diff. {@code namespace} must be the release's namespace.
+     */
+    List<HelmRelease> helmHistory(String context, String namespace, String release);
 
     /**
      * Scan a namespace (plus cluster Nodes) for resources failing common health checks —
