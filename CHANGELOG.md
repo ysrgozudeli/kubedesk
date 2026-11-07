@@ -3,6 +3,15 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.16.1] - 2026-11-07
+
+Fixes the namespace dropdown in the Helm view.
+
+### Fixed
+- **The namespace dropdown now reloads the Helm releases list.** Changing the namespace (or switching to
+  **All namespaces**) while viewing Helm releases quietly refreshed the resource table instead of
+  re-querying releases, so the list never updated. It now reloads the releases for the chosen namespace.
+
 ## [1.16.0] - 2026-11-07
 
 Adds live cluster metrics charts to the Overview, plus a Settings dialog to configure them.

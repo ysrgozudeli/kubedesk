@@ -3422,6 +3422,7 @@ public class MainView extends BorderPane {
             case HEALTH -> loadHealth();
             case EVENTS -> loadEvents();
             case OVERVIEW -> loadOverview();
+            case HELM -> loadHelm();
             default -> {
                 refreshContent();
                 if (paused) {
