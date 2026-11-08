@@ -97,11 +97,13 @@ import javafx.stage.Modality;
 import java.awt.Desktop;
 import java.io.File;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -294,8 +296,11 @@ public class MainView extends BorderPane {
     private final TextArea shellArea = new TextArea();
     private final TextField shellInput = new TextField();
     private final Button shellConnectBtn = new Button("Connect");
+    private final Button shellScriptBtn = new Button("Run script…");
     private ExecSession execSession;
     private String shellPod;
+    /** Remembered "pipe into" command for the Run-script dialog (pre-filled next time). */
+    private String lastScriptCommand = "python3 -";
     /** Name + kind of the resource currently shown in the details panel (for YAML reload/logs). */
     private String currentDetailName;
     private ResourceKind detailKind = ResourceKind.PODS;
@@ -1954,6 +1959,13 @@ public class MainView extends BorderPane {
         shellConnectBtn.getStyleClass().add("accent-button");
         shellConnectBtn.setOnAction(e -> toggleShell());
 
+        shellScriptBtn.setDisable(true);
+        shellScriptBtn.setTooltip(new Tooltip(
+                "Paste a multi-line script and run it through an interpreter on the pod.\n"
+                + "The script is base64-encoded and piped in, so newlines, indentation and\n"
+                + "quotes survive intact — unlike typing it line by line."));
+        shellScriptBtn.setOnAction(e -> openRunScriptDialog());
+
         Label note = new Label("Command console (not a full TTY — no vim/top).");
         note.getStyleClass().add("muted");
 
@@ -1961,7 +1973,7 @@ public class MainView extends BorderPane {
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
         HBox controls = new HBox(8,
-                new Label("Container:"), shellContainerBox, shellConnectBtn, spacer, note);
+                new Label("Container:"), shellContainerBox, shellConnectBtn, shellScriptBtn, spacer, note);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
@@ -2000,6 +2012,7 @@ public class MainView extends BorderPane {
                     this::appendShellOutput, this::onExecClosed);
             shellConnectBtn.setText("Disconnect");
             shellInput.setDisable(false);
+            shellScriptBtn.setDisable(false);
             shellInput.requestFocus();
         } catch (Exception e) {
             shellArea.appendText("[failed to connect: " + e.getMessage() + "]\n");
@@ -2016,6 +2029,103 @@ public class MainView extends BorderPane {
         shellInput.clear();
     }
 
+    /** Illustrative script shown pre-filled in the Run-script dialog; users replace it with their own. */
+    private static final String EXAMPLE_SCRIPT = """
+            # Example: check this pod can reach its blob storage.
+            # Replace with your own script, then click Run.
+            import os
+            import sys
+
+            conn = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+            if not conn:
+                sys.exit("FAIL: AZURE_STORAGE_CONNECTION_STRING is not set")
+
+            from azure.storage.blob import BlobServiceClient
+
+            svc = BlobServiceClient.from_connection_string(conn)
+            containers = [c.name for c in svc.list_containers()]
+            print("OK: blob storage reachable. Containers:", containers)
+            """;
+
+    /**
+     * Prompt for a multi-line script and the interpreter command to feed it to, then run it on the pod.
+     * Typing a script line by line into an interactive {@code /bin/sh} mangles blank lines, indentation
+     * and quoting; here the whole script is base64-encoded locally and piped straight into the chosen
+     * interpreter ({@code … | base64 -d | <command>}), so its bytes never touch the shell parser.
+     */
+    private void openRunScriptDialog() {
+        if (execSession == null) {
+            return;
+        }
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Run script on pod");
+        dialog.initOwner(getScene() != null ? getScene().getWindow() : null);
+        ButtonType runType = new ButtonType("Run", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(runType, ButtonType.CANCEL);
+
+        TextArea scriptArea = new TextArea(EXAMPLE_SCRIPT);
+        scriptArea.setPromptText("Paste your script here — e.g. a Python snippet the agent gave you.");
+        scriptArea.setWrapText(false);
+        scriptArea.setPrefRowCount(16);
+        scriptArea.setPrefColumnCount(72);
+        scriptArea.getStyleClass().add("yaml-area");
+        VBox.setVgrow(scriptArea, Priority.ALWAYS);
+
+        TextField commandField = new TextField(lastScriptCommand);
+        commandField.setPromptText("python3 -   (or: sh, bash, node, ruby …)");
+
+        Label pipeLabel = new Label("Pipe into:");
+        HBox commandRow = new HBox(8, pipeLabel, commandField);
+        commandRow.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(commandField, Priority.ALWAYS);
+
+        Label hint = new Label("The script is base64-encoded and piped in, so indentation and quotes"
+                + " survive. Non-TTY: interactive prompts won't work. Requires base64 on the pod.");
+        hint.getStyleClass().add("muted");
+        hint.setWrapText(true);
+
+        VBox content = new VBox(10, scriptArea, commandRow, hint);
+        content.setPadding(new Insets(10));
+        content.setPrefWidth(560);
+        dialog.getDialogPane().setContent(content);
+
+        // Disable Run until there's a script and a command to run it with.
+        var runBtn = dialog.getDialogPane().lookupButton(runType);
+        runBtn.setDisable(true);
+        Runnable validate = () -> runBtn.setDisable(
+                scriptArea.getText().isBlank() || commandField.getText().isBlank());
+        scriptArea.textProperty().addListener((o, a, b) -> validate.run());
+        commandField.textProperty().addListener((o, a, b) -> validate.run());
+        validate.run();
+
+        Platform.runLater(scriptArea::requestFocus);
+
+        Optional<ButtonType> result = dialog.showAndWait();
+        if (result.isPresent() && result.get() == runType) {
+            runScriptOnPod(scriptArea.getText(), commandField.getText().trim());
+        }
+    }
+
+    /** Base64-encode {@code script} and pipe it into {@code command} on the connected pod. */
+    private void runScriptOnPod(String script, String command) {
+        if (execSession == null || script == null || command.isBlank()) {
+            return;
+        }
+        lastScriptCommand = command;
+
+        String b64 = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        // Guard on base64's presence so a minimal/distroless image gives a clear message, not a hang.
+        String line = "if command -v base64 >/dev/null 2>&1; then "
+                + "printf '%s' '" + b64 + "' | base64 -d | " + command + "; "
+                + "else echo '[kubedesk] base64 not found on this pod — cannot run script this way'; fi\n";
+
+        long lines = script.lines().count();
+        shellArea.appendText("$ [run script: " + lines + (lines == 1 ? " line" : " lines")
+                + " piped into `" + command + "`]\n");
+        execSession.send(line);
+    }
+
     private void appendShellOutput(String text) {
         Platform.runLater(() -> {
             shellArea.appendText(text);
@@ -2029,6 +2139,7 @@ public class MainView extends BorderPane {
             execSession = null;
             shellConnectBtn.setText("Connect");
             shellInput.setDisable(true);
+            shellScriptBtn.setDisable(true);
         });
     }
 
@@ -2044,6 +2155,7 @@ public class MainView extends BorderPane {
         }
         shellConnectBtn.setText("Connect");
         shellInput.setDisable(true);
+        shellScriptBtn.setDisable(true);
     }
 
     private void reloadYaml() {

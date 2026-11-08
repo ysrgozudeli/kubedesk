@@ -3,6 +3,23 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.17.0] - 2026-11-08
+
+Adds a **Run script** action to the pod Shell tab for running multi-line scripts reliably.
+
+### Added
+- **Run multi-line scripts on a pod without them breaking.** The Shell tab's single-line input mangles a
+  pasted multi-line script (a `TextField` drops the newlines, and feeding code line by line into an
+  interactive `/bin/sh` wrecks indentation, blank lines and quoting). The new **Run script…** button opens
+  a paste box plus a **Pipe into:** field where you name the interpreter (`python3 -`, `sh`, `node`, …).
+  The script is base64-encoded locally and piped straight into that command on the pod
+  (`… | base64 -d | python3 -`), so its bytes never touch the shell parser — indentation, quotes, `$` and
+  backticks all survive intact. The dialog is pre-filled with an example so the shape is clear.
+
+### Notes
+- Requires `base64` on the pod (present on busybox and most images; absent on strict distroless) — a guard
+  reports this clearly instead of hanging. Still non-TTY: scripts that prompt for interactive input won't work.
+
 ## [1.16.1] - 2026-11-07
 
 Fixes the namespace dropdown in the Helm view.
