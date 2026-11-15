@@ -67,6 +67,9 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
 - Browse **contexts** and **namespaces** from the chosen config.
 - **12 resource kinds** in the sidebar: Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs,
   Services, Ingresses, ConfigMaps, Secrets, PVCs, Nodes — Dashboard-style tables with status chips.
+- **All-namespaces view** — pick **`✿ All namespaces`** to list a kind across every namespace in one
+  table (a leading **Namespace** column), each namespace queried individually so it stays within
+  namespace-scoped RBAC. Read-only in this mode (pick a row's namespace to act).
 - **Live updates** via watches, with **pause/resume**.
 - **Command palette** (`Ctrl`/`Cmd`+`P`) — a keyboard-driven quick-switcher: type to fuzzily filter
   across contexts, namespaces, resource kinds, and views, then ↑/↓ and `Enter` to jump there.
@@ -162,8 +165,8 @@ cluster over the API, **no `kubectl` required**. It speaks Streamable HTTP, so a
   claude mcp add --transport http kubedesk http://127.0.0.1:7865/mcp
   ```
   then ask it something like *"scan my cluster's health."*
-- **Tools (all read-only):** `health_scan`, `list_namespaces`, `list_resource`, `describe_yaml`,
-  `pod_logs`. Context and namespace default to whatever is selected in KubeDesk, and results are kept
+- **Tools (all read-only):** `health_scan`, `cluster_overview`, `list_namespaces`, `list_resource`,
+  `describe_yaml`, `events`, `pod_logs`. Context and namespace default to whatever is selected in KubeDesk, and results are kept
   compact (server-side filters, capped log tails) to save the agent's tokens. `describe_yaml` **redacts
   Secret values** (`data`/`stringData` → `<redacted>`, keys kept) so the agent never receives secret
   material — the UI's own YAML view is unchanged.
@@ -292,9 +295,9 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.18.0**: 12 resource kinds, live watches, details panel (exec + logs + live
-metrics), pod diagnostics, live log follow + detachable log windows, management actions (incl. pod
-restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
+Shipped through **v1.18.0**: 12 resource kinds, an **all-namespaces view**, live watches, details panel
+(exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
+actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a read-only **Helm releases** view with a
 revision diff, an Overview dashboard with cluster capacity + per-node usage + **live CPU/memory charts**,
 a **Settings** dialog, embedded kubectl console, a command palette, the experimental read-only **MCP
@@ -304,7 +307,7 @@ Candidate next:
 - **MCP server — write actions.** The read-only server and its live UI mirror already exist
   ([experimental, above](#-mcp-server-for-ai-agents-experimental)); next is **write tools behind an
   in-UI confirmation** so you stay the hand that acts.
-- **All-namespaces view + global search.**
+- **Global search across kinds.** (The per-kind **all-namespaces** listing already ships — see *Browse*.)
 - **Multi-pod log tailing** (stern-style — one merged stream across a Deployment's pods; single-pod
   follow + detachable windows already shipped) and optional Loki/cloud-logging integration.
 - **Headless health CLI** for CI/CD gates (reuses `ClusterService.healthCheck`).
