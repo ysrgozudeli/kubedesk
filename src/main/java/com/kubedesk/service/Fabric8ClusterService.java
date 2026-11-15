@@ -694,6 +694,212 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     @Override
+    public Dtos.SealedSecretCert fetchSealedSecretCert(String context, String controllerNamespace,
+                                                       String controllerName) {
+        try (KubernetesClient client = clientFor(context)) {
+            // Build an ordered, de-duplicated candidate list (keyed by "ns/name"): the explicit name
+            // first, then common install names, then anything discovered on the cluster.
+            LinkedHashMap<String, String[]> candidates = new LinkedHashMap<>();
+            java.util.function.BiConsumer<String, String> add = (ns, nm) -> {
+                if (ns != null && !ns.isBlank() && nm != null && !nm.isBlank()) {
+                    candidates.putIfAbsent(ns.trim() + "/" + nm.trim(), new String[]{ns.trim(), nm.trim()});
+                }
+            };
+            add.accept(controllerNamespace, controllerName);
+            for (String ns : new String[]{"kube-system", "sealed-secrets", "sealed-secrets-system"}) {
+                for (String nm : new String[]{"sealed-secrets-controller", "sealed-secrets"}) {
+                    add.accept(ns, nm);
+                }
+            }
+            discoverSealedSecretsServices(client, add);
+
+            StringBuilder tried = new StringBuilder();
+            for (String[] c : candidates.values()) {
+                try {
+                    String pem = fetchCertFromService(client, c[0], c[1]);
+                    if (pem != null && pem.contains("BEGIN CERTIFICATE")) {
+                        return new Dtos.SealedSecretCert(c[0], c[1], pem);
+                    }
+                    tried.append("\n  • ").append(c[0]).append('/').append(c[1]).append(" — no certificate");
+                } catch (Exception e) {
+                    tried.append("\n  • ").append(c[0]).append('/').append(c[1]).append(" — ").append(rootMessage(e));
+                }
+            }
+            String hint = candidates.size() <= 6
+                    ? "\n\n(Couldn't auto-discover the controller Service — listing Services may be denied "
+                      + "for this user. Find it with:  kubectl get svc -A | grep -i sealed)"
+                    : "";
+            throw new ClusterException("Couldn't find the Sealed Secrets controller certificate. Tried:"
+                    + tried + hint + "\n\nOpen Advanced to set the controller's Service name/namespace and "
+                    + "Re-fetch, or paste the cert (kubeseal --fetch-cert).");
+        } catch (ClusterException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ClusterException("Couldn't fetch the Sealed Secrets certificate: " + rootMessage(e), e);
+        }
+    }
+
+    /** Add any Services that look like the Sealed Secrets controller (by well-known labels, then by name). */
+    private void discoverSealedSecretsServices(KubernetesClient client,
+                                               java.util.function.BiConsumer<String, String> add) {
+        String[][] labels = {
+                {"app.kubernetes.io/name", "sealed-secrets"},
+                {"name", "sealed-secrets-controller"},
+                {"app.kubernetes.io/instance", "sealed-secrets"},
+        };
+        for (String[] lbl : labels) {
+            try {
+                for (Service s : client.services().inAnyNamespace().withLabel(lbl[0], lbl[1]).list().getItems()) {
+                    add.accept(s.getMetadata().getNamespace(), s.getMetadata().getName());
+                }
+            } catch (Exception ignore) {
+                // listing may be forbidden — keep trying other signals
+            }
+        }
+        // Last resort: scan all Services for a "sealed" name match.
+        try {
+            for (Service s : client.services().inAnyNamespace().list().getItems()) {
+                String n = s.getMetadata().getName();
+                if (n != null && n.toLowerCase().contains("sealed")) {
+                    add.accept(s.getMetadata().getNamespace(), n);
+                }
+            }
+        } catch (Exception ignore) {
+            // cluster-wide Service listing denied — the static candidates above still apply
+        }
+    }
+
+    /**
+     * Fetch {@code /v1/cert.pem} from a controller Service via the API-server proxy (the same route as
+     * {@code kubeseal --fetch-cert}), reusing the kubeconfig's auth + TLS. Returns the PEM body.
+     *
+     * <p>The service's port is looked up and used explicitly — an empty port ({@code http:name:}) fails on
+     * some clusters with "no endpoints available", so we try the port by name, then by number, then empty.
+     */
+    private String fetchCertFromService(KubernetesClient client, String ns, String name) throws Exception {
+        // Build the list of port references to try, preferring the Service's real "http" port.
+        List<String> portRefs = new ArrayList<>();
+        try {
+            Service svc = client.services().inNamespace(ns).withName(name).get();
+            if (svc == null) {
+                throw new ClusterException("no such Service");
+            }
+            if (svc.getSpec() != null && svc.getSpec().getPorts() != null) {
+                ServicePort chosen = svc.getSpec().getPorts().stream()
+                        .filter(p -> "http".equalsIgnoreCase(p.getName()))
+                        .findFirst()
+                        .orElse(svc.getSpec().getPorts().isEmpty() ? null : svc.getSpec().getPorts().get(0));
+                if (chosen != null) {
+                    if (chosen.getName() != null && !chosen.getName().isBlank()) {
+                        portRefs.add(chosen.getName());
+                    }
+                    if (chosen.getPort() != null) {
+                        portRefs.add(String.valueOf(chosen.getPort()));
+                    }
+                }
+            }
+        } catch (ClusterException ce) {
+            throw ce;
+        } catch (Exception ignore) {
+            // can't read the Service (RBAC) — fall back to well-known values below
+        }
+        portRefs.add("8080"); // sealed-secrets controller default
+        portRefs.add("");      // last resort: let the proxy choose
+        // de-duplicate, preserve order
+        portRefs = portRefs.stream().distinct().collect(Collectors.toList());
+
+        String base = client.getMasterUrl().toString();
+        if (!base.endsWith("/")) {
+            base += "/";
+        }
+        var http = client.getHttpClient();
+        Exception last = null;
+        for (String portRef : portRefs) {
+            String path = "api/v1/namespaces/" + ns + "/services/http:" + name + ":" + portRef
+                    + "/proxy/v1/cert.pem";
+            try {
+                var request = http.newHttpRequestBuilder().uri(base + path).build();
+                var response = http.sendAsync(request, String.class)
+                        .get(15, java.util.concurrent.TimeUnit.SECONDS);
+                if (response.isSuccessful() && response.body() != null
+                        && response.body().contains("BEGIN CERTIFICATE")) {
+                    return response.body();
+                }
+                last = new ClusterException("HTTP " + response.code());
+            } catch (Exception e) {
+                last = e;
+            }
+        }
+        throw (last != null ? last : new ClusterException("no response"));
+    }
+
+    @Override
+    public Dtos.SecretContent readSecret(String context, String namespace, String name) {
+        try (KubernetesClient client = clientFor(context)) {
+            Secret secret = client.secrets().inNamespace(namespace).withName(name).get();
+            if (secret == null) {
+                throw new ClusterException("Secret " + name + " not found in " + namespace + ".");
+            }
+            // fabric8 returns data values still base64-encoded; decode to raw bytes for re-sealing.
+            Map<String, byte[]> decoded = new LinkedHashMap<>();
+            Map<String, String> data = secret.getData();
+            if (data != null) {
+                for (Map.Entry<String, String> e : data.entrySet()) {
+                    decoded.put(e.getKey(), Base64.getDecoder().decode(e.getValue()));
+                }
+            }
+            // stringData (if any survived) is already plain text.
+            if (secret.getStringData() != null) {
+                for (Map.Entry<String, String> e : secret.getStringData().entrySet()) {
+                    decoded.put(e.getKey(), e.getValue().getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            String type = secret.getType() != null ? secret.getType() : "Opaque";
+            return new Dtos.SecretContent(name, namespace, type, decoded);
+        } catch (ClusterException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ClusterException("Could not read Secret " + name + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public Dtos.SecretContent parseSecretYaml(String yaml) {
+        if (yaml == null || yaml.isBlank()) {
+            throw new ClusterException("Paste a Secret manifest first.");
+        }
+        try {
+            Object obj = io.fabric8.kubernetes.client.utils.Serialization.unmarshal(yaml);
+            if (!(obj instanceof Secret sec)) {
+                String kind = (obj instanceof HasMetadata hm && hm.getKind() != null) ? hm.getKind() : "that document";
+                throw new ClusterException("Expected a Secret, but got " + kind + " (kind must be Secret).");
+            }
+            String name = sec.getMetadata() != null ? sec.getMetadata().getName() : null;
+            String ns = sec.getMetadata() != null ? sec.getMetadata().getNamespace() : null;
+            String type = sec.getType() != null ? sec.getType() : "Opaque";
+            Map<String, byte[]> data = new LinkedHashMap<>();
+            if (sec.getData() != null) {
+                for (Map.Entry<String, String> e : sec.getData().entrySet()) {
+                    data.put(e.getKey(), Base64.getDecoder().decode(e.getValue()));
+                }
+            }
+            if (sec.getStringData() != null) {
+                for (Map.Entry<String, String> e : sec.getStringData().entrySet()) {
+                    data.put(e.getKey(), e.getValue().getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            if (name == null || name.isBlank()) {
+                throw new ClusterException("The Secret is missing metadata.name.");
+            }
+            return new Dtos.SecretContent(name, ns, type, data);
+        } catch (ClusterException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ClusterException("Couldn't parse the Secret YAML: " + rootMessage(e), e);
+        }
+    }
+
+    @Override
     public String applyManifests(String context, String defaultNamespace, String yaml) {
         return applyOrValidate(context, defaultNamespace, yaml, false);
     }

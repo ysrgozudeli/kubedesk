@@ -7,6 +7,7 @@ import com.kubedesk.service.Dtos.ClusterCapacity;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.MetricSample;
 import com.kubedesk.service.Dtos.Permissions;
+import com.kubedesk.service.Dtos.SecretContent;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HealthSeverity;
 import com.kubedesk.service.Dtos.HelmRelease;
@@ -22,6 +23,9 @@ import com.kubedesk.service.Dtos.HealthSummary;
 import com.kubedesk.service.Dtos.ResourceData;
 import com.kubedesk.service.Dtos.WorkloadRef;
 import com.kubedesk.service.ResourceKind;
+import com.kubedesk.service.SealedSecrets;
+import java.security.interfaces.RSAPublicKey;
+import java.util.LinkedHashMap;
 import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
 import javafx.animation.Timeline;
@@ -55,6 +59,8 @@ import javafx.scene.control.ListView;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.RadioButton;
+import javafx.scene.control.Separator;
 import javafx.scene.Node;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SeparatorMenuItem;
@@ -69,6 +75,7 @@ import javafx.scene.control.TextArea;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
+import javafx.scene.control.TitledPane;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.Tooltip;
@@ -320,6 +327,19 @@ public class MainView extends BorderPane {
     // "Search all listed namespaces" mode: a sentinel entry in the namespace dropdown. In this mode
     // the table gains a leading Namespace column, is read-only (view YAML only), and has no live watch.
     private static final String ALL_NAMESPACES = "✿ All namespaces";
+
+    /** Editable sample pasted into the "Paste a Secret YAML" box by "Insert example". */
+    private static final String SAMPLE_SECRET_YAML = """
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: my-secret
+              namespace: default
+            type: Opaque
+            stringData:
+              username: admin
+              password: s3cr3t
+            """;
     private final BooleanProperty allNsMode = new SimpleBooleanProperty(false);
 
     // Proactive RBAC awareness: what the user can do in the current namespace (fail-open by default).
@@ -335,6 +355,9 @@ public class MainView extends BorderPane {
     // Port-forwards (global, long-lived)
     private final List<PortForward> portForwards = new ArrayList<>();
     private final Button pfButton = new Button("Port-forwards");
+
+    // Contextual "seal a secret" action — shown in the toolbar only while browsing the Secrets list.
+    private final Button sealSecretBtn = new Button("🔒 Seal…");
 
     // Auto-update: checks GitHub on startup and offers a one-click installer download.
     private final UpdateService updateService = new UpdateService();
@@ -774,6 +797,12 @@ public class MainView extends BorderPane {
         pfButton.setVisible(false);
         pfButton.setManaged(false);
 
+        sealSecretBtn.setTooltip(new Tooltip("Generate an encrypted SealedSecret (safe to commit to Git) "
+                + "from plaintext values"));
+        sealSecretBtn.setOnAction(e -> openSealSecretDialog());
+        sealSecretBtn.setVisible(false);
+        sealSecretBtn.setManaged(false);
+
         consoleMenuItem.setOnAction(e -> toggleConsole(consoleMenuItem.isSelected()));
 
         MenuButton appMenu = new MenuButton("☰");
@@ -813,7 +842,7 @@ public class MainView extends BorderPane {
         // clipping). Right: search + actions + menu, pinned to the right edge.
         FlowPane left = new FlowPane(10, 8, loadConfigBtn, kubeConfigLabel, ctxGroup, nsGroup);
         left.setAlignment(Pos.CENTER_LEFT);
-        HBox right = new HBox(10, searchField, refresh, liveBox, pfButton, appMenu);
+        HBox right = new HBox(10, searchField, refresh, liveBox, sealSecretBtn, pfButton, appMenu);
         right.setAlignment(Pos.CENTER_RIGHT);
         right.setMinWidth(Region.USE_PREF_SIZE); // never let the right cluster shrink below its controls
 
@@ -925,6 +954,8 @@ public class MainView extends BorderPane {
         items.add(new CommandPalette.Item("View", "Health", this::enterHealth));
         items.add(new CommandPalette.Item("View", "Topology", this::enterTopology));
         items.add(new CommandPalette.Item("View", "Events", this::enterEvents));
+        // Tools.
+        items.add(new CommandPalette.Item("Tool", "Seal a Secret…", this::openSealSecretDialog));
         // Namespaces in the current context.
         for (String ns : namespaceBox.getItems()) {
             if (ns != null && !ns.isBlank()) {
@@ -3049,6 +3080,565 @@ public class MainView extends BorderPane {
         });
     }
 
+    /** True if the bytes decode as clean UTF-8 text (so a value can be shown/edited as text). */
+    private static boolean looksTextual(byte[] b) {
+        try {
+            var decoder = StandardCharsets.UTF_8.newDecoder();
+            decoder.onMalformedInput(java.nio.charset.CodingErrorAction.REPORT);
+            decoder.onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+            java.nio.CharBuffer cb = decoder.decode(java.nio.ByteBuffer.wrap(b));
+            for (int i = 0; i < cb.length(); i++) {
+                char c = cb.charAt(i);
+                if ((c < 0x09) || (c > 0x0d && c < 0x20)) {
+                    return false; // control char other than tab/newline/CR → treat as binary
+                }
+            }
+            return true;
+        } catch (Exception notText) {
+            return false;
+        }
+    }
+
+    /**
+     * Parse pasted {@code key=value} / {@code key: value} lines (dotenv- or YAML-style) into an ordered
+     * key→value map. Blank lines and {@code #} comments are ignored, a leading {@code export } is dropped,
+     * the first {@code =} or {@code :} (whichever comes first) separates key from value, and matching
+     * surrounding quotes are stripped. Multiline values aren't supported here — use the form / File… for those.
+     */
+    private static Map<String, String> parseBulkEntries(String text) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (text == null) {
+            return out;
+        }
+        for (String raw : text.split("\\r?\\n")) {
+            String t = raw.strip();
+            if (t.isEmpty() || t.startsWith("#")) {
+                continue;
+            }
+            if (t.startsWith("export ")) {
+                t = t.substring("export ".length()).strip();
+            }
+            int eq = t.indexOf('=');
+            int colon = t.indexOf(':');
+            int sep;
+            if (eq >= 0 && colon >= 0) {
+                sep = Math.min(eq, colon);
+            } else if (eq >= 0) {
+                sep = eq;
+            } else if (colon >= 0) {
+                sep = colon;
+            } else {
+                continue; // no separator — skip
+            }
+            String key = t.substring(0, sep).strip();
+            String val = t.substring(sep + 1).strip();
+            if (val.length() >= 2) {
+                char f = val.charAt(0);
+                char l = val.charAt(val.length() - 1);
+                if ((f == '"' && l == '"') || (f == '\'' && l == '\'')) {
+                    val = val.substring(1, val.length() - 1);
+                }
+            }
+            if (!key.isEmpty()) {
+                out.put(key, val);
+            }
+        }
+        return out;
+    }
+
+    /** Read an existing Secret (async) and open the Seal dialog pre-filled from it. */
+    private void sealExistingSecret(String name) {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String ns = effectiveNamespace();
+        status("Reading " + name + "…");
+        runAsync(() -> service.readSecret(ctx.name(), ns, name),
+                content -> openSealSecretDialog(content));
+    }
+
+    private void openSealSecretDialog() {
+        openSealSecretDialog(null);
+    }
+
+    /** As {@link #openSealSecretDialog()}, pre-filling name/type/values from an existing Secret. */
+    private void openSealSecretDialog(SecretContent prefill) {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            status("Select a context first.");
+            return;
+        }
+        javafx.stage.Window owner = getScene() != null ? getScene().getWindow() : null;
+
+        // Namespace default: the Secret being re-sealed if present, else the toolbar selection. Shown in
+        // an editable dropdown so it can be changed (strict scope binds the SealedSecret to its namespace).
+        String inferredNs = prefill != null ? prefill.namespace()
+                : (allNsMode.get() ? "" : effectiveNamespace());
+
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("Seal a Secret");
+        dialog.setResizable(true);
+        if (owner != null) {
+            dialog.initOwner(owner);
+        }
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        Label intro = new Label("Turn secret values into an encrypted SealedSecret that's safe to commit "
+                + "to Git. Each value can be typed, or loaded from a file (e.g. a .json or .p12). Nothing "
+                + "leaves this machine unencrypted.");
+        intro.setWrapText(true);
+        intro.getStyleClass().add("muted");
+
+        // --- input mode: a simple form, or paste a whole Secret manifest (kubeseal-style) ---
+        ToggleGroup inputMode = new ToggleGroup();
+        RadioButton yamlMode = new RadioButton("Paste a Secret YAML");
+        RadioButton typeMode = new RadioButton("Enter values");
+        yamlMode.setToggleGroup(inputMode);
+        typeMode.setToggleGroup(inputMode);
+        yamlMode.setSelected(true); // kubeseal-style paste is the default
+        HBox modeRow = new HBox(16, new Label("Input:"), yamlMode, typeMode);
+        modeRow.setAlignment(Pos.CENTER_LEFT);
+
+        // --- name + namespace (editable dropdown, prefilled from the toolbar) ---
+        TextField nameField = new TextField();
+        nameField.setPromptText("secret name (e.g. admin-backend-files)");
+        HBox.setHgrow(nameField, Priority.ALWAYS);
+
+        ComboBox<String> nsBox = new ComboBox<>();
+        nsBox.setEditable(true);
+        nsBox.setPromptText("namespace");
+        nsBox.setMinWidth(170);
+        for (String n : namespaceBox.getItems()) {
+            if (n != null && !n.isBlank() && !ALL_NAMESPACES.equals(n)) {
+                nsBox.getItems().add(n);
+            }
+        }
+        if (inferredNs != null && !inferredNs.isBlank()) {
+            if (!nsBox.getItems().contains(inferredNs)) {
+                nsBox.getItems().add(0, inferredNs);
+            }
+            nsBox.setValue(inferredNs);
+        }
+        // The live namespace text, whether picked from the list or typed in.
+        Supplier<String> nsValue = () -> {
+            String v = nsBox.getEditor().getText();
+            if (v == null || v.isBlank()) {
+                v = nsBox.getValue();
+            }
+            return v == null ? "" : v.trim();
+        };
+        HBox nameRow = new HBox(8, new Label("Name:"), nameField, new Label("   Namespace:"), nsBox);
+        nameRow.setAlignment(Pos.CENTER_LEFT);
+
+        // --- certificate: auto-fetched on open; the knobs live under Advanced ---
+        RSAPublicKey[] pubKey = {null};
+        Label certStatus = new Label("Connecting to the Sealed Secrets controller…");
+        certStatus.getStyleClass().add("muted");
+        certStatus.setWrapText(true);
+
+        ComboBox<SealedSecrets.Scope> scopeBox = new ComboBox<>(
+                FXCollections.observableArrayList(SealedSecrets.Scope.values()));
+        scopeBox.setValue(SealedSecrets.Scope.STRICT);
+        Label scopeHelp = new Label(SealedSecrets.Scope.STRICT.help());
+        scopeHelp.getStyleClass().add("muted");
+        scopeHelp.setWrapText(true);
+        scopeBox.valueProperty().addListener((o, a, b) -> scopeHelp.setText(b == null ? "" : b.help()));
+
+        ComboBox<String> typeBox = new ComboBox<>(FXCollections.observableArrayList(
+                "Opaque", "kubernetes.io/tls", "kubernetes.io/dockerconfigjson",
+                "kubernetes.io/basic-auth", "kubernetes.io/ssh-auth"));
+        typeBox.setEditable(true);
+        typeBox.setValue("Opaque");
+
+        ToggleGroup certSource = new ToggleGroup();
+        RadioButton fetchRadio = new RadioButton("Fetch from cluster");
+        RadioButton pasteRadio = new RadioButton("Paste / load PEM");
+        fetchRadio.setToggleGroup(certSource);
+        pasteRadio.setToggleGroup(certSource);
+        fetchRadio.setSelected(true);
+
+        TextField ctrlNs = new TextField("kube-system");
+        ctrlNs.setPrefColumnCount(12);
+        TextField ctrlName = new TextField("sealed-secrets-controller");
+        ctrlName.setPrefColumnCount(20);
+        Button fetchBtn = new Button("Re-fetch");
+        HBox fetchRow = new HBox(8, new Label("Controller ns:"), ctrlNs,
+                new Label("name:"), ctrlName, fetchBtn);
+        fetchRow.setAlignment(Pos.CENTER_LEFT);
+        Label fetchHint = new Label("Auto-detected on open. Only change these if the controller can't be "
+                + "found (the fields update to where it's found).");
+        fetchHint.getStyleClass().add("muted");
+        fetchHint.setWrapText(true);
+
+        TextArea pemArea = new TextArea();
+        pemArea.setPromptText("-----BEGIN CERTIFICATE-----\n…paste the controller's cert.pem…\n-----END CERTIFICATE-----");
+        pemArea.getStyleClass().add("yaml-area");
+        pemArea.setPrefRowCount(4);
+        Label pemHint = new Label("Use this when KubeDesk can't reach the controller (e.g. no proxy "
+                + "permission). Get the PEM with:  kubeseal --fetch-cert");
+        pemHint.getStyleClass().add("muted");
+        pemHint.setWrapText(true);
+        Button loadPem = new Button("Load .pem…");
+        loadPem.setOnAction(e -> {
+            FileChooser fc = new FileChooser();
+            fc.setTitle("Load certificate (PEM)");
+            fc.getExtensionFilters().addAll(
+                    new FileChooser.ExtensionFilter("PEM / cert", "*.pem", "*.crt", "*.cert"),
+                    new FileChooser.ExtensionFilter("All files", "*.*"));
+            File f = fc.showOpenDialog(owner);
+            if (f != null) {
+                try {
+                    pemArea.setText(Files.readString(f.toPath()));
+                } catch (Exception ex) {
+                    pemArea.setText("# could not read file: " + ex.getMessage());
+                }
+            }
+        });
+        pemArea.textProperty().addListener((o, a, b) -> pubKey[0] = null);
+        VBox pasteBox = new VBox(6, pemHint, pemArea, loadPem);
+
+        TitledPane advanced = new TitledPane();
+        advanced.setText("Advanced — scope, secret type, certificate source");
+        advanced.setExpanded(false);
+        VBox advBody = new VBox(10,
+                new HBox(8, new Label("Scope:"), scopeBox), scopeHelp,
+                new HBox(8, new Label("Secret type:"), typeBox),
+                new Separator(),
+                new Label("Certificate source"),
+                new HBox(16, fetchRadio, pasteRadio),
+                fetchRow, fetchHint, pasteBox);
+        advanced.setContent(advBody);
+
+        // Fetch the cert (auto on open, and on demand); on failure, surface the knobs.
+        Runnable doFetch = () -> {
+            pubKey[0] = null;
+            certStatus.setText("Connecting to the Sealed Secrets controller…");
+            certStatus.setStyle("-fx-text-fill: #6b7280;");
+            runAsync(() -> service.fetchSealedSecretCert(ctx.name(), ctrlNs.getText().trim(),
+                            ctrlName.getText().trim()),
+                    cert -> {
+                        try {
+                            pubKey[0] = SealedSecrets.publicKeyFromPem(cert.pem());
+                            // Reflect where the controller was actually found (discovery may differ from the hints).
+                            ctrlNs.setText(cert.namespace());
+                            ctrlName.setText(cert.name());
+                            certStatus.setText("✓ Controller certificate loaded from " + cert.namespace()
+                                    + "/" + cert.name() + " (RSA " + pubKey[0].getModulus().bitLength()
+                                    + "-bit) — ready to seal.");
+                            certStatus.setStyle("-fx-text-fill: #15803d;");
+                        } catch (Exception ex) {
+                            certStatus.setText("✗ " + ex.getMessage());
+                            certStatus.setStyle("-fx-text-fill: #b91c1c;");
+                            advanced.setExpanded(true);
+                        }
+                    });
+        };
+
+        Runnable syncCertSource = () -> {
+            boolean fetch = fetchRadio.isSelected();
+            fetchRow.setVisible(fetch);
+            fetchRow.setManaged(fetch);
+            fetchHint.setVisible(fetch);
+            fetchHint.setManaged(fetch);
+            pasteBox.setVisible(!fetch);
+            pasteBox.setManaged(!fetch);
+        };
+        fetchRadio.setOnAction(e -> { syncCertSource.run(); doFetch.run(); });
+        pasteRadio.setOnAction(e -> {
+            pubKey[0] = null;
+            syncCertSource.run();
+            certStatus.setText("Using a pasted / loaded certificate (checked when you seal).");
+            certStatus.setStyle("-fx-text-fill: #6b7280;");
+        });
+        fetchBtn.setOnAction(e -> doFetch.run());
+        syncCertSource.run();
+
+        // --- values: ONE box, no grid of rows ---
+        // Typed values go here, one per line (key=value or key: value). Binary / large values are kept
+        // separately as file attachments, so there's never a grid of cells to manage.
+        TextArea valuesArea = new TextArea();
+        valuesArea.setPromptText("key=value or key: value — one entry per line");
+        valuesArea.getStyleClass().add("yaml-area");
+        valuesArea.setPrefRowCount(8);
+        VBox.setVgrow(valuesArea, Priority.ALWAYS);
+
+        Map<String, byte[]> attachments = new LinkedHashMap<>(); // key -> raw bytes (binary/large values)
+        VBox attachList = new VBox(4);
+        Runnable[] renderAttach = new Runnable[1];
+        renderAttach[0] = () -> {
+            attachList.getChildren().clear();
+            for (Map.Entry<String, byte[]> en : attachments.entrySet()) {
+                String k = en.getKey();
+                Label nm = new Label("📄 " + k + " · " + en.getValue().length + " bytes");
+                nm.getStyleClass().add("muted");
+                Button rm = new Button("✕");
+                rm.getStyleClass().add("icon-button");
+                rm.setOnAction(ev -> {
+                    attachments.remove(k);
+                    renderAttach[0].run();
+                });
+                HBox chip = new HBox(8, nm, rm);
+                chip.setAlignment(Pos.CENTER_LEFT);
+                attachList.getChildren().add(chip);
+            }
+        };
+        Button attachBtn = new Button("Attach a file…");
+        attachBtn.setTooltip(new Tooltip("For binary or large values — a .p12, a .json, a certificate"));
+        attachBtn.setOnAction(e -> {
+            FileChooser fc = new FileChooser();
+            fc.setTitle("Attach a file as a key");
+            File f = fc.showOpenDialog(owner);
+            if (f == null) {
+                return;
+            }
+            try {
+                byte[] bytes = Files.readAllBytes(f.toPath());
+                TextInputDialog keyDlg = new TextInputDialog(f.getName());
+                keyDlg.setTitle("Attach file");
+                keyDlg.setHeaderText(null);
+                keyDlg.setContentText("Key for this file:");
+                if (owner != null) {
+                    keyDlg.initOwner(owner);
+                }
+                String key = keyDlg.showAndWait().map(String::trim).orElse(null);
+                if (key != null && !key.isEmpty()) {
+                    attachments.put(key, bytes);
+                    renderAttach[0].run();
+                }
+            } catch (Exception ex) {
+                statusError("Could not read file: " + ex.getMessage());
+            }
+        });
+
+        Label dataLabel = new Label("Values");
+        dataLabel.setStyle("-fx-font-weight: bold;");
+        Label dataHint = new Label("One entry per line, for example:\n"
+                + "username=admin\npassword=s3cr3t\napi-key: abc123\n"
+                + "For binary or multi-line values, use Attach a file.");
+        dataHint.getStyleClass().add("muted");
+        VBox dataSection = new VBox(8, dataLabel, dataHint, valuesArea, attachList, attachBtn);
+        dataSection.getStyleClass().add("form-section");
+
+        // --- alternative input: paste a whole Secret manifest (kubeseal-style) ---
+        TextArea yamlArea = new TextArea();
+        yamlArea.setPromptText("Paste a Secret manifest (kind: Secret) here…");
+        yamlArea.getStyleClass().add("yaml-area");
+        yamlArea.setPrefRowCount(14);
+        VBox.setVgrow(yamlArea, Priority.ALWAYS);
+        Label yamlHint = new Label("Paste a plain Secret (name, namespace, type, data/stringData). "
+                + "It's sealed into the SealedSecret below — the plaintext never leaves this machine.");
+        yamlHint.getStyleClass().add("muted");
+        yamlHint.setWrapText(true);
+        Button insertExample = new Button("Insert example");
+        insertExample.setTooltip(new Tooltip("Fill in a sample Secret you can edit"));
+        insertExample.setOnAction(e -> yamlArea.setText(SAMPLE_SECRET_YAML));
+        VBox yamlBox = new VBox(8, yamlHint, insertExample, yamlArea);
+        yamlBox.getStyleClass().add("form-section");
+
+        // The two input layouts; one is shown at a time based on the mode toggle.
+        VBox formBox = new VBox(14, nameRow, dataSection);
+        VBox.setVgrow(dataSection, Priority.ALWAYS); // let the values area take the free vertical space
+        Runnable syncInputMode = () -> {
+            boolean yaml = yamlMode.isSelected();
+            formBox.setVisible(!yaml);
+            formBox.setManaged(!yaml);
+            yamlBox.setVisible(yaml);
+            yamlBox.setManaged(yaml);
+        };
+        typeMode.setOnAction(e -> syncInputMode.run());
+        yamlMode.setOnAction(e -> syncInputMode.run());
+        syncInputMode.run();
+
+        // --- output ---
+        TextArea output = new TextArea();
+        output.setEditable(false);
+        output.getStyleClass().add("yaml-area");
+        output.setPrefRowCount(10);
+        output.setPromptText("The SealedSecret manifest appears here after you Seal.");
+        VBox.setVgrow(output, Priority.ALWAYS);
+        Button copyBtn = new Button("⧉ Copy");
+        Button saveBtn = new Button("Save .yaml…");
+        Button applyBtn = new Button("Apply to cluster…");
+        applyBtn.getStyleClass().add("accent-button");
+        // The output actions do nothing until there's a result.
+        copyBtn.disableProperty().bind(output.textProperty().isEmpty());
+        saveBtn.disableProperty().bind(output.textProperty().isEmpty());
+        applyBtn.disableProperty().bind(output.textProperty().isEmpty());
+        HBox outputBtns = new HBox(8, copyBtn, saveBtn, applyBtn);
+        Label outputLabel = new Label("SealedSecret manifest");
+        VBox outputSection = new VBox(8, outputLabel, output, outputBtns);
+
+        copyBtn.setOnAction(e -> {
+            ClipboardContent cc = new ClipboardContent();
+            cc.putString(output.getText());
+            Clipboard.getSystemClipboard().setContent(cc);
+            status("SealedSecret YAML copied to clipboard.");
+        });
+        saveBtn.setOnAction(e -> {
+            FileChooser fc = new FileChooser();
+            fc.setTitle("Save SealedSecret");
+            String base = nameField.getText().isBlank() ? "sealed-secret" : nameField.getText().trim();
+            fc.setInitialFileName(base + ".yaml");
+            fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("YAML", "*.yaml", "*.yml"));
+            File f = fc.showSaveDialog(owner);
+            if (f != null) {
+                try {
+                    Files.writeString(f.toPath(), output.getText());
+                    status("Saved " + f.getName() + ".");
+                } catch (Exception ex) {
+                    statusError("Could not save: " + ex.getMessage());
+                }
+            }
+        });
+        applyBtn.setOnAction(e -> {
+            String ns = nsValue.get();
+            if (!confirm("Apply SealedSecret?", "Create SealedSecret \"" + nameField.getText().trim()
+                    + "\" in namespace " + ns + "?\n\nThe controller will unseal it into a real Secret.")) {
+                return;
+            }
+            status("Applying SealedSecret…");
+            runAsync(() -> service.applyManifests(ctx.name(), ns, output.getText()), summary -> {
+                showReport("Apply result", summary);
+                status("Apply complete.");
+            });
+        });
+
+        // --- seal action ---
+        Button sealBtn = new Button("🔒 Seal →");
+        sealBtn.getStyleClass().add("accent-button");
+        Region sealSpacer = new Region();
+        HBox.setHgrow(sealSpacer, Priority.ALWAYS);
+        HBox sealBar = new HBox(8, sealSpacer, sealBtn);
+        sealBtn.setOnAction(e -> {
+            String name;
+            String ns;
+            String type;
+            Map<String, byte[]> data = new LinkedHashMap<>();
+            if (yamlMode.isSelected()) {
+                // Parse a pasted Secret manifest; it carries name/namespace/type/values.
+                SecretContent parsed;
+                try {
+                    parsed = service.parseSecretYaml(yamlArea.getText());
+                } catch (Exception ex) {
+                    statusError(ex.getMessage());
+                    return;
+                }
+                name = parsed.name() == null ? "" : parsed.name().trim();
+                ns = (parsed.namespace() != null && !parsed.namespace().isBlank())
+                        ? parsed.namespace().trim() : nsValue.get();
+                type = (parsed.type() != null && !parsed.type().isBlank()) ? parsed.type() : "Opaque";
+                if (parsed.data() != null) {
+                    data.putAll(parsed.data());
+                }
+                if (ns.isBlank()) {
+                    statusError("The pasted Secret has no namespace — add metadata.namespace.");
+                    return;
+                }
+            } else {
+                name = nameField.getText() == null ? "" : nameField.getText().trim();
+                ns = nsValue.get();
+                type = typeBox.getValue() == null ? "Opaque" : typeBox.getValue().trim();
+                for (Map.Entry<String, String> en : parseBulkEntries(valuesArea.getText()).entrySet()) {
+                    data.put(en.getKey(), en.getValue().getBytes(StandardCharsets.UTF_8));
+                }
+                for (Map.Entry<String, byte[]> en : attachments.entrySet()) {
+                    data.put(en.getKey(), en.getValue()); // an attachment overrides a typed key of the same name
+                }
+                if (ns.isBlank()) {
+                    statusError("Enter a namespace.");
+                    return;
+                }
+            }
+            if (name.isBlank()) {
+                statusError("Enter a secret name.");
+                return;
+            }
+            if (data.isEmpty()) {
+                statusError("Add at least one value (or paste a Secret with data).");
+                return;
+            }
+            // Resolve the public key from the active source.
+            try {
+                if (pasteRadio.isSelected()) {
+                    pubKey[0] = SealedSecrets.publicKeyFromPem(pemArea.getText());
+                } else if (pubKey[0] == null) {
+                    certStatus.setText("✗ No controller certificate yet — open Advanced to set the "
+                            + "controller Service name/namespace and Re-fetch, or switch to Paste / load PEM.");
+                    certStatus.setStyle("-fx-text-fill: #b91c1c;");
+                    advanced.setExpanded(true);
+                    statusError("No controller certificate — see the dialog.");
+                    return;
+                }
+            } catch (Exception ex) {
+                certStatus.setText("✗ Certificate problem: " + ex.getMessage());
+                certStatus.setStyle("-fx-text-fill: #b91c1c;");
+                statusError("Certificate problem: " + ex.getMessage());
+                return;
+            }
+            try {
+                String yaml = SealedSecrets.buildYaml(pubKey[0], ns, name, scopeBox.getValue(),
+                        type, data, null, null);
+                output.setText(yaml);
+                status("Sealed " + data.size() + " value(s). Review, then copy, save or apply.");
+            } catch (Exception ex) {
+                statusError("Sealing failed: " + ex.getMessage());
+            }
+        });
+
+        // Re-sealing an existing Secret: fill in its name, type and current values. Simple one-line text
+        // values go into the box as key=value; binary or multi-line values become file attachments.
+        if (prefill != null) {
+            // Re-sealing an existing Secret pre-fills the form, so switch to it.
+            typeMode.setSelected(true);
+            syncInputMode.run();
+            dialog.setTitle("Seal \"" + prefill.name() + "\"");
+            nameField.setText(prefill.name());
+            if (prefill.type() != null && !prefill.type().isBlank()) {
+                typeBox.setValue(prefill.type());
+            }
+            if (prefill.data() != null) {
+                StringBuilder lines = new StringBuilder();
+                for (Map.Entry<String, byte[]> en : prefill.data().entrySet()) {
+                    byte[] b = en.getValue();
+                    String asText = looksTextual(b) ? new String(b, StandardCharsets.UTF_8) : null;
+                    if (asText != null && !asText.contains("\n")) {
+                        lines.append(en.getKey()).append('=').append(asText).append('\n');
+                    } else {
+                        attachments.put(en.getKey(), b); // multi-line text or binary → attachment
+                    }
+                }
+                valuesArea.setText(lines.toString());
+                renderAttach[0].run();
+            }
+        }
+
+        // Config (cert status + Advanced) sits up top; below it a draggable vertical split puts the input
+        // (paste/form) over the result. The split fills the dialog and grows with it (incl. maximized).
+        VBox topConfig = new VBox(14, intro, modeRow, certStatus, advanced);
+        VBox inputStack = new VBox(14, formBox, yamlBox);
+        VBox.setVgrow(formBox, Priority.ALWAYS);
+        VBox.setVgrow(yamlBox, Priority.ALWAYS);
+        VBox inputPane = new VBox(10, inputStack, sealBar);
+        VBox.setVgrow(inputStack, Priority.ALWAYS);
+        inputPane.setMinHeight(0);
+        outputSection.setMinHeight(0);
+        SplitPane ioSplit = new SplitPane(inputPane, outputSection);
+        ioSplit.setOrientation(Orientation.VERTICAL);
+        ioSplit.setDividerPositions(0.6);
+        VBox content = new VBox(14, topConfig, ioSplit);
+        VBox.setVgrow(ioSplit, Priority.ALWAYS);
+        content.setMinHeight(0);
+        content.setPrefSize(680, 640);
+        content.setPadding(new Insets(10));
+        dialog.getDialogPane().setContent(content);
+
+        // Auto-fetch the controller certificate as the dialog opens, and focus the active input.
+        doFetch.run();
+        Platform.runLater(() -> (yamlMode.isSelected() ? yamlArea : nameField).requestFocus());
+        dialog.showAndWait();
+    }
+
     /** Show a multi-line, read-only report (e.g. the result of applying manifests). */
     private void showReport(String header, String text) {
         Alert alert = new Alert(Alert.AlertType.INFORMATION);
@@ -3685,6 +4275,10 @@ public class MainView extends BorderPane {
         if (mode != ViewMode.OVERVIEW) {
             stopOverviewMetrics();
         }
+        // The "Seal…" action belongs only to the Secrets list view.
+        boolean onSecrets = mode == ViewMode.RESOURCE && currentKind == ResourceKind.SECRETS;
+        sealSecretBtn.setVisible(onSecrets);
+        sealSecretBtn.setManaged(onSecrets);
     }
 
     private void loadTopology() {
@@ -5145,6 +5739,11 @@ public class MainView extends BorderPane {
             MenuItem portForward = new MenuItem("Port forward…");
             portForward.setOnAction(e -> openPortForwardDialog(name));
             menu.getItems().addAll(restartPod, portForward);
+        }
+        if (kind == ResourceKind.SECRETS) {
+            MenuItem seal = new MenuItem("🔒 Seal as SealedSecret…");
+            seal.setOnAction(e -> sealExistingSecret(name));
+            menu.getItems().add(seal);
         }
 
         MenuItem copyName = new MenuItem("Copy name");

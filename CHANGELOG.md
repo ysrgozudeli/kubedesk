@@ -3,6 +3,29 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.18.0] - 2026-11-15
+
+Adds a **Sealed Secrets** generator — encrypt secret values into a commit-safe `SealedSecret` without the `kubeseal` CLI.
+
+### Added
+- **Seal a Secret (Bitnami Sealed Secrets), no `kubeseal` needed.** From **Config → Secrets** (a `🔒 Seal…`
+  toolbar button, the command palette, or right-click a Secret → **Seal as SealedSecret…**), turn plaintext
+  values into an encrypted `SealedSecret` manifest that's safe to commit to Git. Encryption happens locally
+  against the controller's public certificate — the plaintext never leaves the machine. Copy, save to a
+  `.yaml`, or apply it in-app.
+- **kubeseal-style by default.** Paste a plain `Secret` manifest into one box and get the `SealedSecret` in
+  the other (with a draggable divider between them); or switch to a simple form. Right-clicking an existing
+  Secret pre-fills the form from its current keys/values (binary values kept as-is).
+- **Auto cert discovery.** The controller is found automatically (common names across `kube-system` /
+  `sealed-secrets` / `sealed-secrets-system`, the standard controller labels, or any `*sealed*` Service),
+  with editable controller name/namespace and a paste/load-PEM fallback for clusters where the API proxy is
+  denied. Scope (strict / namespace-wide / cluster-wide) and Secret type are selectable under **Advanced**.
+
+### Notes
+- Crypto is byte-compatible with `kubeseal` (AES-256-GCM session key + RSA-OAEP-SHA256, scope as the OAEP
+  label). The controller's self-signed cert carries an empty DN, which Java's `CertificateFactory` rejects,
+  so — like `kubeseal` — KubeDesk reads the public key out of the certificate without validating it.
+
 ## [1.17.0] - 2026-11-08
 
 Adds a **Run script** action to the pod Shell tab for running multi-line scripts reliably.

@@ -254,6 +254,34 @@ public interface ClusterService {
     void applyYaml(String context, String namespace, String yaml);
 
     /**
+     * Fetch the Sealed Secrets controller's public certificate (PEM) from the cluster, via the
+     * API-server service proxy — the same source {@code kubeseal --fetch-cert} uses. The certificate is
+     * public; this only needs proxy GET access to the controller Service. Used to encrypt values locally
+     * into a {@code SealedSecret}. Throws if the controller isn't reachable under the given name/namespace.
+     *
+     * <p>The controller is auto-discovered, so the returned {@link Dtos.SealedSecretCert} also reports the
+     * namespace/name it was actually found at (which may differ from the hints passed in).
+     *
+     * @param controllerNamespace a hint for the controller's namespace (commonly {@code kube-system})
+     * @param controllerName      a hint for the controller Service name (commonly {@code sealed-secrets-controller})
+     */
+    Dtos.SealedSecretCert fetchSealedSecretCert(String context, String controllerNamespace, String controllerName);
+
+    /**
+     * Read a Secret and return its decoded contents (key → raw bytes, plus its type), so the UI can
+     * pre-fill the "Seal a Secret" generator from an existing Secret. Throws if the Secret can't be read.
+     */
+    Dtos.SecretContent readSecret(String context, String namespace, String name);
+
+    /**
+     * Parse a pasted {@code Secret} manifest (YAML or JSON) into its decoded contents, for sealing it
+     * directly — like piping a Secret into {@code kubeseal}. Reads {@code metadata.name/namespace},
+     * {@code type}, and both {@code data} (base64) and {@code stringData} (plain). No cluster call is
+     * made. Throws if the document isn't a Secret or has no name.
+     */
+    Dtos.SecretContent parseSecretYaml(String yaml);
+
+    /**
      * Create or update one or more resources from a (possibly multi-document) YAML manifest, via
      * server-side apply — like {@code kubectl apply -f}, but over the API (no kubectl).
      *

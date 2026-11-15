@@ -112,6 +112,12 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   pods don't get the option, since nothing would bring them back.
 - **"+ Create / Apply YAML"** — create or update any resource(s) via server-side apply (multi-document,
   open-from-file), with **live YAML linting** and a **Validate (dry-run)** button.
+- **Seal a Secret (Sealed Secrets)** — generate a Bitnami **`SealedSecret`** that's safe to commit to Git,
+  **no `kubeseal` CLI**. From **Config → Secrets** (`🔒 Seal…`, the command palette, or right-click a Secret
+  → *Seal as SealedSecret…*): paste a `Secret` manifest (kubeseal-style) or fill a form, and copy / save /
+  apply the result. Values are encrypted **locally** against the controller's public cert (auto-discovered,
+  with a paste-PEM fallback) — the plaintext never leaves your machine. Strict / namespace-wide / cluster-wide
+  scopes supported; binary values and re-sealing an existing Secret both work.
 - **Pod exec** command console.
 - **Port-forwarding** — open a tunnel to a pod port at `localhost:<port>`; a toolbar manager lists
   active tunnels (Copy / Open / Stop). Tunnels are persisted and offered for restore on next launch.
@@ -286,13 +292,13 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.16.0**: 12 resource kinds, live watches, details panel (exec + logs + live
+Shipped through **v1.18.0**: 12 resource kinds, live watches, details panel (exec + logs + live
 metrics), pod diagnostics, live log follow + detachable log windows, management actions (incl. pod
-restart), Create/Apply with lint + dry-run, port-forwarding, topology view, health scan, Events view,
-a read-only **Helm releases** view with a revision diff, an Overview dashboard with cluster capacity +
-per-node usage + **live CPU/memory charts**, a **Settings** dialog, embedded kubectl console, a command
-palette, the experimental read-only **MCP server with a live UI mirror**, and cross-platform native
-packaging.
+restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
+port-forwarding, topology view, health scan, Events view, a read-only **Helm releases** view with a
+revision diff, an Overview dashboard with cluster capacity + per-node usage + **live CPU/memory charts**,
+a **Settings** dialog, embedded kubectl console, a command palette, the experimental read-only **MCP
+server with a live UI mirror**, and cross-platform native packaging.
 
 Candidate next:
 - **MCP server — write actions.** The read-only server and its live UI mirror already exist
@@ -302,7 +308,7 @@ Candidate next:
 - **Multi-pod log tailing** (stern-style — one merged stream across a Deployment's pods; single-pod
   follow + detachable windows already shipped) and optional Loki/cloud-logging integration.
 - **Headless health CLI** for CI/CD gates (reuses `ClusterService.healthCheck`).
-- Sealed Secrets, generic CRD support, and macOS signing/notarization.
+- Generic CRD support and macOS signing/notarization.
 
 ## 📖 Guides
 

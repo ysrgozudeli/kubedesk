@@ -32,6 +32,20 @@ public final class Dtos {
     }
 
     /**
+     * A Secret's decoded contents, for re-sealing it as a SealedSecret. {@code data} maps each key to
+     * its raw (base64-decoded) bytes; {@code type} is the Secret type (e.g. {@code Opaque}).
+     */
+    public record SecretContent(String name, String namespace, String type, Map<String, byte[]> data) {
+    }
+
+    /**
+     * The Sealed Secrets controller's public certificate (PEM) plus the Service it was actually found at
+     * (which may differ from what was asked, since the controller is auto-discovered).
+     */
+    public record SealedSecretCert(String namespace, String name, String pem) {
+    }
+
+    /**
      * Cluster-wide resource capacity for the Overview dashboard, aggregated across all nodes.
      *
      * <p>Three dimensions, each as a triple of <em>requested</em> (sum of pod container requests on

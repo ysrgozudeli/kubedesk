@@ -7,3 +7,6 @@ dependency-reduced-pom.xml
 *.iml
 .vscode/
 .DS_Store
+
+# Exported Claude Code session transcripts (local reference only — never committed)
+.sessions/

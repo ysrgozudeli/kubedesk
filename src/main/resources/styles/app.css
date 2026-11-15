@@ -497,6 +497,15 @@
     -fx-border-width: 1;
 }
 
+/* A subtly bordered block that groups related fields inside a form/dialog. */
+.form-section {
+    -fx-padding: 12;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-border-color: #e3e6ea;
+    -fx-border-width: 1;
+}
+
 /* ---- table ---- */
 .table-view {
     -fx-background-color: white;
