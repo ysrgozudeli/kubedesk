@@ -121,6 +121,9 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   apply the result. Values are encrypted **locally** against the controller's public cert (auto-discovered,
   with a paste-PEM fallback) — the plaintext never leaves your machine. Strict / namespace-wide / cluster-wide
   scopes supported; binary values and re-sealing an existing Secret both work.
+- **Base64 encode / decode** — a `⇄ Base64…` button on the **Config → Secrets** toolbar (and the command
+  palette) opens a local converter: encode text to Base64, or decode a Secret's Base64 value back to
+  plaintext. It all runs on your machine — the safe place to read a secret instead of an online decoder.
 - **Pod exec** command console.
 - **Port-forwarding** — open a tunnel to a pod port at `localhost:<port>`; a toolbar manager lists
   active tunnels (Copy / Open / Stop). Tunnels are persisted and offered for restore on next launch.

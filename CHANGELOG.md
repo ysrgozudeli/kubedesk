@@ -3,6 +3,16 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.19.0] - 2026-11-16
+
+### Added
+- **Base64 encode / decode tool.** A new `⇄ Base64…` button on the **Config → Secrets** toolbar (and a
+  "Base64 encode / decode…" command-palette entry) opens a small local converter: encode text to Base64,
+  or decode a Secret's Base64 value back to plaintext. Everything runs on your machine — it's the safe
+  place to read a secret value instead of pasting it into an online decoder. Decoding tolerates pasted
+  whitespace/newlines, flags invalid Base64, and notes when the bytes are binary rather than text. The
+  Secret view itself still shows values Base64-encoded, exactly as Kubernetes stores them.
+
 ## [1.18.3] - 2026-11-16
 
 ### Fixed

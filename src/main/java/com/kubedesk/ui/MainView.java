@@ -358,8 +358,9 @@ public class MainView extends BorderPane {
     private final List<PortForward> portForwards = new ArrayList<>();
     private final Button pfButton = new Button("Port-forwards");
 
-    // Contextual "seal a secret" action — shown in the toolbar only while browsing the Secrets list.
+    // Contextual Secret tools — shown in the toolbar only while browsing the Secrets list.
     private final Button sealSecretBtn = new Button("🔒 Seal…");
+    private final Button base64Btn = new Button("⇄ Base64…");
 
     // Auto-update: checks GitHub on startup and offers a one-click installer download.
     private final UpdateService updateService = new UpdateService();
@@ -805,6 +806,12 @@ public class MainView extends BorderPane {
         sealSecretBtn.setVisible(false);
         sealSecretBtn.setManaged(false);
 
+        base64Btn.setTooltip(new Tooltip("Encode text to Base64, or decode a Secret's Base64 value to "
+                + "plaintext — locally, so you never paste a secret into a website"));
+        base64Btn.setOnAction(e -> openBase64Dialog());
+        base64Btn.setVisible(false);
+        base64Btn.setManaged(false);
+
         consoleMenuItem.setOnAction(e -> toggleConsole(consoleMenuItem.isSelected()));
 
         MenuButton appMenu = new MenuButton("☰");
@@ -844,7 +851,7 @@ public class MainView extends BorderPane {
         // clipping). Right: search + actions + menu, pinned to the right edge.
         FlowPane left = new FlowPane(10, 8, loadConfigBtn, kubeConfigLabel, ctxGroup, nsGroup);
         left.setAlignment(Pos.CENTER_LEFT);
-        HBox right = new HBox(10, searchField, refresh, liveBox, sealSecretBtn, pfButton, appMenu);
+        HBox right = new HBox(10, searchField, refresh, liveBox, sealSecretBtn, base64Btn, pfButton, appMenu);
         right.setAlignment(Pos.CENTER_RIGHT);
         right.setMinWidth(Region.USE_PREF_SIZE); // never let the right cluster shrink below its controls
 
@@ -958,6 +965,7 @@ public class MainView extends BorderPane {
         items.add(new CommandPalette.Item("View", "Events", this::enterEvents));
         // Tools.
         items.add(new CommandPalette.Item("Tool", "Seal a Secret…", this::openSealSecretDialog));
+        items.add(new CommandPalette.Item("Tool", "Base64 encode / decode…", this::openBase64Dialog));
         // Namespaces in the current context.
         for (String ns : namespaceBox.getItems()) {
             if (ns != null && !ns.isBlank()) {
@@ -3176,6 +3184,122 @@ public class MainView extends BorderPane {
         openSealSecretDialog(null);
     }
 
+    /**
+     * A small local Base64 encode/decode utility. Everything happens on this machine — the point is to
+     * decode a Secret's Base64 value (or encode one to paste into a Secret) without sending it to a
+     * website. The Secret view keeps showing values Base64-encoded, exactly as Kubernetes stores them.
+     */
+    private void openBase64Dialog() {
+        javafx.stage.Window owner = getScene() != null ? getScene().getWindow() : null;
+
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("Base64 encode / decode");
+        dialog.setResizable(true);
+        if (owner != null) {
+            dialog.initOwner(owner);
+        }
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        Label intro = new Label("Encode text to Base64, or decode a Secret's Base64 value back to "
+                + "plaintext. Nothing leaves this machine — so this is the safe place to read a secret, "
+                + "not an online decoder.");
+        intro.setWrapText(true);
+        intro.getStyleClass().add("muted");
+
+        TextArea plainArea = new TextArea();
+        plainArea.setPromptText("Plain text…");
+        plainArea.getStyleClass().add("yaml-area");
+        plainArea.setPrefRowCount(7);
+        plainArea.setWrapText(true);
+
+        TextArea b64Area = new TextArea();
+        b64Area.setPromptText("Base64…");
+        b64Area.getStyleClass().add("yaml-area");
+        b64Area.setPrefRowCount(7);
+        b64Area.setWrapText(true);
+
+        Label statusLabel = new Label();
+        statusLabel.getStyleClass().add("muted");
+        statusLabel.setWrapText(true);
+
+        Button encodeBtn = new Button("Encode ↓");
+        encodeBtn.setTooltip(new Tooltip("Plain text → Base64"));
+        Button decodeBtn = new Button("Decode ↑");
+        decodeBtn.setTooltip(new Tooltip("Base64 → plain text"));
+
+        encodeBtn.setOnAction(e -> {
+            statusLabel.setStyle("");
+            String encoded = Base64.getEncoder().encodeToString(
+                    plainArea.getText().getBytes(StandardCharsets.UTF_8));
+            b64Area.setText(encoded);
+            statusLabel.setText("Encoded " + plainArea.getText().length() + " character(s).");
+        });
+        decodeBtn.setOnAction(e -> {
+            statusLabel.setStyle("");
+            // Tolerate whitespace/newlines a pasted value often carries.
+            String src = b64Area.getText().replaceAll("\\s", "");
+            if (src.isEmpty()) {
+                statusLabel.setText("Nothing to decode.");
+                return;
+            }
+            try {
+                byte[] bytes = Base64.getDecoder().decode(src);
+                String text = new String(bytes, StandardCharsets.UTF_8);
+                plainArea.setText(text);
+                // Round-trip check: if re-encoding differs, the bytes weren't valid UTF-8 text (e.g. a
+                // .p12 or other binary), so what's shown is a lossy view — say so rather than mislead.
+                boolean binary = !Base64.getEncoder().encodeToString(
+                        text.getBytes(StandardCharsets.UTF_8)).equals(
+                        Base64.getEncoder().encodeToString(bytes));
+                statusLabel.setText(binary
+                        ? "Decoded " + bytes.length + " byte(s) — this looks like binary data, so the text "
+                          + "shown is an approximation."
+                        : "Decoded " + bytes.length + " byte(s).");
+            } catch (IllegalArgumentException ex) {
+                statusLabel.setStyle("-fx-text-fill: #b91c1c;");
+                statusLabel.setText("✗ Not valid Base64.");
+            }
+        });
+
+        Button copyPlain = new Button("⧉ Copy");
+        copyPlain.setOnAction(e -> copyToClipboard(plainArea.getText()));
+        Button copyB64 = new Button("⧉ Copy");
+        copyB64.setOnAction(e -> copyToClipboard(b64Area.getText()));
+        Button clear = new Button("Clear");
+        clear.setOnAction(e -> {
+            plainArea.clear();
+            b64Area.clear();
+            statusLabel.setText("");
+            statusLabel.setStyle("");
+        });
+
+        HBox plainBar = new HBox(8, new Label("Plain text"), spacer(), copyPlain);
+        plainBar.setAlignment(Pos.CENTER_LEFT);
+        HBox b64Bar = new HBox(8, new Label("Base64"), spacer(), copyB64);
+        b64Bar.setAlignment(Pos.CENTER_LEFT);
+
+        HBox actions = new HBox(10, encodeBtn, decodeBtn, spacer(), clear);
+        actions.setAlignment(Pos.CENTER_LEFT);
+
+        VBox content = new VBox(10, intro,
+                plainBar, plainArea,
+                actions,
+                b64Bar, b64Area,
+                statusLabel);
+        content.setPrefWidth(560);
+        VBox.setVgrow(plainArea, Priority.ALWAYS);
+        VBox.setVgrow(b64Area, Priority.ALWAYS);
+        dialog.getDialogPane().setContent(content);
+        dialog.show();
+    }
+
+    /** A horizontal spacer that pushes following nodes to the right of an HBox. */
+    private static Region spacer() {
+        Region r = new Region();
+        HBox.setHgrow(r, Priority.ALWAYS);
+        return r;
+    }
+
     /** As {@link #openSealSecretDialog()}, pre-filling name/type/values from an existing Secret. */
     private void openSealSecretDialog(SecretContent prefill) {
         ContextInfo ctx = contextBox.getValue();
@@ -4289,10 +4413,12 @@ public class MainView extends BorderPane {
         if (mode != ViewMode.OVERVIEW) {
             stopOverviewMetrics();
         }
-        // The "Seal…" action belongs only to the Secrets list view.
+        // The Secret tools (Seal…, Base64…) belong only to the Secrets list view.
         boolean onSecrets = mode == ViewMode.RESOURCE && currentKind == ResourceKind.SECRETS;
         sealSecretBtn.setVisible(onSecrets);
         sealSecretBtn.setManaged(onSecrets);
+        base64Btn.setVisible(onSecrets);
+        base64Btn.setManaged(onSecrets);
     }
 
     private void loadTopology() {
