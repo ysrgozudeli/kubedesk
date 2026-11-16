@@ -3,6 +3,13 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.18.1] - 2026-11-16
+
+### Added
+- **Hover crosshair tooltip on Overview charts.** Hover over the live cluster CPU or memory chart to
+  see a crosshair (vertical + horizontal lines) with a dot that smoothly tracks the graph line. The
+  tooltip shows the exact time (HH:mm:ss) and the interpolated metric value at the hovered position.
+
 ## [1.18.0] - 2026-11-15
 
 Adds a **Sealed Secrets** generator — encrypt secret values into a commit-safe `SealedSecret` without the `kubeseal` CLI.

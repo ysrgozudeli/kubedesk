@@ -295,7 +295,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.18.0**: 12 resource kinds, an **all-namespaces view**, live watches, details panel
+Shipped through **v1.18.1**: 12 resource kinds, an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a read-only **Helm releases** view with a
