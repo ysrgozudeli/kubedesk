@@ -67,7 +67,14 @@ public class KubectlConsole extends VBox {
     private final Button stopBtn = new Button("Stop");
     private final Button clearBtn = new Button("Clear");
     private final Button closeBtn = new Button("✕");
+    // A one-click tip shown in the header row while a (Windows) command pipes into `grep`, which cmd.exe
+    // doesn't have. Clicking it rewrites `grep [-i]` → `findstr /i` in the input.
+    private final Button grepHint = new Button("💡 grep → findstr /i");
     private Runnable onClose = () -> { };
+
+    /** Matches a standalone `grep` token (not `pgrep`, not `grepped`), case-insensitively. */
+    private static final java.util.regex.Pattern GREP =
+            java.util.regex.Pattern.compile("(?i)(?<![\\w-])grep(?![\\w-])");
 
     // Command history, navigated with ↑/↓ from the input field.
     private final List<String> history = new ArrayList<>();
@@ -173,7 +180,15 @@ public class KubectlConsole extends VBox {
         closeBtn.getStyleClass().add("icon-button");
         closeBtn.setTooltip(new javafx.scene.control.Tooltip("Close the console"));
         closeBtn.setOnAction(e -> onClose.run());
-        HBox headerBar = new HBox(10, header, hspacer, clearBtn, closeBtn);
+
+        grepHint.getStyleClass().add("accent-button");
+        grepHint.setTooltip(new javafx.scene.control.Tooltip("grep isn't available in Windows cmd — "
+                + "click to replace it with findstr /i (which filters case-insensitively)"));
+        grepHint.setOnAction(e -> applyFindstr());
+        grepHint.setVisible(false);
+        grepHint.setManaged(false);
+
+        HBox headerBar = new HBox(10, header, hspacer, grepHint, clearBtn, closeBtn);
         headerBar.setAlignment(Pos.CENTER_LEFT);
         headerBar.setPadding(new Insets(6, 12, 6, 12));
         headerBar.getStyleClass().add("console-header");
@@ -189,6 +204,7 @@ public class KubectlConsole extends VBox {
         input.getStyleClass().add("shell-input");
         HBox.setHgrow(input, Priority.ALWAYS);
         input.setOnAction(e -> run());
+        input.textProperty().addListener((o, a, b) -> updateGrepHint(b));
         input.setOnKeyPressed(e -> {
             if (e.getCode() == KeyCode.UP) {
                 recallHistory(-1);
@@ -210,6 +226,26 @@ public class KubectlConsole extends VBox {
 
         getChildren().addAll(headerBar, output, inputBar);
         applyEnablement(false);
+    }
+
+    /** Show the grep→findstr tip only on Windows, and only while the input actually contains `grep`. */
+    private void updateGrepHint(String text) {
+        boolean show = WINDOWS && text != null && GREP.matcher(text).find();
+        grepHint.setVisible(show);
+        grepHint.setManaged(show);
+    }
+
+    /** Rewrite {@code grep} / {@code grep -i} in the input to {@code findstr /i}, then hide the tip. */
+    private void applyFindstr() {
+        // `grep` (optionally immediately followed by `-i`) → `findstr /i`. Other grep flags (-v, -E, -A…)
+        // have no clean findstr equivalent, so we leave them in place for the user to adjust, rather than
+        // silently translate them wrong.
+        String rewritten = input.getText().replaceAll(
+                "(?i)(?<![\\w-])grep(?![\\w-])(\\s+-i(?![\\w-]))?", "findstr /i");
+        input.setText(rewritten);
+        input.positionCaret(rewritten.length());
+        input.requestFocus();
+        updateGrepHint(rewritten);
     }
 
     // --- kubectl detection ------------------------------------------------------------------

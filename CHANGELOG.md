@@ -3,6 +3,15 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.19.1] - 2026-11-16
+
+### Added
+- **kubectl console: one-click `grep` → `findstr /i` on Windows.** The console runs commands through
+  `cmd /c`, which has no `grep`, so `… | grep foo` fails with "'grep' is not recognized". When the
+  input contains a `grep` token (Windows only), a `💡 grep → findstr /i` chip now appears in the header
+  row; clicking it rewrites `grep` / `grep -i` to `findstr /i` in place. Other grep flags (`-v`, `-E`,
+  `-A/-B/-C`) are left untouched rather than mistranslated, so you stay in control.
+
 ## [1.19.0] - 2026-11-16
 
 ### Added
