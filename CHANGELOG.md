@@ -3,6 +3,14 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.18.2] - 2026-11-16
+
+### Fixed
+- **"Seal as SealedSecret…" now shows when right-clicking a Secret in the main Secrets list.** The
+  context-menu item was only wired into the Health-findings table, so right-clicking a Secret in the
+  normal **Config → Secrets** list never offered it (despite the 1.18.0 notes saying it would). It is
+  now in the row menu for Secrets, alongside the existing toolbar button and command-palette entry.
+
 ## [1.18.1] - 2026-11-16
 
 ### Added

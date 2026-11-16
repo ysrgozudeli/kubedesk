@@ -1830,6 +1830,10 @@ public class MainView extends BorderPane {
         MenuItem showPods = new MenuItem("Show pods");
         showPods.setOnAction(e -> showPodsForWorkload(currentKind, resourceName(row.getItem())));
 
+        // Secrets: seal into an encrypted SealedSecret (safe to commit to Git).
+        MenuItem seal = new MenuItem("🔒 Seal as SealedSecret…");
+        seal.setOnAction(e -> sealExistingSecret(resourceName(row.getItem())));
+
         MenuItem copyName = new MenuItem("Copy name");
         copyName.setOnAction(e -> copyToClipboard(resourceName(row.getItem())));
 
@@ -1851,7 +1855,7 @@ public class MainView extends BorderPane {
         delete.setOnAction(e -> deleteAction(currentKind, resourceName(row.getItem())));
 
         ContextMenu menu = new ContextMenu(details, yaml, events, logs, portForward,
-                goToOwner, goToService, showPods,
+                goToOwner, goToService, showPods, seal,
                 new SeparatorMenuItem(), copyName, copyYaml,
                 new SeparatorMenuItem(), restart, restartPod, scale, delete);
         menu.setOnShowing(e -> {
@@ -1867,6 +1871,7 @@ public class MainView extends BorderPane {
                     || currentKind == ResourceKind.STATEFULSETS
                     || currentKind == ResourceKind.DAEMONSETS
                     || currentKind == ResourceKind.JOBS);
+            seal.setVisible(currentKind == ResourceKind.SECRETS);
             boolean isDeployment = currentKind == ResourceKind.DEPLOYMENTS;
             restart.setVisible(isDeployment);
             scale.setVisible(isDeployment);
