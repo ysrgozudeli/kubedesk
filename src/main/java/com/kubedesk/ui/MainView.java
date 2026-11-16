@@ -98,6 +98,8 @@ import javafx.scene.layout.VBox;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.shape.Circle;
+import javafx.scene.shape.Line;
+import javafx.scene.layout.Pane;
 import javafx.stage.FileChooser;
 import javafx.stage.Modality;
 
@@ -2512,7 +2514,14 @@ public class MainView extends BorderPane {
         NumberAxis y = new NumberAxis();
         y.setLabel(yLabel);
         y.setForceZeroInRange(true);
-        LineChart<Number, Number> chart = new LineChart<>(x, y);
+
+        // x values are elapsed seconds since the pane opened; the readout shows a tidy "Nm Ns".
+        java.util.function.DoubleFunction<String> elapsedLabel = CrosshairLineChart::formatElapsed;
+        java.util.function.DoubleFunction<String> valueLabel = val -> val >= 100
+                ? String.format("%.0f %s", val, yLabel)
+                : String.format("%.1f %s", val, yLabel);
+
+        CrosshairLineChart chart = new CrosshairLineChart(x, y, elapsedLabel, valueLabel);
         chart.setLegendVisible(false);
         chart.setAnimated(false);
         chart.setCreateSymbols(false);
@@ -4512,7 +4521,19 @@ public class MainView extends BorderPane {
         y.setForceZeroInRange(true);
         y.setAnimated(false);
         y.setMinorTickVisible(false);
-        LineChart<Number, Number> chart = new LineChart<>(x, y);
+
+        // Tooltip formatters: data-space x (seconds relative to the chart's epoch base) -> clock
+        // time, and the interpolated y value -> a labelled number. metricsBaseEpochSec is read
+        // live at hover time so the labels stay correct as the window scrolls.
+        java.util.function.DoubleFunction<String> timeLabel = epochRel ->
+                java.time.Instant.ofEpochSecond((long) epochRel + metricsBaseEpochSec)
+                        .atZone(java.time.ZoneId.systemDefault())
+                        .format(DateTimeFormatter.ofPattern("HH:mm:ss"));
+        java.util.function.DoubleFunction<String> valueLabel = val -> val >= 100
+                ? String.format("%.0f %s", val, yLabel)
+                : String.format("%.1f %s", val, yLabel);
+
+        CrosshairLineChart chart = new CrosshairLineChart(x, y, timeLabel, valueLabel);
         chart.setTitle(title);
         chart.setLegendVisible(false);
         chart.setAnimated(false);
