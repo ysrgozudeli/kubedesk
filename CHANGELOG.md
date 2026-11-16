@@ -3,6 +3,14 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.18.3] - 2026-11-16
+
+### Fixed
+- **Sealed Secrets: the "find the controller" hint now matches your OS.** When the controller Service
+  can't be auto-discovered (e.g. listing Services is RBAC-denied), the suggested command was always the
+  Unix `kubectl get svc -A | grep -i sealed`, which fails in Windows `cmd`/PowerShell ("grep is not
+  recognized"). On Windows the hint now shows `kubectl get svc -A | findstr /i sealed`.
+
 ## [1.18.2] - 2026-11-16
 
 ### Fixed

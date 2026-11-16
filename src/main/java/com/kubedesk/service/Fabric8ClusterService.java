@@ -725,9 +725,14 @@ public class Fabric8ClusterService implements ClusterService {
                     tried.append("\n  • ").append(c[0]).append('/').append(c[1]).append(" — ").append(rootMessage(e));
                 }
             }
+            // Suggest the matching filter for the user's shell (findstr on Windows cmd/PowerShell, grep elsewhere).
+            boolean windows = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
+            String findSvc = windows
+                    ? "kubectl get svc -A | findstr /i sealed"
+                    : "kubectl get svc -A | grep -i sealed";
             String hint = candidates.size() <= 6
                     ? "\n\n(Couldn't auto-discover the controller Service — listing Services may be denied "
-                      + "for this user. Find it with:  kubectl get svc -A | grep -i sealed)"
+                      + "for this user. Find it with:  " + findSvc + ")"
                     : "";
             throw new ClusterException("Couldn't find the Sealed Secrets controller certificate. Tried:"
                     + tried + hint + "\n\nOpen Advanced to set the controller's Service name/namespace and "
