@@ -124,6 +124,15 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
 - **Base64 encode / decode** — a `⇄ Base64…` button on the **Config → Secrets** toolbar (and the command
   palette) opens a local converter: encode text to Base64, or decode a Secret's Base64 value back to
   plaintext. It all runs on your machine — the safe place to read a secret instead of an online decoder.
+- **JWT decoder** — a `🎫 JWT…` button on the **Config → Secrets** toolbar decodes a token's header and
+  claims locally, rendering `exp` / `iat` / `nbf` as human time with a valid / expired badge. No signature
+  check (that needs the signing key), and the token never leaves your machine.
+- **Certificate inspector** — a `🔐 Cert…` button on the **Config → Secrets** toolbar inspects an X.509 cert
+  from PEM (or a Secret's base64 `tls.crt`): subject, SANs, issuer, and **days until expiry** (flagged under
+  30 days). All parsed locally.
+- **CronJob schedule explainer** — a `⏰ Schedule…` button on the **Workloads → CronJobs** toolbar (and
+  right-click a CronJob → *Explain schedule…*) turns a cron expression into plain English and lists the next
+  5 run times, in both UTC and your local zone (Kubernetes runs CronJobs in UTC unless `spec.timeZone` is set).
 - **Pod exec** command console.
 - **Port-forwarding** — open a tunnel to a pod port at `localhost:<port>`; a toolbar manager lists
   active tunnels (Copy / Open / Stop). Tunnels are persisted and offered for restore on next launch.

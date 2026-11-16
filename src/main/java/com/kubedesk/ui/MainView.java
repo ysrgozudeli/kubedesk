@@ -1,6 +1,9 @@
 package com.kubedesk.ui;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kubedesk.service.ClusterService;
+import com.kubedesk.service.CronSchedule;
 import com.kubedesk.service.ExecSession;
 import com.kubedesk.service.PortForward;
 import com.kubedesk.service.Dtos.ClusterCapacity;
@@ -109,7 +112,10 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -361,6 +367,10 @@ public class MainView extends BorderPane {
     // Contextual Secret tools — shown in the toolbar only while browsing the Secrets list.
     private final Button sealSecretBtn = new Button("🔒 Seal…");
     private final Button base64Btn = new Button("⇄ Base64…");
+    private final Button jwtBtn = new Button("🎫 JWT…");
+    private final Button certBtn = new Button("🔐 Cert…");
+    // Contextual CronJob tool — shown only while browsing the CronJobs list.
+    private final Button cronBtn = new Button("⏰ Schedule…");
 
     // Auto-update: checks GitHub on startup and offers a one-click installer download.
     private final UpdateService updateService = new UpdateService();
@@ -812,6 +822,24 @@ public class MainView extends BorderPane {
         base64Btn.setVisible(false);
         base64Btn.setManaged(false);
 
+        jwtBtn.setTooltip(new Tooltip("Decode a JWT (service-account / bearer token): header, claims and "
+                + "expiry — locally, never sent to a website"));
+        jwtBtn.setOnAction(e -> openJwtDialog(null));
+        jwtBtn.setVisible(false);
+        jwtBtn.setManaged(false);
+
+        certBtn.setTooltip(new Tooltip("Inspect an X.509 certificate (PEM or a Secret's tls.crt): subject, "
+                + "SANs, issuer and days until expiry — all locally"));
+        certBtn.setOnAction(e -> openCertDialog(null));
+        certBtn.setVisible(false);
+        certBtn.setManaged(false);
+
+        cronBtn.setTooltip(new Tooltip("Explain a CronJob schedule in plain English and list the next "
+                + "run times"));
+        cronBtn.setOnAction(e -> openCronDialog(null));
+        cronBtn.setVisible(false);
+        cronBtn.setManaged(false);
+
         consoleMenuItem.setOnAction(e -> toggleConsole(consoleMenuItem.isSelected()));
 
         MenuButton appMenu = new MenuButton("☰");
@@ -851,7 +879,8 @@ public class MainView extends BorderPane {
         // clipping). Right: search + actions + menu, pinned to the right edge.
         FlowPane left = new FlowPane(10, 8, loadConfigBtn, kubeConfigLabel, ctxGroup, nsGroup);
         left.setAlignment(Pos.CENTER_LEFT);
-        HBox right = new HBox(10, searchField, refresh, liveBox, sealSecretBtn, base64Btn, pfButton, appMenu);
+        HBox right = new HBox(10, searchField, refresh, liveBox, sealSecretBtn, base64Btn, jwtBtn, certBtn,
+                cronBtn, pfButton, appMenu);
         right.setAlignment(Pos.CENTER_RIGHT);
         right.setMinWidth(Region.USE_PREF_SIZE); // never let the right cluster shrink below its controls
 
@@ -966,6 +995,9 @@ public class MainView extends BorderPane {
         // Tools.
         items.add(new CommandPalette.Item("Tool", "Seal a Secret…", this::openSealSecretDialog));
         items.add(new CommandPalette.Item("Tool", "Base64 encode / decode…", this::openBase64Dialog));
+        items.add(new CommandPalette.Item("Tool", "Decode a JWT…", () -> openJwtDialog(null)));
+        items.add(new CommandPalette.Item("Tool", "Inspect a certificate…", () -> openCertDialog(null)));
+        items.add(new CommandPalette.Item("Tool", "Explain a cron schedule…", () -> openCronDialog(null)));
         // Namespaces in the current context.
         for (String ns : namespaceBox.getItems()) {
             if (ns != null && !ns.isBlank()) {
@@ -1842,6 +1874,10 @@ public class MainView extends BorderPane {
         MenuItem seal = new MenuItem("🔒 Seal as SealedSecret…");
         seal.setOnAction(e -> sealExistingSecret(resourceName(row.getItem())));
 
+        // CronJobs: explain the schedule and show the next run times.
+        MenuItem explainSchedule = new MenuItem("⏰ Explain schedule…");
+        explainSchedule.setOnAction(e -> openCronDialog(cellValue(row.getItem(), "Schedule")));
+
         MenuItem copyName = new MenuItem("Copy name");
         copyName.setOnAction(e -> copyToClipboard(resourceName(row.getItem())));
 
@@ -1863,7 +1899,7 @@ public class MainView extends BorderPane {
         delete.setOnAction(e -> deleteAction(currentKind, resourceName(row.getItem())));
 
         ContextMenu menu = new ContextMenu(details, yaml, events, logs, portForward,
-                goToOwner, goToService, showPods, seal,
+                goToOwner, goToService, showPods, seal, explainSchedule,
                 new SeparatorMenuItem(), copyName, copyYaml,
                 new SeparatorMenuItem(), restart, restartPod, scale, delete);
         menu.setOnShowing(e -> {
@@ -1880,6 +1916,7 @@ public class MainView extends BorderPane {
                     || currentKind == ResourceKind.DAEMONSETS
                     || currentKind == ResourceKind.JOBS);
             seal.setVisible(currentKind == ResourceKind.SECRETS);
+            explainSchedule.setVisible(currentKind == ResourceKind.CRONJOBS);
             boolean isDeployment = currentKind == ResourceKind.DEPLOYMENTS;
             restart.setVisible(isDeployment);
             scale.setVisible(isDeployment);
@@ -3300,6 +3337,319 @@ public class MainView extends BorderPane {
         return r;
     }
 
+    private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    /**
+     * Decode a JWT locally — header, claims, and a human read of exp/iat/nbf. No signature check (that
+     * needs the signing key); this is for inspecting what a token says, without pasting it into a website.
+     */
+    private void openJwtDialog(String prefill) {
+        javafx.stage.Window owner = getScene() != null ? getScene().getWindow() : null;
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("Decode JWT");
+        dialog.setResizable(true);
+        if (owner != null) {
+            dialog.initOwner(owner);
+        }
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        Label intro = new Label("Paste a JWT (e.g. a service-account or bearer token) to read its header "
+                + "and claims. Decoded on this machine — the token is never sent anywhere, and the "
+                + "signature is not verified (that needs the signing key).");
+        intro.setWrapText(true);
+        intro.getStyleClass().add("muted");
+
+        TextArea in = new TextArea();
+        in.setPromptText("eyJhbGciOi…");
+        in.getStyleClass().add("yaml-area");
+        in.setPrefRowCount(4);
+        in.setWrapText(true);
+        if (prefill != null && !prefill.isBlank()) {
+            in.setText(prefill.trim());
+        }
+
+        Label badge = new Label();
+        badge.setWrapText(true);
+        TextArea out = new TextArea();
+        out.setEditable(false);
+        out.getStyleClass().add("yaml-area");
+        out.setPrefRowCount(16);
+        out.setPromptText("Header and claims appear here after you Decode.");
+        VBox.setVgrow(out, Priority.ALWAYS);
+
+        Button decode = new Button("Decode");
+        decode.getStyleClass().add("accent-button");
+        Button copy = new Button("⧉ Copy");
+        copy.setOnAction(e -> copyToClipboard(out.getText()));
+        Runnable doDecode = () -> {
+            badge.setStyle("");
+            out.clear();
+            String[] parts = in.getText().trim().split("\\.");
+            if (parts.length < 2) {
+                badge.setStyle("-fx-text-fill: #b91c1c;");
+                badge.setText("✗ Not a JWT (expected header.payload.signature).");
+                return;
+            }
+            try {
+                ObjectMapper om = new ObjectMapper();
+                JsonNode header = om.readTree(Base64.getUrlDecoder().decode(parts[0]));
+                JsonNode payload = om.readTree(Base64.getUrlDecoder().decode(parts[1]));
+                String pretty = "=== Header ===\n"
+                        + om.writerWithDefaultPrettyPrinter().writeValueAsString(header)
+                        + "\n\n=== Payload (claims) ===\n"
+                        + om.writerWithDefaultPrettyPrinter().writeValueAsString(payload);
+                out.setText(pretty);
+                badge.setText(jwtTimeSummary(payload));
+                badge.setStyle(payload.has("exp")
+                        && payload.get("exp").asLong() * 1000L < System.currentTimeMillis()
+                        ? "-fx-text-fill: #b91c1c;" : "-fx-text-fill: #15803d;");
+            } catch (Exception ex) {
+                badge.setStyle("-fx-text-fill: #b91c1c;");
+                badge.setText("✗ Couldn't decode: " + ex.getMessage());
+            }
+        };
+        decode.setOnAction(e -> doDecode.run());
+
+        HBox bar = new HBox(10, decode, spacer(), copy);
+        bar.setAlignment(Pos.CENTER_LEFT);
+        VBox content = new VBox(10, intro, new Label("Token"), in, bar, badge, out);
+        content.setPrefWidth(620);
+        dialog.getDialogPane().setContent(content);
+        if (!in.getText().isBlank()) {
+            doDecode.run();
+        }
+        dialog.show();
+    }
+
+    /** Render the time-related claims (exp/iat/nbf) of a JWT payload as a one-line human summary. */
+    private String jwtTimeSummary(JsonNode payload) {
+        StringBuilder sb = new StringBuilder();
+        if (payload.has("exp")) {
+            long exp = payload.get("exp").asLong();
+            long now = System.currentTimeMillis() / 1000L;
+            sb.append(exp < now
+                    ? "⚠ Expired " + humanizeSeconds(now - exp) + " ago"
+                    : "✓ Valid — expires in " + humanizeSeconds(exp - now));
+            sb.append(" (exp ").append(fmtEpoch(exp)).append(")");
+        } else {
+            sb.append("No exp claim (does not expire).");
+        }
+        if (payload.has("iat")) {
+            sb.append("  ·  issued ").append(fmtEpoch(payload.get("iat").asLong()));
+        }
+        if (payload.has("nbf")) {
+            sb.append("  ·  not before ").append(fmtEpoch(payload.get("nbf").asLong()));
+        }
+        return sb.toString();
+    }
+
+    /** Inspect an X.509 certificate from PEM (or a Secret's base64 tls.crt/DER): subject, SANs, expiry. */
+    private void openCertDialog(String prefill) {
+        javafx.stage.Window owner = getScene() != null ? getScene().getWindow() : null;
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("Inspect certificate");
+        dialog.setResizable(true);
+        if (owner != null) {
+            dialog.initOwner(owner);
+        }
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        Label intro = new Label("Paste a PEM certificate (or a Secret's base64 tls.crt / ca.crt) to read "
+                + "its subject, SANs, issuer and expiry. Parsed locally — nothing is sent anywhere.");
+        intro.setWrapText(true);
+        intro.getStyleClass().add("muted");
+
+        TextArea in = new TextArea();
+        in.setPromptText("-----BEGIN CERTIFICATE-----\n…");
+        in.getStyleClass().add("yaml-area");
+        in.setPrefRowCount(6);
+        in.setWrapText(true);
+        if (prefill != null && !prefill.isBlank()) {
+            in.setText(prefill.trim());
+        }
+
+        Label badge = new Label();
+        badge.setWrapText(true);
+        TextArea out = new TextArea();
+        out.setEditable(false);
+        out.getStyleClass().add("yaml-area");
+        out.setPrefRowCount(14);
+        out.setPromptText("Certificate details appear here after you Inspect.");
+        VBox.setVgrow(out, Priority.ALWAYS);
+
+        Button inspect = new Button("Inspect");
+        inspect.getStyleClass().add("accent-button");
+        Button copy = new Button("⧉ Copy");
+        copy.setOnAction(e -> copyToClipboard(out.getText()));
+        Runnable doInspect = () -> {
+            badge.setStyle("");
+            out.clear();
+            try {
+                String text = in.getText().trim();
+                byte[] bytes;
+                if (text.contains("BEGIN CERTIFICATE")) {
+                    bytes = text.getBytes(StandardCharsets.UTF_8);
+                } else {
+                    // A pasted Secret value is base64 of the PEM/DER; decode a layer first.
+                    try {
+                        bytes = Base64.getMimeDecoder().decode(text);
+                    } catch (IllegalArgumentException bad) {
+                        bytes = text.getBytes(StandardCharsets.UTF_8);
+                    }
+                }
+                java.security.cert.X509Certificate cert = (java.security.cert.X509Certificate)
+                        java.security.cert.CertificateFactory.getInstance("X.509")
+                                .generateCertificate(new java.io.ByteArrayInputStream(bytes));
+                out.setText(describeCert(cert));
+                long days = (cert.getNotAfter().getTime() - System.currentTimeMillis())
+                        / (1000L * 60 * 60 * 24);
+                if (days < 0) {
+                    badge.setStyle("-fx-text-fill: #b91c1c;");
+                    badge.setText("⚠ Expired " + (-days) + " day(s) ago.");
+                } else {
+                    badge.setStyle(days < 30 ? "-fx-text-fill: #b45309;" : "-fx-text-fill: #15803d;");
+                    badge.setText((days < 30 ? "⚠ " : "✓ ") + "Expires in " + days + " day(s).");
+                }
+            } catch (Exception ex) {
+                badge.setStyle("-fx-text-fill: #b91c1c;");
+                badge.setText("✗ Not a valid certificate: " + ex.getMessage());
+            }
+        };
+        inspect.setOnAction(e -> doInspect.run());
+
+        HBox bar = new HBox(10, inspect, spacer(), copy);
+        bar.setAlignment(Pos.CENTER_LEFT);
+        VBox content = new VBox(10, intro, new Label("Certificate (PEM)"), in, bar, badge, out);
+        content.setPrefWidth(640);
+        dialog.getDialogPane().setContent(content);
+        if (!in.getText().isBlank()) {
+            doInspect.run();
+        }
+        dialog.show();
+    }
+
+    private String describeCert(java.security.cert.X509Certificate c) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Subject:    ").append(c.getSubjectX500Principal().getName()).append('\n');
+        sb.append("Issuer:     ").append(c.getIssuerX500Principal().getName()).append('\n');
+        sb.append("Serial:     ").append(c.getSerialNumber().toString(16)).append('\n');
+        sb.append("Not before: ").append(fmtEpoch(c.getNotBefore().getTime() / 1000L)).append('\n');
+        sb.append("Not after:  ").append(fmtEpoch(c.getNotAfter().getTime() / 1000L)).append('\n');
+        sb.append("Sig alg:    ").append(c.getSigAlgName()).append('\n');
+        try {
+            var sans = c.getSubjectAlternativeNames();
+            if (sans != null && !sans.isEmpty()) {
+                List<String> names = new ArrayList<>();
+                for (List<?> san : sans) {
+                    Object type = san.get(0);
+                    Object val = san.get(1);
+                    String kind = "2".equals(String.valueOf(type)) ? "DNS"
+                            : "7".equals(String.valueOf(type)) ? "IP" : "SAN";
+                    names.add(kind + ":" + val);
+                }
+                sb.append("SANs:       ").append(String.join(", ", names)).append('\n');
+            }
+        } catch (Exception ignored) {
+            // malformed SAN extension — skip rather than fail the whole inspection
+        }
+        return sb.toString();
+    }
+
+    /** Explain a cron schedule in plain English and list the next run times. */
+    private void openCronDialog(String prefill) {
+        javafx.stage.Window owner = getScene() != null ? getScene().getWindow() : null;
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("Explain cron schedule");
+        dialog.setResizable(true);
+        if (owner != null) {
+            dialog.initOwner(owner);
+        }
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        Label intro = new Label("Enter a CronJob schedule to see it in plain English and the next run "
+                + "times. Kubernetes runs CronJobs in UTC unless the CronJob sets spec.timeZone, so times "
+                + "are shown in both UTC and your local zone.");
+        intro.setWrapText(true);
+        intro.getStyleClass().add("muted");
+
+        TextField in = new TextField();
+        in.setPromptText("*/5 * * * *   (or @daily, @hourly, …)");
+        if (prefill != null && !prefill.isBlank() && !prefill.equals("-")) {
+            in.setText(prefill.trim());
+        }
+
+        Label desc = new Label();
+        desc.setWrapText(true);
+        desc.getStyleClass().add("form-section");
+        TextArea runs = new TextArea();
+        runs.setEditable(false);
+        runs.getStyleClass().add("yaml-area");
+        runs.setPrefRowCount(7);
+        runs.setPromptText("The next run times appear here.");
+        VBox.setVgrow(runs, Priority.ALWAYS);
+
+        Button explain = new Button("Explain");
+        explain.getStyleClass().add("accent-button");
+        ZoneId local = ZoneId.systemDefault();
+        Runnable doExplain = () -> {
+            try {
+                CronSchedule cron = CronSchedule.parse(in.getText());
+                desc.setStyle("");
+                desc.setText(cron.describe());
+                StringBuilder sb = new StringBuilder("Next 5 runs:\n");
+                List<ZonedDateTime> next = cron.nextRuns(Instant.now(), 5);
+                if (next.isEmpty()) {
+                    sb.append("  (none within the next ~5 years)");
+                }
+                for (ZonedDateTime utc : next) {
+                    ZonedDateTime loc = utc.withZoneSameInstant(local);
+                    sb.append("\n  • ").append(TS.format(utc)).append(" UTC")
+                            .append("   ·   ").append(TS.format(loc)).append(' ').append(loc.getZone());
+                }
+                runs.setText(sb.toString());
+            } catch (IllegalArgumentException ex) {
+                desc.setStyle("-fx-text-fill: #b91c1c;");
+                desc.setText("✗ " + ex.getMessage());
+                runs.clear();
+            }
+        };
+        explain.setOnAction(e -> doExplain.run());
+        in.setOnAction(e -> doExplain.run());
+
+        HBox bar = new HBox(10, new Label("Schedule:"), in, explain);
+        bar.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(in, Priority.ALWAYS);
+        VBox content = new VBox(10, intro, bar, desc, runs);
+        content.setPrefWidth(600);
+        dialog.getDialogPane().setContent(content);
+        if (!in.getText().isBlank()) {
+            doExplain.run();
+        }
+        dialog.show();
+    }
+
+    /** Format an epoch-seconds timestamp as "yyyy-MM-dd HH:mm:ss UTC". */
+    private static String fmtEpoch(long epochSeconds) {
+        return TS.format(Instant.ofEpochSecond(epochSeconds).atZone(ZoneId.of("UTC"))) + " UTC";
+    }
+
+    /** Humanize a duration in seconds as e.g. "3d 4h", "12m", "45s". */
+    private static String humanizeSeconds(long s) {
+        if (s < 60) {
+            return s + "s";
+        }
+        long m = s / 60;
+        long h = m / 60;
+        long d = h / 24;
+        if (d > 0) {
+            return d + "d " + (h % 24) + "h";
+        }
+        if (h > 0) {
+            return h + "h " + (m % 60) + "m";
+        }
+        return m + "m";
+    }
+
     /** As {@link #openSealSecretDialog()}, pre-filling name/type/values from an existing Secret. */
     private void openSealSecretDialog(SecretContent prefill) {
         ContextInfo ctx = contextBox.getValue();
@@ -4042,6 +4392,20 @@ public class MainView extends BorderPane {
         return row != null && !row.isEmpty() ? row.get(0) : "";
     }
 
+    /** The value in {@code row} under the column with this header (by the live table's column order), or "". */
+    private String cellValue(List<String> row, String columnName) {
+        if (row == null) {
+            return "";
+        }
+        var cols = table.getColumns();
+        for (int i = 0; i < cols.size(); i++) {
+            if (columnName.equalsIgnoreCase(cols.get(i).getText()) && i < row.size()) {
+                return row.get(i);
+            }
+        }
+        return "";
+    }
+
     /** In all-namespaces mode the leading column is Namespace and Name is second. */
     private String nameOfRow(List<String> row) {
         if (allNsMode.get()) {
@@ -4413,12 +4777,20 @@ public class MainView extends BorderPane {
         if (mode != ViewMode.OVERVIEW) {
             stopOverviewMetrics();
         }
-        // The Secret tools (Seal…, Base64…) belong only to the Secrets list view.
+        // The Secret tools (Seal…, Base64…, JWT…, Cert…) belong only to the Secrets list view.
         boolean onSecrets = mode == ViewMode.RESOURCE && currentKind == ResourceKind.SECRETS;
         sealSecretBtn.setVisible(onSecrets);
         sealSecretBtn.setManaged(onSecrets);
         base64Btn.setVisible(onSecrets);
         base64Btn.setManaged(onSecrets);
+        jwtBtn.setVisible(onSecrets);
+        jwtBtn.setManaged(onSecrets);
+        certBtn.setVisible(onSecrets);
+        certBtn.setManaged(onSecrets);
+        // The Schedule explainer belongs only to the CronJobs list view.
+        boolean onCronJobs = mode == ViewMode.RESOURCE && currentKind == ResourceKind.CRONJOBS;
+        cronBtn.setVisible(onCronJobs);
+        cronBtn.setManaged(onCronJobs);
     }
 
     private void loadTopology() {

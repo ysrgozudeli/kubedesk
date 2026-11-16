@@ -3,6 +3,22 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.20.0] - 2026-11-16
+
+### Added
+- **Three new local "paste-and-go" tools**, each a contextual toolbar button (also in the command
+  palette), in the spirit of the Base64 tool — everything runs on your machine, nothing is sent anywhere:
+  - **`🎫 JWT…` (Secrets toolbar)** — decode a JWT (service-account / bearer token): header, claims, and a
+    human read of `exp` / `iat` / `nbf` with a valid / expired badge. Signature isn't verified (that needs
+    the signing key); this is for seeing what a token says without pasting it into jwt.io.
+  - **`🔐 Cert…` (Secrets toolbar)** — inspect an X.509 certificate from PEM (or a Secret's base64
+    `tls.crt` / `ca.crt`): subject, issuer, SANs, serial, signature algorithm, and **days until expiry**
+    with a warning under 30 days.
+  - **`⏰ Schedule…` (CronJobs toolbar, and right-click a CronJob → *Explain schedule…*)** — explain a cron
+    expression in plain English and list the **next 5 run times**. Shown in UTC *and* your local zone,
+    since Kubernetes runs CronJobs in UTC unless `spec.timeZone` is set. Supports ranges, steps, lists,
+    month/day names, and the `@hourly` / `@daily` / `@weekly` / `@monthly` / `@yearly` macros.
+
 ## [1.19.1] - 2026-11-16
 
 ### Added
