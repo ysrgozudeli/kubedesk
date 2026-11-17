@@ -55,8 +55,14 @@ details panel (Overview / YAML / Events / Logs / Shell tabs), all over the API.
 | **macOS** | `.dmg` |
 | **Linux** | `.deb` or `.rpm` |
 
-> Installers are **unsigned**, so Windows SmartScreen ("unknown publisher") and macOS Gatekeeper will
-> warn on first launch. On Windows: *More info → Run anyway*. On macOS: right-click the app → *Open*.
+> [!WARNING]
+> **Unsigned app.** KubeDesk installers aren't code-signed yet, so your OS will warn you the first time you open it. That's expected:
+>
+> - **Windows** (SmartScreen, "Windows protected your PC"): click **More info → Run anyway**. For the portable `.zip`, you can also right-click it → **Properties → Unblock** before you unzip.
+> - **macOS** (Gatekeeper, "can't be opened" / "Apple could not verify"): try to open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/KubeDesk.app`.
+> - **Linux** (`.deb` / `.rpm`): no warning.
+>
+> When we have signing set up, we'll re-upload signed builds.
 
 Prefer to build it yourself? See [Build from source](#-build-from-source).
 
