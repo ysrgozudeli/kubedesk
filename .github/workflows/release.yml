@@ -129,7 +129,6 @@ jobs:
           > When we have signing set up, we'll re-upload signed builds.
 
           EOF
-          sed -i 's/^          //' NOTICE.md
           cat NOTICE.md RELEASE_NOTES.md > RELEASE_NOTES.tmp && mv RELEASE_NOTES.tmp RELEASE_NOTES.md
           echo "----- release notes -----"; cat RELEASE_NOTES.md
 
