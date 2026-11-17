@@ -22,6 +22,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   under ☰, where people missed it.
 
 ### Fixed
+- **Details pane follows the selection.** With the details pane open, clicking another row (or moving
+  with ↑/↓) used to leave the pane on the old resource until you double-clicked. It now switches to the
+  newly selected resource and stays on the tab you were on (e.g. History, Logs).
 - **Pod Shell: no more "is it connected?"** The shell runs without a TTY, so there's no prompt, and the
   tab used to sit on "Connecting…" with no feedback. It now waits until the shell actually answers and
   then says **✓ Connected (/bin/sh)** with a hint to type a command. Connecting no longer freezes the UI.

@@ -1776,6 +1776,18 @@ public class MainView extends BorderPane {
 
         buildFilterBar();
         table.setRowFactory(tv -> buildRow());
+        // While the details pane is open, it follows the selection (click or ↑/↓), staying on the same tab.
+        table.getSelectionModel().selectedItemProperty().addListener((o, a, row) -> {
+            if (row == null || allNsMode.get() || detailKind != currentKind
+                    || !centerSplit.getItems().contains(detailsPane)) {
+                return;
+            }
+            String name = resourceName(row);
+            if (name == null || name.equals(currentDetailName)) {
+                return; // same resource (e.g. a live refresh re-selected it)
+            }
+            openDetails(currentKind, name, row, detailsTabs.getSelectionModel().getSelectedItem());
+        });
         // The "+" button at the top-right of the header lets the user show/hide any column.
         table.setTableMenuButtonVisible(true);
         VBox.setVgrow(table, Priority.ALWAYS);
