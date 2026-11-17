@@ -117,8 +117,9 @@ jobs:
             flag {print}
           ' CHANGELOG.md > RELEASE_NOTES.md
           [ -s RELEASE_NOTES.md ] || echo "See CHANGELOG.md for details." > RELEASE_NOTES.md
-          # Every release page opens with the unsigned-app notice, so people know what the OS warning means.
+          # Every release page ends with the unsigned-app notice, so people know what the OS warning means.
           cat > NOTICE.md <<'EOF'
+
           > [!WARNING]
           > **Unsigned app.** KubeDesk installers aren't code-signed yet, so your OS will warn you the first time you open it. That's expected, and here's how to get past it:
           >
@@ -127,9 +128,8 @@ jobs:
           > - **Linux** (`.deb` / `.rpm`): no warning.
           >
           > When we have signing set up, we'll re-upload signed builds.
-
           EOF
-          cat NOTICE.md RELEASE_NOTES.md > RELEASE_NOTES.tmp && mv RELEASE_NOTES.tmp RELEASE_NOTES.md
+          cat RELEASE_NOTES.md NOTICE.md > RELEASE_NOTES.tmp && mv RELEASE_NOTES.tmp RELEASE_NOTES.md
           echo "----- release notes -----"; cat RELEASE_NOTES.md
 
       - name: Attach to GitHub Release (on tag)
