@@ -3,6 +3,17 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.21.1] - 2026-11-17
+
+Re-release of 1.21.0. Its macOS (`.dmg`) and Windows portable (`.zip`) builds didn't publish, so
+this one ships all five packages. Everything in 1.21.0 is included: Deployment rollout history and
+rollback, Helm rollback, ReplicaSets, the Pod Shell connect fixes, the ⚙ Settings button, and the
+details pane following the selection.
+
+### Fixed
+- Release build: the macOS job failed on a release-notes step.
+- Release notes: the unsigned-app notice is now at the end.
+
 ## [1.21.0] - 2026-11-17
 
 ### Added
