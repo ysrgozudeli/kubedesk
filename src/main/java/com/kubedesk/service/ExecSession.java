@@ -9,6 +9,11 @@ public interface ExecSession extends AutoCloseable {
     /** Send raw input to the container's stdin (include the trailing newline to run a command). */
     void send(String input);
 
+    /** The shell that answered (e.g. {@code /bin/sh}); shown to the user on connect. */
+    default String shell() {
+        return "/bin/sh";
+    }
+
     @Override
     void close();
 }

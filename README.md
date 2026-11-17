@@ -84,7 +84,8 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   **IP**, **QoS class**, and **Controlled By**.
 
 ### Inspect
-- **Details panel** with per-kind tabs: **Overview / YAML / Events / Logs / Shell**.
+- **Details panel** with per-kind tabs: **Overview / YAML / Events / Logs / Shell**, plus **History** on
+  Deployments.
 - **Pod failure diagnostics** — container state, exit codes, and eviction reasons (surfaces *why* a
   pod is failing even after its events have expired).
 - **Live pod metrics** (pod → **Metrics** tab): live CPU/Memory line charts polled from the Metrics
@@ -108,14 +109,20 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   right-click to act.
 - **Events view** — the namespace event stream as a table (Type, Reason, Object, Count, Last Seen,
   Message), most-recent first, Warnings tinted — the practical "namespace log."
-- **Helm releases (read-only)** — list Helm 3 releases read straight from their in-cluster Secrets
+- **Helm releases** — list Helm 3 releases read straight from their in-cluster Secrets
   (**no `helm` CLI**), with tabs for Overview / **Changes** / History / Values / Manifest / Notes. The
   **Changes** tab compares any two revisions: a plain-English settings diff (added/removed/changed) and
-  a color-coded, copyable diff of the rendered manifest.
+  a color-coded, copyable diff of the rendered manifest. **History → ↶ Roll back** does a
+  `helm rollback` without the CLI: it dry-runs first and shows the plan (create / update / delete), then
+  writes the new revision and marks the old one superseded. Chart hooks aren't run (you're warned when a
+  chart has them).
 
 ### Act (all over the API — no kubectl)
 - **Management actions**: delete, rollout restart, scale, and edit-YAML-and-apply — with confirmations
   and per-kind context menus, reachable from table rows, topology nodes, and the details **Actions** menu.
+- **Rollout history + rollback (Deployments)** — the **History** tab lists revisions like
+  `kubectl rollout history` (change-cause, images, pods), diffs any revision's pod template against
+  what's running, and **↶ Roll back to revision N** does `kubectl rollout undo --to-revision=N`.
 - **Restart a pod** — **Restart (recreate)** on any controller-managed pod deletes it and lets its
   ReplicaSet/StatefulSet/DaemonSet/Job spin up a fresh one (Kubernetes has no in-place pod restart). Bare
   pods don't get the option, since nothing would bring them back.
@@ -313,11 +320,11 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.18.1**: 12 resource kinds, an **all-namespaces view**, live watches, details panel
+Shipped through **v1.21.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
-port-forwarding, topology view, health scan, Events view, a read-only **Helm releases** view with a
-revision diff, an Overview dashboard with cluster capacity + per-node usage + **live CPU/memory charts**,
+port-forwarding, topology view, health scan, Events view, a **Helm releases** view with a
+revision diff and rollback, Deployment **rollout history + rollback**, an Overview dashboard with cluster capacity + per-node usage + **live CPU/memory charts**,
 a **Settings** dialog, embedded kubectl console, a command palette, the experimental read-only **MCP
 server with a live UI mirror**, and cross-platform native packaging.
 

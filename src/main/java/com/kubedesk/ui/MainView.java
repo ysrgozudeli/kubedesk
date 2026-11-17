@@ -267,6 +267,17 @@ public class MainView extends BorderPane {
 
     // Live metrics (pods): polls the Metrics API and accumulates a client-side time-series.
     private final Tab metricsTab = new Tab("Metrics");
+    // Deployment rollout history (kubectl rollout history / undo).
+    private final Tab historyTab = new Tab("History");
+    private final TableView<com.kubedesk.service.Dtos.DeploymentRevision> rolloutTable = new TableView<>();
+    private final ListView<String> rolloutDiffList = new ListView<>();
+    private final Label rolloutDiffHeader = new Label();
+    private final Button rolloutRollbackBtn = new Button("↶ Roll back to this revision");
+    private List<com.kubedesk.service.Dtos.DeploymentRevision> rolloutRevisions = List.of();
+    private String rolloutDeployment;
+    private int rolloutGen;
+    /** Release (ns/name) to re-select after the Helm list reloads, e.g. after a rollback. */
+    private String helmReselect;
     private final XYChart.Series<Number, Number> cpuSeries = new XYChart.Series<>();
     private final XYChart.Series<Number, Number> memSeries = new XYChart.Series<>();
     private Timeline metricsTimeline;
@@ -852,10 +863,12 @@ public class MainView extends BorderPane {
         mcpServerItem.setOnAction(e -> McpServerPanel.show(getScene() == null ? null : getScene().getWindow(),
                 mcpServer(), settings, () -> pool.submit(() -> settingsStore.save(settings))));
         MenuItem settingsItem = new MenuItem("Settings…");
-        settingsItem.setOnAction(e -> SettingsPanel.show(
-                getScene() == null ? null : getScene().getWindow(), settings,
-                () -> pool.submit(() -> settingsStore.save(settings)),
-                this::applyOverviewMetricsSettings));
+        settingsItem.setOnAction(e -> openSettings());
+        // A visible gear too: testers didn't think to look for Settings under ☰.
+        Button settingsBtn = new Button("⚙");
+        settingsBtn.getStyleClass().add("icon-button");
+        settingsBtn.setTooltip(new Tooltip("Settings"));
+        settingsBtn.setOnAction(e -> openSettings());
         MenuItem checkUpdates = new MenuItem("Check for updates…");
         checkUpdates.setOnAction(e -> checkForUpdates(true));
         MenuItem about = new MenuItem("About KubeDesk");
@@ -883,7 +896,7 @@ public class MainView extends BorderPane {
         FlowPane left = new FlowPane(10, 8, loadConfigBtn, kubeConfigLabel, ctxGroup, nsGroup);
         left.setAlignment(Pos.CENTER_LEFT);
         HBox right = new HBox(10, searchField, refresh, liveBox, sealSecretBtn, base64Btn, jwtBtn, certBtn,
-                cronBtn, pfButton, appMenu);
+                cronBtn, pfButton, settingsBtn, appMenu);
         right.setAlignment(Pos.CENTER_RIGHT);
         right.setMinWidth(Region.USE_PREF_SIZE); // never let the right cluster shrink below its controls
 
@@ -1001,6 +1014,7 @@ public class MainView extends BorderPane {
         items.add(new CommandPalette.Item("Tool", "Decode a JWT…", () -> openJwtDialog(null)));
         items.add(new CommandPalette.Item("Tool", "Inspect a certificate…", () -> openCertDialog(null)));
         items.add(new CommandPalette.Item("Tool", "Explain a cron schedule…", () -> openCronDialog(null)));
+        items.add(new CommandPalette.Item("App", "Settings…", this::openSettings));
         // Namespaces in the current context.
         for (String ns : namespaceBox.getItems()) {
             if (ns != null && !ns.isBlank()) {
@@ -1946,6 +1960,9 @@ public class MainView extends BorderPane {
         MenuItem scale = new MenuItem("Scale…");
         scale.setOnAction(e -> scaleAction(resourceName(row.getItem())));
 
+        MenuItem history = new MenuItem("↶ Rollout history / rollback…");
+        history.setOnAction(e -> openDetails(currentKind, resourceName(row.getItem()), row.getItem(), historyTab));
+
         MenuItem delete = new MenuItem("Delete");
         delete.getStyleClass().add("danger-item");
         delete.setOnAction(e -> deleteAction(currentKind, resourceName(row.getItem())));
@@ -1953,7 +1970,7 @@ public class MainView extends BorderPane {
         ContextMenu menu = new ContextMenu(details, yaml, events, logs, portForward,
                 goToOwner, goToService, showPods, seal, explainSchedule,
                 new SeparatorMenuItem(), copyName, copyYaml,
-                new SeparatorMenuItem(), restart, restartPod, scale, delete);
+                new SeparatorMenuItem(), restart, restartPod, scale, history, delete);
         menu.setOnShowing(e -> {
             // Tailor the menu to the resource kind: hide (not just disable) what doesn't apply.
             boolean isPod = currentKind == ResourceKind.PODS;
@@ -1964,6 +1981,7 @@ public class MainView extends BorderPane {
             goToOwner.setVisible(isPod);
             goToService.setVisible(isPod);
             showPods.setVisible(currentKind == ResourceKind.DEPLOYMENTS
+                    || currentKind == ResourceKind.REPLICASETS
                     || currentKind == ResourceKind.STATEFULSETS
                     || currentKind == ResourceKind.DAEMONSETS
                     || currentKind == ResourceKind.JOBS);
@@ -1972,6 +1990,7 @@ public class MainView extends BorderPane {
             boolean isDeployment = currentKind == ResourceKind.DEPLOYMENTS;
             restart.setVisible(isDeployment);
             scale.setVisible(isDeployment);
+            history.setVisible(isDeployment);
             // A pod "restart" is delete-and-let-the-controller-recreate, so only offer it for managed pods.
             restartPod.setVisible(isPod && isControlledPod(row.getItem()));
             // Disable mutating actions the user isn't allowed to perform (RBAC-aware).
@@ -2056,6 +2075,8 @@ public class MainView extends BorderPane {
         shellTab.setContent(buildShellPane());
         metricsTab.setClosable(false);
         metricsTab.setContent(buildMetricsPane());
+        historyTab.setClosable(false);
+        historyTab.setContent(buildRolloutPane());
         detailsTabs.getTabs().setAll(overviewTab, yamlTab, eventsTab);
         VBox.setVgrow(detailsTabs, Priority.ALWAYS);
 
@@ -2085,6 +2106,193 @@ public class MainView extends BorderPane {
 
         VBox.setVgrow(yamlArea, Priority.ALWAYS);
         return new VBox(controls, yamlArea);
+    }
+
+    /**
+     * The Deployment History tab: revisions (like {@code kubectl rollout history}), a diff of the selected
+     * revision's pod template against what's running, and a one-click rollback.
+     */
+    private VBox buildRolloutPane() {
+        Label hint = new Label("Each revision is a ReplicaSet. Select one to see how it differs from what's running.");
+        hint.getStyleClass().add("muted");
+        hint.setWrapText(true);
+        Button refresh = new Button("⟳");
+        refresh.getStyleClass().add("icon-button");
+        refresh.setTooltip(new Tooltip("Reload history"));
+        refresh.setOnAction(e -> {
+            if (rolloutDeployment != null) {
+                loadRolloutHistory(rolloutDeployment);
+            }
+        });
+        Region sp = new Region();
+        HBox.setHgrow(sp, Priority.ALWAYS);
+        HBox top = new HBox(8, hint, sp, refresh);
+        top.setAlignment(Pos.CENTER_LEFT);
+
+        rolloutTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        rolloutTable.setFixedCellSize(30);
+        rolloutTable.setPrefHeight(190);
+        rolloutTable.setMinHeight(120);
+        rolloutTable.setPlaceholder(new Label("No revisions found."));
+        rolloutTable.getColumns().setAll(List.of(
+                simpleCol("Rev", (com.kubedesk.service.Dtos.DeploymentRevision r) ->
+                        (r.current() ? "● " : "") + r.revision(), 60),
+                simpleCol("Change cause", r -> r.changeCause().isBlank() ? "-" : r.changeCause(), 200),
+                simpleCol("Images", com.kubedesk.service.Dtos.DeploymentRevision::images, 220),
+                simpleCol("Pods", r -> String.valueOf(r.pods()), 50),
+                simpleCol("Age", com.kubedesk.service.Dtos.DeploymentRevision::age, 60)));
+        rolloutTable.getSelectionModel().selectedItemProperty().addListener((o, a, b) -> rolloutShowDiff(b));
+        rolloutTable.setRowFactory(tv -> {
+            TableRow<com.kubedesk.service.Dtos.DeploymentRevision> row = new TableRow<>();
+            MenuItem rb = new MenuItem("↶ Roll back to this revision");
+            rb.setOnAction(e -> rolloutRollback(row.getItem()));
+            ContextMenu menu = new ContextMenu(rb);
+            menu.setOnShowing(e -> rb.setDisable(row.getItem() == null || row.getItem().current()
+                    || !canPatchDeployments()));
+            row.contextMenuProperty().bind(javafx.beans.binding.Bindings.when(row.emptyProperty())
+                    .then((ContextMenu) null).otherwise(menu));
+            return row;
+        });
+
+        rolloutRollbackBtn.getStyleClass().add("accent-button");
+        rolloutRollbackBtn.setOnAction(e -> rolloutRollback(rolloutTable.getSelectionModel().getSelectedItem()));
+        rolloutDiffHeader.getStyleClass().add("kv-key");
+        rolloutDiffHeader.setWrapText(true);
+        Region sp2 = new Region();
+        HBox.setHgrow(sp2, Priority.ALWAYS);
+        HBox diffBar = new HBox(8, rolloutDiffHeader, sp2, rolloutRollbackBtn);
+        diffBar.setAlignment(Pos.CENTER_LEFT);
+
+        rolloutDiffList.getStyleClass().add("diff-list");
+        rolloutDiffList.setPlaceholder(new Label(""));
+        rolloutDiffList.setCellFactory(lv -> diffCell());
+        VBox.setVgrow(rolloutDiffList, Priority.ALWAYS);
+
+        VBox box = new VBox(8, top, rolloutTable, diffBar, rolloutDiffList);
+        box.setPadding(new Insets(8, 12, 8, 12));
+        rolloutShowDiff(null);
+        return box;
+    }
+
+    private static <T> TableColumn<T, String> simpleCol(String title, java.util.function.Function<T, String> get,
+                                                        double width) {
+        TableColumn<T, String> col = new TableColumn<>(title);
+        col.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                c.getValue() == null ? "" : nullToDash(get.apply(c.getValue()))));
+        col.setPrefWidth(width);
+        return col;
+    }
+
+    /** A list cell coloring unified-diff lines: "+ " added, "- " removed, "  " context, else muted. */
+    private static javafx.scene.control.ListCell<String> diffCell() {
+        return new javafx.scene.control.ListCell<>() {
+            @Override
+            protected void updateItem(String line, boolean empty) {
+                super.updateItem(line, empty);
+                getStyleClass().removeAll("diff-add", "diff-del", "diff-ctx", "diff-meta");
+                if (empty || line == null) {
+                    setText(null);
+                    return;
+                }
+                setText(line);
+                if (line.startsWith("+ ")) {
+                    getStyleClass().add("diff-add");
+                } else if (line.startsWith("- ")) {
+                    getStyleClass().add("diff-del");
+                } else if (line.startsWith("  ")) {
+                    getStyleClass().add("diff-ctx");
+                } else {
+                    getStyleClass().add("diff-meta");
+                }
+            }
+        };
+    }
+
+    private boolean canPatchDeployments() {
+        return currentPermissions.can("apps", "deployments", "patch")
+                || currentPermissions.can("apps", "deployments", "update");
+    }
+
+    private void loadRolloutHistory(String name) {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        int gen = ++rolloutGen;
+        rolloutDeployment = name;
+        rolloutRevisions = List.of();
+        rolloutTable.setItems(FXCollections.observableArrayList());
+        rolloutTable.setPlaceholder(new Label("Loading…"));
+        rolloutShowDiff(null);
+        String ns = namespaceBox.getValue();
+        runAsync(() -> service.deploymentHistory(ctx.name(), ns, name), revs -> {
+            if (gen != rolloutGen) {
+                return;
+            }
+            rolloutRevisions = revs;
+            rolloutTable.setPlaceholder(new Label("No revisions found."));
+            rolloutTable.setItems(FXCollections.observableArrayList(revs));
+            // Preselect the previous revision — the usual rollback target — so its diff shows right away.
+            revs.stream().filter(r -> !r.current()).findFirst()
+                    .ifPresent(r -> rolloutTable.getSelectionModel().select(r));
+        });
+    }
+
+    private void rolloutShowDiff(com.kubedesk.service.Dtos.DeploymentRevision rev) {
+        var running = rolloutRevisions.stream().filter(com.kubedesk.service.Dtos.DeploymentRevision::current)
+                .findFirst().orElse(null);
+        rolloutRollbackBtn.setDisable(true);
+        if (rev == null) {
+            rolloutDiffHeader.setText(rolloutRevisions.size() <= 1 && !rolloutRevisions.isEmpty()
+                    ? "Only one revision so far — nothing to roll back to."
+                    : "Select a revision to compare it with what's running.");
+            rolloutDiffList.getItems().clear();
+            return;
+        }
+        if (rev.current() || running == null) {
+            rolloutDiffHeader.setText("Revision " + rev.revision() + " is what's running now.");
+            rolloutDiffList.setItems(FXCollections.observableArrayList(
+                    ("  " + rev.templateYaml().replace("\n", "\n  ")).split("\n")));
+            return;
+        }
+        rolloutDiffHeader.setText("Rolling back to revision " + rev.revision() + " changes the pod template like this"
+                + "  (− running rev " + running.revision() + ", + rev " + rev.revision() + ")");
+        rolloutDiffList.setItems(FXCollections.observableArrayList(
+                unifiedDiff(running.templateYaml(), rev.templateYaml()).split("\n")));
+        rolloutRollbackBtn.setText("↶ Roll back to revision " + rev.revision());
+        rolloutRollbackBtn.setDisable(!canPatchDeployments());
+    }
+
+    private void rolloutRollback(com.kubedesk.service.Dtos.DeploymentRevision rev) {
+        String name = rolloutDeployment;
+        ContextInfo ctx = contextBox.getValue();
+        if (rev == null || rev.current() || name == null || ctx == null) {
+            return;
+        }
+        String ns = namespaceBox.getValue();
+        boolean ok = confirm("Roll back " + name + " to revision " + rev.revision() + "?",
+                "Images: " + rev.images()
+                        + (rev.changeCause().isBlank() ? "" : "\nChange cause: " + rev.changeCause())
+                        + "\n\nThis copies revision " + rev.revision() + "'s pod template back into the Deployment "
+                        + "and starts a normal rolling update — same as\n"
+                        + "kubectl rollout undo deployment/" + name + " --to-revision=" + rev.revision()
+                        + "\n\nIt then shows up as the newest revision number.");
+        if (!ok) {
+            return;
+        }
+        status("Rolling back " + name + " to revision " + rev.revision() + "…");
+        runAsyncVoid(() -> service.rollbackDeployment(ctx.name(), ns, name, rev.revision()), () -> {
+            status("Rolled back " + name + " to revision " + rev.revision() + " — rolling update started.");
+            afterMutation();
+            // Give the controller a moment to renumber the revisions, then reload.
+            javafx.animation.PauseTransition wait = new javafx.animation.PauseTransition(javafx.util.Duration.seconds(1.5));
+            wait.setOnFinished(e -> {
+                if (name.equals(rolloutDeployment)) {
+                    loadRolloutHistory(name);
+                }
+            });
+            wait.play();
+        });
     }
 
     /** The Shell tab: a command console into a pod container (connect, type commands, see output). */
@@ -2140,18 +2348,39 @@ public class MainView extends BorderPane {
             return;
         }
         String container = shellContainerBox.getValue();
-        shellArea.appendText("Connecting to " + shellPod
+        String pod = shellPod;
+        String ns = namespaceBox.getValue();
+        shellArea.appendText("Connecting to " + pod
                 + (container != null ? " [" + container + "]" : "") + " …\n");
-        try {
-            execSession = service.exec(ctx.name(), namespaceBox.getValue(), shellPod, container,
-                    this::appendShellOutput, this::onExecClosed);
+        shellConnectBtn.setDisable(true);
+
+        Task<ExecSession> task = new Task<>() {
+            @Override protected ExecSession call() {
+                return service.exec(ctx.name(), ns, pod, container,
+                        MainView.this::appendShellOutput, MainView.this::onExecClosed);
+            }
+        };
+        task.setOnSucceeded(e -> {
+            shellConnectBtn.setDisable(false);
+            ExecSession session = task.getValue();
+            if (!pod.equals(shellPod)) { // user moved to another pod while we were connecting
+                session.close();
+                return;
+            }
+            execSession = session;
+            shellArea.appendText("✓ Connected (" + session.shell() + "). There's no prompt in this console: "
+                    + "type a command below (e.g. ls, env, cat /etc/os-release) and press Enter.\n");
             shellConnectBtn.setText("Disconnect");
             shellInput.setDisable(false);
             shellScriptBtn.setDisable(false);
             shellInput.requestFocus();
-        } catch (Exception e) {
-            shellArea.appendText("[failed to connect: " + e.getMessage() + "]\n");
-        }
+        });
+        task.setOnFailed(e -> {
+            shellConnectBtn.setDisable(false);
+            Throwable ex = task.getException();
+            shellArea.appendText("✗ " + (ex != null ? ex.getMessage() : "Could not open a shell.") + "\n");
+        });
+        pool.submit(task);
     }
 
     private void sendShellCommand() {
@@ -2529,6 +2758,10 @@ public class MainView extends BorderPane {
             detailsTabs.getTabs().add(logsTab);
             detailsTabs.getTabs().add(shellTab);
             detailsTabs.getTabs().add(metricsTab);
+        }
+        if (kind == ResourceKind.DEPLOYMENTS) {
+            detailsTabs.getTabs().add(historyTab);
+            loadRolloutHistory(name);
         }
         // Any previously open shell belongs to the old selection — end it.
         closeExec();
@@ -5648,6 +5881,7 @@ public class MainView extends BorderPane {
         return switch (kind) {
             case "Pod" -> ResourceKind.PODS;
             case "Deployment" -> ResourceKind.DEPLOYMENTS;
+            case "ReplicaSet" -> ResourceKind.REPLICASETS;
             case "StatefulSet" -> ResourceKind.STATEFULSETS;
             case "DaemonSet" -> ResourceKind.DAEMONSETS;
             case "Job" -> ResourceKind.JOBS;
@@ -5811,7 +6045,7 @@ public class MainView extends BorderPane {
 
         Tab ovTab = new Tab("Overview", overviewScroll);
         Tab changesTab = new Tab("Changes", buildHelmChangesPane());
-        Tab histTab = new Tab("History", helmHistoryTable);
+        Tab histTab = new Tab("History", buildHelmHistoryPane());
         Tab valTab = new Tab("Values", helmValuesArea);
         Tab manTab = new Tab("Manifest", helmManifestArea);
         Tab notesTab = new Tab("Notes", helmNotesArea);
@@ -5845,6 +6079,93 @@ public class MainView extends BorderPane {
 
         helmView.getChildren().setAll(controls, helmSplit);
         showHelmRelease(null); // start with the detail pane closed
+    }
+
+    /** The Helm History tab: the revisions table plus "roll back to the selected revision". */
+    private VBox buildHelmHistoryPane() {
+        Button rollback = new Button("↶ Roll back to selected revision");
+        rollback.getStyleClass().add("accent-button");
+        rollback.setDisable(true);
+        rollback.setOnAction(e -> helmRollbackAction(helmHistoryTable.getSelectionModel().getSelectedItem()));
+        helmHistoryTable.getSelectionModel().selectedItemProperty().addListener((o, a, b) -> {
+            rollback.setDisable(b == null || "deployed".equals(b.status()));
+            rollback.setText(b == null ? "↶ Roll back to selected revision" : "↶ Roll back to revision " + b.revision());
+        });
+        helmHistoryTable.setRowFactory(tv -> {
+            TableRow<HelmRelease> row = new TableRow<>();
+            MenuItem rb = new MenuItem("↶ Roll back to this revision");
+            rb.setOnAction(e -> helmRollbackAction(row.getItem()));
+            ContextMenu menu = new ContextMenu(rb);
+            menu.setOnShowing(e -> rb.setDisable(row.getItem() == null || "deployed".equals(row.getItem().status())));
+            row.contextMenuProperty().bind(javafx.beans.binding.Bindings.when(row.emptyProperty())
+                    .then((ContextMenu) null).otherwise(menu));
+            return row;
+        });
+        Label hint = new Label("Like helm rollback: you see the plan (dry run) before anything changes.");
+        hint.getStyleClass().add("muted");
+        Region sp = new Region();
+        HBox.setHgrow(sp, Priority.ALWAYS);
+        HBox bar = new HBox(8, hint, sp, rollback);
+        bar.setAlignment(Pos.CENTER_LEFT);
+        bar.setPadding(new Insets(4, 0, 4, 0));
+        VBox.setVgrow(helmHistoryTable, Priority.ALWAYS);
+        return new VBox(4, bar, helmHistoryTable);
+    }
+
+    /** Dry-run a Helm rollback, show the plan, and apply it on confirm. */
+    private void helmRollbackAction(HelmRelease rev) {
+        HelmRelease rel = helmTable.getSelectionModel().getSelectedItem();
+        ContextInfo ctx = contextBox.getValue();
+        if (rev == null || rel == null || ctx == null) {
+            return;
+        }
+        String name = rel.name();
+        String ns = rel.namespace();
+        int to = rev.revision();
+        status("Checking rollback of " + name + " to revision " + to + " (dry run)…");
+        runAsync(() -> service.helmRollback(ctx.name(), ns, name, to, true), plan -> {
+            StringBuilder b = new StringBuilder();
+            b.append("Running now: revision ").append(plan.fromRevision())
+                    .append(". This writes revision ").append(plan.newRevision())
+                    .append(" as a copy of revision ").append(to).append(", like helm rollback.\n\n");
+            appendPlan(b, "Create", plan.created());
+            appendPlan(b, "Update", plan.updated());
+            appendPlan(b, "Delete", plan.deleted());
+            appendPlan(b, "Keep (resource-policy: keep)", plan.kept());
+            if (plan.created().isEmpty() && plan.updated().isEmpty() && plan.deleted().isEmpty()) {
+                b.append("No resource changes between the two revisions; the release record is still updated and "
+                        + "every object is re-applied to undo any drift.\n\n");
+            }
+            if (plan.chartHasHooks()) {
+                b.append("⚠ This chart has hooks. KubeDesk doesn't run chart hooks (e.g. pre/post-rollback jobs). "
+                        + "If they matter, use: helm rollback ").append(name).append(' ').append(to)
+                        .append(" -n ").append(ns).append("\n\n");
+            }
+            b.append("✓ These changes passed a server-side dry run.");
+            if (!confirm("Roll back " + name + " to revision " + to + "?", b.toString())) {
+                status("Rollback cancelled.");
+                return;
+            }
+            status("Rolling back " + name + " to revision " + to + "…");
+            runAsync(() -> service.helmRollback(ctx.name(), ns, name, to, false), res -> {
+                status("Rolled back " + name + " to revision " + to + " (now revision " + res.newRevision() + ").");
+                helmReselect = ns + "/" + name;
+                loadHelm();
+            });
+        });
+    }
+
+    private static void appendPlan(StringBuilder b, String verb, List<String> items) {
+        if (items.isEmpty()) {
+            return;
+        }
+        b.append(verb).append(" (").append(items.size()).append("): ");
+        int max = 12;
+        b.append(String.join(", ", items.subList(0, Math.min(max, items.size()))));
+        if (items.size() > max) {
+            b.append(", … and ").append(items.size() - max).append(" more");
+        }
+        b.append("\n\n");
     }
 
     /** Filter the releases table by the global search box, matching name / namespace / chart / status. */
@@ -5914,27 +6235,7 @@ public class MainView extends BorderPane {
                 javafx.scene.control.SelectionMode.MULTIPLE);
         // Color each line by its unified-diff prefix: "+ " added (green), "- " removed (red),
         // "  " context (plain), elision/"(identical)" markers muted.
-        helmManifestDiffList.setCellFactory(lv -> new javafx.scene.control.ListCell<>() {
-            @Override
-            protected void updateItem(String line, boolean empty) {
-                super.updateItem(line, empty);
-                getStyleClass().removeAll("diff-add", "diff-del", "diff-ctx", "diff-meta");
-                if (empty || line == null) {
-                    setText(null);
-                    return;
-                }
-                setText(line);
-                if (line.startsWith("+ ")) {
-                    getStyleClass().add("diff-add");
-                } else if (line.startsWith("- ")) {
-                    getStyleClass().add("diff-del");
-                } else if (line.startsWith("  ")) {
-                    getStyleClass().add("diff-ctx");
-                } else {
-                    getStyleClass().add("diff-meta");
-                }
-            }
-        });
+        helmManifestDiffList.setCellFactory(lv -> diffCell());
         // Ctrl+C copies the selected lines (Copy all button grabs everything).
         helmManifestDiffList.setOnKeyPressed(e -> {
             if (e.isControlDown() && e.getCode() == javafx.scene.input.KeyCode.C) {
@@ -6185,6 +6486,12 @@ public class MainView extends BorderPane {
                     + " · " + scope);
             status(releases.size() + " Helm release" + (releases.size() == 1 ? "" : "s") + " in " + scope
                     + ".  Click a release to see its history and values.");
+            if (helmReselect != null) {
+                String key = helmReselect;
+                helmReselect = null;
+                helmTable.getItems().stream().filter(r -> key.equals(r.namespace() + "/" + r.name()))
+                        .findFirst().ifPresent(r -> helmTable.getSelectionModel().select(r));
+            }
         });
     }
 
@@ -6312,7 +6619,9 @@ public class MainView extends BorderPane {
             restart.setOnAction(e -> restartAction(name));
             MenuItem scale = new MenuItem("Scale…");
             scale.setOnAction(e -> scaleAction(name));
-            menu.getItems().addAll(restart, scale);
+            MenuItem history = new MenuItem("↶ Rollout history / rollback…");
+            history.setOnAction(e -> openDetails(kind, name, null, historyTab));
+            menu.getItems().addAll(restart, scale, history);
         }
         if (kind == ResourceKind.PODS) {
             MenuItem restartPod = new MenuItem("Restart (recreate)");
@@ -6752,6 +7061,12 @@ public class MainView extends BorderPane {
                         .toList();
         nsEventsTable.setItems(FXCollections.observableArrayList(shown));
         updateFilterBar();
+    }
+
+    private void openSettings() {
+        SettingsPanel.show(getScene() == null ? null : getScene().getWindow(), settings,
+                () -> pool.submit(() -> settingsStore.save(settings)),
+                this::applyOverviewMetricsSettings);
     }
 
     // --- async plumbing ---------------------------------------------------------------------

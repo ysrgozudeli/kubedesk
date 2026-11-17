@@ -124,6 +124,24 @@ public final class Dtos {
                               Map<String, String> valuesFlat) {
     }
 
+    /**
+     * One rollout revision of a Deployment — what {@code kubectl rollout history} lists. Each revision is
+     * a ReplicaSet owned by the Deployment; {@code templateYaml} is its pod template (for diffing), and
+     * {@code current} marks the revision the Deployment is running now.
+     */
+    public record DeploymentRevision(long revision, String replicaSet, String changeCause, String images,
+                                     int pods, String age, boolean current, String templateYaml) {
+    }
+
+    /**
+     * What a Helm rollback will (dry run) or did change, as "Kind/name" lists. {@code fromRevision} is the
+     * revision live before, {@code newRevision} the revision number the rollback writes.
+     */
+    public record HelmRollbackResult(int fromRevision, int toRevision, int newRevision,
+                                     List<String> created, List<String> updated, List<String> deleted,
+                                     List<String> kept, boolean chartHasHooks) {
+    }
+
     /** Pod phase counts used to draw the health ring (e.g. Running=10, Pending=1, Failed=0). */
     public record HealthSummary(Map<String, Integer> phaseCounts, int total) {
     }

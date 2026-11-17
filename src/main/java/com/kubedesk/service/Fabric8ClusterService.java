@@ -2,6 +2,8 @@ package com.kubedesk.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.fabric8.kubernetes.api.model.GenericKubernetesResource;
+import io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext;
 import com.kubedesk.service.Dtos.ContextInfo;
 import com.kubedesk.service.Dtos.HealthFinding;
 import com.kubedesk.service.Dtos.HelmRelease;
@@ -32,6 +34,7 @@ import io.fabric8.kubernetes.api.model.apps.DaemonSet;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.authorization.v1.SelfSubjectRulesReview;
 import io.fabric8.kubernetes.api.model.authorization.v1.SelfSubjectRulesReviewBuilder;
+import io.fabric8.kubernetes.api.model.apps.ReplicaSet;
 import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.kubernetes.api.model.batch.v1.CronJob;
 import io.fabric8.kubernetes.api.model.batch.v1.Job;
@@ -73,6 +76,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Base64;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
@@ -213,6 +219,7 @@ public class Fabric8ClusterService implements ClusterService {
         return switch (kind) {
             case PODS -> pods(client, namespace);
             case DEPLOYMENTS -> deployments(client, namespace);
+            case REPLICASETS -> replicaSets(client, namespace);
             case STATEFULSETS -> statefulSets(client, namespace);
             case DAEMONSETS -> daemonSets(client, namespace);
             case JOBS -> jobs(client, namespace);
@@ -287,6 +294,7 @@ public class Fabric8ClusterService implements ClusterService {
             Object obj = switch (kind) {
                 case PODS -> client.pods().inNamespace(namespace).withName(name).get();
                 case DEPLOYMENTS -> client.apps().deployments().inNamespace(namespace).withName(name).get();
+                case REPLICASETS -> client.apps().replicaSets().inNamespace(namespace).withName(name).get();
                 case STATEFULSETS -> client.apps().statefulSets().inNamespace(namespace).withName(name).get();
                 case DAEMONSETS -> client.apps().daemonSets().inNamespace(namespace).withName(name).get();
                 case JOBS -> client.batch().v1().jobs().inNamespace(namespace).withName(name).get();
@@ -386,8 +394,52 @@ public class Fabric8ClusterService implements ClusterService {
                             Consumer<String> onOutput, Runnable onClosed) {
         // Long-lived client backs the session; closed together with the ExecWatch.
         KubernetesClient client = clientFor(context);
+        try {
+            for (String shell : EXEC_SHELLS) {
+                ExecAttempt attempt = tryShell(client, namespace, pod, container, shell, onOutput, onClosed);
+                if (attempt.session() != null) {
+                    return attempt.session();
+                }
+                if (!attempt.shellMissing()) {
+                    throw new ClusterException(explainExecFailure(namespace, attempt.reason()));
+                }
+                // That shell doesn't exist in the image — try the next one.
+            }
+            throw new ClusterException("This container has no shell (tried "
+                    + String.join(", ", EXEC_SHELLS) + "). It is probably a distroless or scratch "
+                    + "image. Pick another container if the pod has one, or debug it from a terminal with: "
+                    + "kubectl debug -it " + pod + " -n " + namespace + " --image=busybox"
+                    + (container != null ? " --target=" + container : ""));
+        } catch (ClusterException ce) {
+            client.close();
+            throw ce;
+        } catch (Exception e) {
+            client.close();
+            throw new ClusterException(explainExecFailure(namespace, rootMessage(e)), e);
+        }
+    }
 
-        // An OutputStream that forwards everything the container writes to the UI callback.
+    /** Shells tried in order: most images have /bin/sh; distroless :debug images have /busybox/sh. */
+    private static final String[] EXEC_SHELLS = {"/bin/sh", "/bin/bash", "/busybox/sh"};
+
+    /** Echoed by the shell to prove the session is really live (we have no TTY, hence no prompt). */
+    private static final String EXEC_READY = "__kubedesk_ready__";
+
+    /** Outcome of one shell attempt: a live session, or why it failed. */
+    private record ExecAttempt(ExecSession session, String reason, boolean shellMissing) { }
+
+    /**
+     * Start {@code shell} in the container and wait until it echoes a marker back — the only reliable
+     * "connected" signal without a TTY. Output is held back until then, so a failed attempt never reaches
+     * the UI and the marker is stripped. On failure the client is left open for the next attempt.
+     */
+    private ExecAttempt tryShell(KubernetesClient client, String namespace, String pod, String container,
+                                 String shell, Consumer<String> onOutput, Runnable onClosed) throws Exception {
+        CompletableFuture<String> ready = new CompletableFuture<>(); // null = live; text = failure reason
+        AtomicBoolean live = new AtomicBoolean(false);
+        AtomicBoolean missing = new AtomicBoolean(false);
+        StringBuilder held = new StringBuilder();
+
         OutputStream uiOut = new OutputStream() {
             @Override
             public void write(int b) {
@@ -396,55 +448,172 @@ public class Fabric8ClusterService implements ClusterService {
 
             @Override
             public void write(byte[] b, int off, int len) {
-                onOutput.accept(new String(b, off, len, StandardCharsets.UTF_8));
+                String s = new String(b, off, len, StandardCharsets.UTF_8);
+                synchronized (held) {
+                    if (live.get()) {
+                        onOutput.accept(s);
+                        return;
+                    }
+                    held.append(s);
+                    int i = held.indexOf(EXEC_READY);
+                    if (i >= 0) {
+                        String before = held.substring(0, i);
+                        String after = held.substring(i + EXEC_READY.length()).replaceFirst("^\\r?\\n", "");
+                        held.setLength(0);
+                        live.set(true);
+                        if (!before.isBlank()) {
+                            onOutput.accept(before);
+                        }
+                        if (!after.isEmpty()) {
+                            onOutput.accept(after);
+                        }
+                        ready.complete(null);
+                    }
+                }
             }
         };
 
+        ExecWatch watch = client.pods().inNamespace(namespace).withName(pod)
+                .inContainer(container)
+                .redirectingInput()
+                .writingOutput(uiOut)
+                .writingError(uiOut)
+                .usingListener(new ExecListener() {
+                    @Override
+                    public void onFailure(Throwable t, Response response) {
+                        if (live.get()) {
+                            onOutput.accept("\n[connection lost: " + rootMessage(t) + "]\n");
+                            onClosed.run();
+                            return;
+                        }
+                        String msg = rootMessage(t);
+                        if (response != null) {
+                            msg = "HTTP " + response.code() + " — " + msg;
+                            try {
+                                String body = response.body();
+                                if (body != null && !body.isBlank()) {
+                                    msg += " — " + body.strip();
+                                }
+                            } catch (Exception ignored) {
+                                // body is best-effort detail
+                            }
+                        }
+                        ready.complete(msg);
+                    }
+
+                    @Override
+                    public void onExit(int code, io.fabric8.kubernetes.api.model.Status status) {
+                        String detail = status != null && status.getMessage() != null ? status.getMessage() : "";
+                        if (live.get()) {
+                            if (code != 0) {
+                                onOutput.accept("\n[shell exited with code " + code + "]\n");
+                            }
+                            return;
+                        }
+                        String lower = detail.toLowerCase();
+                        // containerd says "executable file not found"/"no such file"; dockershim just
+                        // reports 126/127 (cannot execute / not found).
+                        if (lower.contains("no such file") || lower.contains("executable file not found")
+                                || code == 126 || code == 127) {
+                            missing.set(true);
+                        }
+                        ready.complete("exited with code " + code + (detail.isEmpty() ? "" : ": " + detail));
+                    }
+
+                    @Override
+                    public void onClose(int code, String reason) {
+                        if (live.get()) {
+                            onClosed.run();
+                        } else {
+                            ready.complete("connection closed"
+                                    + (reason != null && !reason.isBlank() ? ": " + reason : ""));
+                        }
+                    }
+                })
+                .exec(shell);
+
+        OutputStream stdin = watch.getInput();
         try {
-            ExecWatch watch = client.pods().inNamespace(namespace).withName(pod)
-                    .inContainer(container)
-                    .redirectingInput()
-                    .writingOutput(uiOut)
-                    .writingError(uiOut)
-                    .usingListener(new ExecListener() {
-                        @Override
-                        public void onFailure(Throwable t, Response failureResponse) {
-                            onOutput.accept("\n[exec failed: " + t.getMessage() + "]\n");
-                            onClosed.run();
-                        }
-
-                        @Override
-                        public void onClose(int code, String reason) {
-                            onClosed.run();
-                        }
-                    })
-                    .exec("/bin/sh");
-
-            OutputStream stdin = watch.getInput();
-            return new ExecSession() {
-                @Override
-                public void send(String input) {
-                    try {
-                        stdin.write(input.getBytes(StandardCharsets.UTF_8));
-                        stdin.flush();
-                    } catch (IOException e) {
-                        onOutput.accept("\n[could not send input: " + e.getMessage() + "]\n");
-                    }
-                }
-
-                @Override
-                public void close() {
-                    try {
-                        watch.close();
-                    } finally {
-                        client.close();
-                    }
-                }
-            };
-        } catch (Exception e) {
-            client.close();
-            throw new ClusterException("Could not open shell in " + pod + ": " + rootMessage(e), e);
+            stdin.write(("echo " + EXEC_READY + "\n").getBytes(StandardCharsets.UTF_8));
+            stdin.flush();
+        } catch (IOException e) {
+            // The exit/failure callback will say why.
         }
+
+        String failure;
+        try {
+            failure = ready.get(20, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException te) {
+            failure = "the shell did not answer within 20 seconds";
+        }
+        if (failure != null) {
+            watch.close();
+            return new ExecAttempt(null, failure, missing.get());
+        }
+
+        ExecSession session = new ExecSession() {
+            @Override
+            public void send(String input) {
+                try {
+                    stdin.write(input.getBytes(StandardCharsets.UTF_8));
+                    stdin.flush();
+                } catch (IOException e) {
+                    onOutput.accept("\n[could not send input: " + e.getMessage() + "]\n");
+                }
+            }
+
+            @Override
+            public String shell() {
+                return shell;
+            }
+
+            @Override
+            public void close() {
+                try {
+                    watch.close();
+                } finally {
+                    client.close();
+                }
+            }
+        };
+        return new ExecAttempt(session, null, false);
+    }
+
+    /** Turn a raw exec failure into something a user can act on; the raw text is kept as "Details". */
+    static String explainExecFailure(String namespace, String raw) {
+        String r = raw == null ? "" : raw;
+        int junk = r.indexOf(". Received status:"); // fabric8 appends a full Status dump
+        if (junk > 0) {
+            r = r.substring(0, junk + 1);
+        }
+        String l = r.toLowerCase();
+        String why;
+        java.util.regex.Matcher noContainer = java.util.regex.Pattern
+                .compile("container (\\S+) not found in pod").matcher(r);
+        if (noContainer.find()) {
+            why = "This pod has no container named '" + noContainer.group(1) + "'. Pick one from the Container list.";
+        } else if (l.contains("403") || l.contains("forbidden")) {
+            why = "You're not allowed to open a shell here. RBAC needs the 'create' verb on 'pods/exec' in "
+                    + "namespace " + namespace + ". Check with: kubectl auth can-i create pods/exec -n "
+                    + namespace + " — or ask your cluster admin.";
+        } else if (l.contains("is not valid for pod") || l.contains("container not found")
+                || l.contains("not running") || l.contains("completed pod") || l.contains("waiting to start")
+                || l.contains("containercreating")) {
+            why = "The container isn't running (it may be starting, crash-looping, or the pod has finished). "
+                    + "A shell needs a running container. Check the Logs and Events tabs.";
+        } else if (l.contains("404") || l.contains("not found")) {
+            why = "The pod wasn't found. It may have been replaced; refresh the list and try again.";
+        } else if (l.contains("101") || l.contains("upgrade") || l.contains("websocket")
+                || l.contains("400") || l.contains("handshake")) {
+            why = "The connection couldn't be upgraded to a WebSocket. Shell, port-forward and attach need "
+                    + "WebSockets, and a proxy, VPN or load balancer between you and the API server may be "
+                    + "blocking them. Check whether 'kubectl exec' works from this machine.";
+        } else if (l.contains("timed out") || l.contains("timeout") || l.contains("did not answer")) {
+            why = "The shell didn't respond in time. The node or API server may be slow or unreachable.";
+        } else {
+            why = "Could not open a shell.";
+        }
+        return why + (r.isBlank() ? "" : "\nDetails: " + r);
     }
 
     @Override
@@ -456,6 +625,8 @@ public class Fabric8ClusterService implements ClusterService {
             Watch watch = switch (kind) {
                 case PODS -> client.pods().inNamespace(namespace).watch(triggerWatcher(onChange, onClosed));
                 case DEPLOYMENTS -> client.apps().deployments().inNamespace(namespace)
+                        .watch(triggerWatcher(onChange, onClosed));
+                case REPLICASETS -> client.apps().replicaSets().inNamespace(namespace)
                         .watch(triggerWatcher(onChange, onClosed));
                 case STATEFULSETS -> client.apps().statefulSets().inNamespace(namespace)
                         .watch(triggerWatcher(onChange, onClosed));
@@ -592,6 +763,7 @@ public class Fabric8ClusterService implements ClusterService {
             switch (kind) {
                 case PODS -> client.pods().inNamespace(namespace).withName(name).delete();
                 case DEPLOYMENTS -> client.apps().deployments().inNamespace(namespace).withName(name).delete();
+                case REPLICASETS -> client.apps().replicaSets().inNamespace(namespace).withName(name).delete();
                 case STATEFULSETS -> client.apps().statefulSets().inNamespace(namespace).withName(name).delete();
                 case DAEMONSETS -> client.apps().daemonSets().inNamespace(namespace).withName(name).delete();
                 case JOBS -> client.batch().v1().jobs().inNamespace(namespace).withName(name).delete();
@@ -1260,6 +1432,7 @@ public class Fabric8ClusterService implements ClusterService {
         return switch (kind) {
             case PODS -> "Pod";
             case DEPLOYMENTS -> "Deployment";
+            case REPLICASETS -> "ReplicaSet";
             case STATEFULSETS -> "StatefulSet";
             case DAEMONSETS -> "DaemonSet";
             case JOBS -> "Job";
@@ -1456,6 +1629,11 @@ public class Fabric8ClusterService implements ClusterService {
                     var d = client.apps().deployments().inNamespace(namespace).withName(name).get();
                     yield d != null && d.getSpec() != null && d.getSpec().getSelector() != null
                             ? d.getSpec().getSelector().getMatchLabels() : null;
+                }
+                case REPLICASETS -> {
+                    var rs = client.apps().replicaSets().inNamespace(namespace).withName(name).get();
+                    yield rs != null && rs.getSpec() != null && rs.getSpec().getSelector() != null
+                            ? rs.getSpec().getSelector().getMatchLabels() : null;
                 }
                 case STATEFULSETS -> {
                     var s = client.apps().statefulSets().inNamespace(namespace).withName(name).get();
@@ -2039,6 +2217,35 @@ public class Fabric8ClusterService implements ClusterService {
         return new ResourceData(columns, rows);
     }
 
+    /**
+     * ReplicaSets, with the owning Deployment and its rollout revision — so the list doubles as a
+     * revision history (old ReplicaSets scaled to 0 are the previous rollouts).
+     */
+    private ResourceData replicaSets(KubernetesClient client, String namespace) {
+        List<String> columns = List.of("Name", "Desired", "Current", "Ready", "Owner", "Revision", "Image", "Age");
+        List<List<String>> rows = new ArrayList<>();
+        for (ReplicaSet r : client.apps().replicaSets().inNamespace(namespace).list().getItems()) {
+            var spec = r.getSpec();
+            var st = r.getStatus();
+            int desired = spec != null && spec.getReplicas() != null ? spec.getReplicas() : 0;
+            int current = st != null && st.getReplicas() != null ? st.getReplicas() : 0;
+            int ready = st != null && st.getReadyReplicas() != null ? st.getReadyReplicas() : 0;
+            String owner = r.getMetadata().getOwnerReferences() == null ? "-"
+                    : r.getMetadata().getOwnerReferences().stream()
+                    .map(o -> o.getKind() + "/" + o.getName()).findFirst().orElse("-");
+            Map<String, String> ann = r.getMetadata().getAnnotations();
+            String revision = ann != null ? ann.getOrDefault(REVISION_ANNOTATION, "-") : "-";
+            String images = spec != null && spec.getTemplate() != null && spec.getTemplate().getSpec() != null
+                    ? imagesOf(spec.getTemplate().getSpec().getContainers()) : "-";
+            rows.add(List.of(r.getMetadata().getName(), String.valueOf(desired), String.valueOf(current),
+                    String.valueOf(ready), owner, revision, images,
+                    age(r.getMetadata().getCreationTimestamp())));
+        }
+        return new ResourceData(columns, rows);
+    }
+
+    static final String REVISION_ANNOTATION = "deployment.kubernetes.io/revision";
+
     private ResourceData statefulSets(KubernetesClient client, String namespace) {
         List<String> columns = List.of("Name", "Ready", "Image", "Age");
         List<List<String>> rows = new ArrayList<>();
@@ -2411,6 +2618,408 @@ public class Fabric8ClusterService implements ClusterService {
             throw new ClusterException("Could not read history for Helm release '" + release + "': "
                     + rootMessage(e), e);
         }
+    }
+
+    // --- Helm rollback (no CLI) -------------------------------------------------------------
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper YAML =
+            new com.fasterxml.jackson.databind.ObjectMapper(new com.fasterxml.jackson.dataformat.yaml.YAMLFactory());
+
+    /** One stored revision: its Secret and the decoded release JSON. */
+    private record StoredRelease(Secret secret, com.fasterxml.jackson.databind.node.ObjectNode json) {
+        int version() {
+            return json.path("version").asInt(0);
+        }
+
+        String status() {
+            return json.path("info").path("status").asText("");
+        }
+    }
+
+    /** A manifest object plus how to address it on the API server. */
+    private record ManifestObj(String key, String display, ResourceDefinitionContext rdc, String namespace,
+                               String name, JsonNode body) {
+    }
+
+    @Override
+    public Dtos.HelmRollbackResult helmRollback(String context, String namespace, String release,
+                                                int toRevision, boolean dryRun) {
+        try (KubernetesClient client = clientFor(context)) {
+            List<StoredRelease> stored = new ArrayList<>();
+            for (Secret s : client.secrets().inNamespace(namespace)
+                    .withLabel("owner", "helm").withLabel("name", release).list().getItems()) {
+                if (!"helm.sh/release.v1".equals(s.getType()) || s.getData() == null
+                        || !s.getData().containsKey("release")) {
+                    continue;
+                }
+                JsonNode n = helmJson.readTree(decodeHelmPayload(s.getData().get("release")));
+                if (n instanceof com.fasterxml.jackson.databind.node.ObjectNode on) {
+                    stored.add(new StoredRelease(s, on));
+                }
+            }
+            if (stored.isEmpty()) {
+                throw new ClusterException("Helm release '" + release + "' not found in " + namespace + ".");
+            }
+            stored.sort(Comparator.comparingInt(StoredRelease::version));
+            StoredRelease latest = stored.get(stored.size() - 1);
+            // "Current" is what's deployed now; fall back to the newest record (e.g. after a failed upgrade).
+            StoredRelease current = stored.stream().filter(r -> "deployed".equals(r.status()))
+                    .reduce((a, b) -> b).orElse(latest);
+            StoredRelease target = stored.stream().filter(r -> r.version() == toRevision).findFirst()
+                    .orElseThrow(() -> new ClusterException("Revision " + toRevision + " of '" + release
+                            + "' isn't stored any more (Helm keeps a limited history)."));
+            if (target.version() == current.version() && "deployed".equals(current.status())) {
+                throw new ClusterException("'" + release + "' is already running revision " + toRevision + ".");
+            }
+            int newVersion = latest.version() + 1;
+
+            Map<String, ResourceDefinitionContext> rdcCache = new HashMap<>();
+            Map<String, ManifestObj> from = parseManifest(client, namespace,
+                    current.json().path("manifest").asText(""), rdcCache);
+            Map<String, ManifestObj> to = parseManifest(client, namespace,
+                    target.json().path("manifest").asText(""), rdcCache);
+            JsonNode hooks = target.json().path("hooks");
+            boolean hasHooks = hooks.isArray() && !hooks.isEmpty();
+
+            // Plan: create / patch what the target has, delete what only the current has.
+            List<Runnable> actions = new ArrayList<>();
+            List<String> created = new ArrayList<>();
+            List<String> updated = new ArrayList<>();
+            List<String> deleted = new ArrayList<>();
+            List<String> kept = new ArrayList<>();
+            for (ManifestObj t : to.values()) {
+                var op = t.namespace() == null
+                        ? client.genericKubernetesResources(t.rdc())
+                        : client.genericKubernetesResources(t.rdc()).inNamespace(t.namespace());
+                GenericKubernetesResource live = op.withName(t.name()).get();
+                if (live == null) {
+                    GenericKubernetesResource obj = helmJson.convertValue(t.body(), GenericKubernetesResource.class);
+                    created.add(t.display());
+                    actions.add(() -> op.resource(obj).dryRun(dryRun).create());
+                } else {
+                    ManifestObj f = from.get(t.key());
+                    JsonNode patch = mergePatch(f != null ? f.body() : helmJson.createObjectNode(), t.body());
+                    if (patch.isEmpty()) {
+                        // Unchanged between the two revisions — but re-assert it in case it drifted.
+                        patch = mergePatch(helmJson.createObjectNode(), t.body());
+                        actions.add(patchAction(op, t.name(), patch, dryRun));
+                        continue;
+                    }
+                    updated.add(t.display());
+                    actions.add(patchAction(op, t.name(), patch, dryRun));
+                }
+            }
+            for (ManifestObj f : from.values()) {
+                if (to.containsKey(f.key())) {
+                    continue;
+                }
+                if ("keep".equals(f.body().path("metadata").path("annotations")
+                        .path("helm.sh/resource-policy").asText(""))) {
+                    kept.add(f.display());
+                    continue;
+                }
+                var op = f.namespace() == null
+                        ? client.genericKubernetesResources(f.rdc())
+                        : client.genericKubernetesResources(f.rdc()).inNamespace(f.namespace());
+                if (op.withName(f.name()).get() == null) {
+                    continue; // already gone
+                }
+                deleted.add(f.display());
+                actions.add(() -> op.withName(f.name()).dryRun(dryRun).delete());
+            }
+
+            Dtos.HelmRollbackResult result = new Dtos.HelmRollbackResult(current.version(), toRevision,
+                    newVersion, created, updated, deleted, kept, hasHooks);
+
+            if (dryRun) {
+                for (Runnable a : actions) {
+                    a.run(); // server-side validation only (dryRun=All); nothing persists
+                }
+                return result;
+            }
+
+            // 1. Record the new revision as pending, like Helm does, so a crash leaves a visible trace.
+            String now = java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME
+                    .format(java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC));
+            var rel = target.json().deepCopy();
+            rel.put("version", newVersion);
+            var info = (com.fasterxml.jackson.databind.node.ObjectNode) rel.with("info");
+            info.put("status", "pending-rollback");
+            info.put("description", "Rollback to " + toRevision);
+            info.put("last_deployed", now);
+            info.put("deleted", "");
+            JsonNode firstDeployed = current.json().path("info").path("first_deployed");
+            if (!firstDeployed.isMissingNode()) {
+                info.set("first_deployed", firstDeployed);
+            }
+            String secretName = "sh.helm.release.v1." + release + ".v" + newVersion;
+            Map<String, String> labels = new LinkedHashMap<>();
+            labels.put("name", release);
+            labels.put("owner", "helm");
+            labels.put("status", "pending-rollback");
+            labels.put("version", String.valueOf(newVersion));
+            labels.put("modifiedAt", String.valueOf(Instant.now().getEpochSecond()));
+            Secret newSecret = new io.fabric8.kubernetes.api.model.SecretBuilder()
+                    .withNewMetadata().withName(secretName).withNamespace(namespace).withLabels(labels).endMetadata()
+                    .withType("helm.sh/release.v1")
+                    .withData(Map.of("release", encodeHelmPayload(rel)))
+                    .build();
+            client.secrets().inNamespace(namespace).resource(newSecret).create();
+
+            // 2. Bring the cluster to the target manifest.
+            try {
+                for (Runnable a : actions) {
+                    a.run();
+                }
+            } catch (RuntimeException e) {
+                info.put("status", "failed");
+                info.put("description", "Rollback \"" + release + "\" failed: " + rootMessage(e));
+                writeReleaseStatus(client, namespace, secretName, rel, "failed");
+                throw e;
+            }
+
+            // 3. Mark the new revision deployed and supersede whatever was deployed before.
+            info.put("status", "deployed");
+            writeReleaseStatus(client, namespace, secretName, rel, "deployed");
+            for (StoredRelease r : stored) {
+                if ("deployed".equals(r.status())) {
+                    var old = r.json().deepCopy();
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) old.with("info")).put("status", "superseded");
+                    writeReleaseStatus(client, namespace, r.secret().getMetadata().getName(), old, "superseded");
+                }
+            }
+            return result;
+        } catch (ClusterException ce) {
+            throw ce;
+        } catch (Exception e) {
+            throw new ClusterException((dryRun ? "Rollback check failed for '" : "Rollback failed for '")
+                    + release + "': " + rootMessage(e), e);
+        }
+    }
+
+    private Runnable patchAction(io.fabric8.kubernetes.client.dsl.NonNamespaceOperation<GenericKubernetesResource,
+            ?, io.fabric8.kubernetes.client.dsl.Resource<GenericKubernetesResource>> op,
+                                 String name, JsonNode patch, boolean dryRun) {
+        String body = patch.toString();
+        return () -> op.withName(name).dryRun(dryRun).patch(
+                io.fabric8.kubernetes.client.dsl.base.PatchContext.of(
+                        io.fabric8.kubernetes.client.dsl.base.PatchType.JSON_MERGE), body);
+    }
+
+    /** Rewrite a stored release Secret's payload and its status label. */
+    private void writeReleaseStatus(KubernetesClient client, String namespace, String secretName,
+                                    JsonNode rel, String status) throws IOException {
+        String payload = encodeHelmPayload(rel);
+        client.secrets().inNamespace(namespace).withName(secretName).edit(s -> {
+            s.getData().put("release", payload);
+            if (s.getMetadata().getLabels() != null) {
+                s.getMetadata().getLabels().put("status", status);
+                s.getMetadata().getLabels().put("modifiedAt", String.valueOf(Instant.now().getEpochSecond()));
+            }
+            return s;
+        });
+    }
+
+    /** Inverse of {@link #decodeHelmPayload}: gzip the JSON, base64 it (Helm), base64 again (Secret data). */
+    private String encodeHelmPayload(JsonNode rel) throws IOException {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gz = new java.util.zip.GZIPOutputStream(bytes)) {
+            gz.write(helmJson.writeValueAsBytes(rel));
+        }
+        String helmB64 = Base64.getEncoder().encodeToString(bytes.toByteArray());
+        return Base64.getEncoder().encodeToString(helmB64.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Split a rendered Helm manifest into addressable objects keyed by group/kind/namespace/name. */
+    private Map<String, ManifestObj> parseManifest(KubernetesClient client, String releaseNs, String manifest,
+                                                   Map<String, ResourceDefinitionContext> rdcCache)
+            throws IOException {
+        Map<String, ManifestObj> out = new LinkedHashMap<>();
+        if (manifest == null || manifest.isBlank()) {
+            return out;
+        }
+        try (var it = YAML.readerFor(JsonNode.class).<JsonNode>readValues(manifest)) {
+            while (it.hasNext()) {
+                JsonNode doc = it.next();
+                if (doc == null || !doc.isObject() || !doc.hasNonNull("kind") || !doc.hasNonNull("apiVersion")) {
+                    continue;
+                }
+                String apiVersion = doc.get("apiVersion").asText();
+                String kind = doc.get("kind").asText();
+                String name = doc.path("metadata").path("name").asText("");
+                if (name.isEmpty()) {
+                    continue;
+                }
+                ResourceDefinitionContext rdc = rdcCache.computeIfAbsent(apiVersion + "/" + kind,
+                        k -> discover(client, apiVersion, kind));
+                String ns = null;
+                if (rdc.isNamespaceScoped()) {
+                    String declared = doc.path("metadata").path("namespace").asText("");
+                    ns = declared.isEmpty() ? releaseNs : declared;
+                }
+                String group = apiVersion.contains("/") ? apiVersion.substring(0, apiVersion.indexOf('/')) : "";
+                String key = group + "|" + kind + "|" + (ns == null ? "" : ns) + "|" + name;
+                out.put(key, new ManifestObj(key, kind + "/" + name, rdc, ns, name, doc));
+            }
+        }
+        return out;
+    }
+
+    /** Resolve plural + scope for an apiVersion/kind via API discovery. */
+    private static ResourceDefinitionContext discover(KubernetesClient client, String apiVersion, String kind) {
+        var list = client.getApiResources(apiVersion);
+        if (list != null && list.getResources() != null) {
+            for (var r : list.getResources()) {
+                if (kind.equals(r.getKind()) && r.getName() != null && !r.getName().contains("/")) {
+                    String group = apiVersion.contains("/") ? apiVersion.substring(0, apiVersion.indexOf('/')) : "";
+                    String version = apiVersion.contains("/") ? apiVersion.substring(apiVersion.indexOf('/') + 1)
+                            : apiVersion;
+                    return new ResourceDefinitionContext.Builder()
+                            .withGroup(group).withVersion(version).withKind(kind)
+                            .withPlural(r.getName()).withNamespaced(Boolean.TRUE.equals(r.getNamespaced()))
+                            .build();
+                }
+            }
+        }
+        throw new ClusterException("The cluster doesn't know " + kind + " (" + apiVersion
+                + "). Is the CRD installed?");
+    }
+
+    /**
+     * An RFC 7386 JSON merge patch turning {@code from} into {@code to}: changed/added keys are set,
+     * keys only in {@code from} become null (removed), nested objects recurse, arrays are replaced.
+     * Applied to the live object this is Helm's 3-way merge: fields others added (e.g. by an HPA or a
+     * mutating webhook) survive, fields the chart dropped are removed.
+     */
+    static JsonNode mergePatch(JsonNode from, JsonNode to) {
+        var mapper = new ObjectMapper();
+        if (from == null || !from.isObject() || !to.isObject()) {
+            return to;
+        }
+        var p = mapper.createObjectNode();
+        from.fieldNames().forEachRemaining(f -> {
+            if (!to.has(f)) {
+                p.putNull(f);
+            }
+        });
+        to.fields().forEachRemaining(e -> {
+            JsonNode fv = from.get(e.getKey());
+            JsonNode tv = e.getValue();
+            if (fv == null) {
+                p.set(e.getKey(), tv);
+            } else if (!fv.equals(tv)) {
+                if (fv.isObject() && tv.isObject()) {
+                    JsonNode sub = mergePatch(fv, tv);
+                    if (!sub.isEmpty()) {
+                        p.set(e.getKey(), sub);
+                    }
+                } else {
+                    p.set(e.getKey(), tv);
+                }
+            }
+        });
+        return p;
+    }
+
+    // --- Deployment rollout history -----------------------------------------------------------
+
+    private static final String CHANGE_CAUSE = "kubernetes.io/change-cause";
+
+    @Override
+    public List<Dtos.DeploymentRevision> deploymentHistory(String context, String namespace, String name) {
+        try (KubernetesClient client = clientFor(context)) {
+            Deployment d = client.apps().deployments().inNamespace(namespace).withName(name).get();
+            if (d == null) {
+                throw new ClusterException("Deployment " + name + " not found.");
+            }
+            String uid = d.getMetadata().getUid();
+            Map<String, String> dAnn = d.getMetadata().getAnnotations();
+            String currentRev = dAnn != null ? dAnn.get(REVISION_ANNOTATION) : null;
+            List<Dtos.DeploymentRevision> out = new ArrayList<>();
+            for (ReplicaSet rs : ownedReplicaSets(client, namespace, uid)) {
+                Map<String, String> ann = rs.getMetadata().getAnnotations();
+                long rev;
+                try {
+                    rev = Long.parseLong(ann.get(REVISION_ANNOTATION));
+                } catch (Exception e) {
+                    continue;
+                }
+                var tpl = rs.getSpec() != null ? rs.getSpec().getTemplate() : null;
+                if (tpl != null && tpl.getMetadata() != null && tpl.getMetadata().getLabels() != null) {
+                    tpl.getMetadata().getLabels().remove("pod-template-hash");
+                }
+                String images = tpl != null && tpl.getSpec() != null ? imagesOf(tpl.getSpec().getContainers()) : "-";
+                int pods = rs.getStatus() != null && rs.getStatus().getReplicas() != null
+                        ? rs.getStatus().getReplicas() : 0;
+                out.add(new Dtos.DeploymentRevision(rev, rs.getMetadata().getName(),
+                        ann.getOrDefault(CHANGE_CAUSE, ""), images, pods,
+                        age(rs.getMetadata().getCreationTimestamp()),
+                        String.valueOf(rev).equals(currentRev),
+                        tpl == null ? "" : io.fabric8.kubernetes.client.utils.Serialization.asYaml(tpl)));
+            }
+            out.sort(Comparator.comparingLong(Dtos.DeploymentRevision::revision).reversed());
+            return out;
+        } catch (ClusterException ce) {
+            throw ce;
+        } catch (Exception e) {
+            throw new ClusterException("Could not read rollout history of " + name + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public void rollbackDeployment(String context, String namespace, String name, long toRevision) {
+        try (KubernetesClient client = clientFor(context)) {
+            Deployment d = client.apps().deployments().inNamespace(namespace).withName(name).get();
+            if (d == null) {
+                throw new ClusterException("Deployment " + name + " not found.");
+            }
+            if (d.getSpec() != null && Boolean.TRUE.equals(d.getSpec().getPaused())) {
+                throw new ClusterException(name + " is paused. Resume it before rolling back "
+                        + "(kubectl rollout resume deployment/" + name + ").");
+            }
+            ReplicaSet target = ownedReplicaSets(client, namespace, d.getMetadata().getUid()).stream()
+                    .filter(rs -> String.valueOf(toRevision).equals(
+                            rs.getMetadata().getAnnotations().get(REVISION_ANNOTATION)))
+                    .findFirst()
+                    .orElseThrow(() -> new ClusterException("Revision " + toRevision + " of " + name
+                            + " not found (old ReplicaSets beyond revisionHistoryLimit are deleted)."));
+            var tpl = target.getSpec().getTemplate();
+            if (tpl.getMetadata() != null && tpl.getMetadata().getLabels() != null) {
+                tpl.getMetadata().getLabels().remove("pod-template-hash");
+            }
+            String cause = target.getMetadata().getAnnotations().get(CHANGE_CAUSE);
+            client.apps().deployments().inNamespace(namespace).withName(name).edit(dep -> {
+                dep.getSpec().setTemplate(tpl);
+                Map<String, String> ann = dep.getMetadata().getAnnotations();
+                if (ann == null) {
+                    ann = new HashMap<>();
+                    dep.getMetadata().setAnnotations(ann);
+                }
+                if (cause != null) {
+                    ann.put(CHANGE_CAUSE, cause);
+                } else {
+                    ann.remove(CHANGE_CAUSE);
+                }
+                return dep;
+            });
+        } catch (ClusterException ce) {
+            throw ce;
+        } catch (Exception e) {
+            throw new ClusterException("Could not roll back " + name + ": " + rootMessage(e), e);
+        }
+    }
+
+    /** ReplicaSets whose controller owner is the Deployment with this UID. */
+    private static List<ReplicaSet> ownedReplicaSets(KubernetesClient client, String namespace, String uid) {
+        List<ReplicaSet> out = new ArrayList<>();
+        for (ReplicaSet rs : client.apps().replicaSets().inNamespace(namespace).list().getItems()) {
+            var refs = rs.getMetadata().getOwnerReferences();
+            if (refs != null && refs.stream().anyMatch(o -> uid.equals(o.getUid()))
+                    && rs.getMetadata().getAnnotations() != null) {
+                out.add(rs);
+            }
+        }
+        return out;
     }
 
     /**

@@ -3,6 +3,34 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.21.0] - 2026-11-17
+
+### Added
+- **Deployment rollout history + rollback.** Deployments get a **History** tab, the
+  `kubectl rollout history` view: every revision with its change-cause, images, pod count and age, the
+  running one marked ●. Select a revision to see a color-coded diff of its pod template against what's
+  running, then **↶ Roll back to revision N** (`kubectl rollout undo --to-revision=N`). It's also on the
+  Deployment right-click menu as **Rollout history / rollback…**.
+- **Helm rollback, no CLI.** In a Helm release's **History** tab, **↶ Roll back to revision N** (or
+  right-click a revision) does what `helm rollback` does. First it **dry-runs on the server** and shows
+  the plan (which objects it will create, update and delete, and which it keeps because of
+  `helm.sh/resource-policy: keep`). On confirm it writes the new revision, applies the target manifest
+  as a 3-way merge (fields added by others, such as an HPA, survive), and marks the previous revision
+  superseded. Chart hooks aren't run; the confirmation warns when a chart has them.
+- **ReplicaSets** as a resource kind (Workloads), with owner and rollout revision columns.
+- **⚙ Settings button** in the toolbar, and **Settings…** in the command palette. It used to be only
+  under ☰, where people missed it.
+
+### Fixed
+- **Pod Shell: no more "is it connected?"** The shell runs without a TTY, so there's no prompt, and the
+  tab used to sit on "Connecting…" with no feedback. It now waits until the shell actually answers and
+  then says **✓ Connected (/bin/sh)** with a hint to type a command. Connecting no longer freezes the UI.
+- **Shell works on more images.** If `/bin/sh` isn't there, it tries `/bin/bash` and then `/busybox/sh`
+  (distroless `:debug`). When there's no shell at all, it says so and suggests `kubectl debug`.
+- **Shell errors you can act on.** Missing `pods/exec` RBAC (with the `kubectl auth can-i` command to
+  check it), a container that isn't running, a pod that's gone, or a proxy/VPN blocking the WebSocket
+  upgrade now each get a plain explanation. The raw error is still shown underneath.
+
 ## [1.20.1] - 2026-11-17
 
 ### Fixed

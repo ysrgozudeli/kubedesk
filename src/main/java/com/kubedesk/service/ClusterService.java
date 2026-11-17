@@ -130,6 +130,25 @@ public interface ClusterService {
     List<HelmRelease> helmHistory(String context, String namespace, String release);
 
     /**
+     * Roll a Helm release back to {@code toRevision}, like {@code helm rollback} — without the CLI. Writes a
+     * new revision cloned from the target, brings the cluster to the target's manifest (create / 3-way merge
+     * patch / delete, honouring {@code helm.sh/resource-policy: keep}), and marks the previous revision
+     * superseded. Chart hooks are not run. With {@code dryRun}, nothing is written: the changes are
+     * validated server-side and the plan is returned.
+     */
+    Dtos.HelmRollbackResult helmRollback(String context, String namespace, String release, int toRevision,
+                                         boolean dryRun);
+
+    /** A Deployment's rollout history (newest first), like {@code kubectl rollout history}. */
+    List<Dtos.DeploymentRevision> deploymentHistory(String context, String namespace, String name);
+
+    /**
+     * Roll a Deployment back to a revision, like {@code kubectl rollout undo --to-revision}: the revision's
+     * pod template is copied back into the Deployment, which starts a normal rolling update.
+     */
+    void rollbackDeployment(String context, String namespace, String name, long toRevision);
+
+    /**
      * Scan a namespace (plus cluster Nodes) for resources failing common health checks —
      * CrashLoop/ImagePull/OOM/Evicted pods, unavailable workloads, unbound PVCs, orphaned
      * Services, unhealthy Nodes, etc. Findings are ordered most-severe first.

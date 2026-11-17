@@ -10,6 +10,7 @@ package com.kubedesk.service;
 public enum ResourceKind {
     PODS("Workloads", "Pods", true, "", "pods"),
     DEPLOYMENTS("Workloads", "Deployments", true, "apps", "deployments"),
+    REPLICASETS("Workloads", "ReplicaSets", true, "apps", "replicasets"),
     STATEFULSETS("Workloads", "StatefulSets", true, "apps", "statefulsets"),
     DAEMONSETS("Workloads", "DaemonSets", true, "apps", "daemonsets"),
     JOBS("Workloads", "Jobs", true, "batch", "jobs"),
