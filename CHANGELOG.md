@@ -3,6 +3,21 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.20.1] - 2026-11-17
+
+### Fixed
+- **Search box now filters the Health and Events views.** The top search box only ever filtered the
+  resource table and the Helm releases list; on the **Health** and **Events** screens, typing in it did
+  nothing (it was filtering the hidden resource table). It now filters whichever list view is active —
+  resource table, Helm, Health, or Events — and is correctly a no-op on the Topology graph and Overview
+  charts.
+
+### Added
+- **Filter banner above the grid.** Whenever a filter is narrowing the list — a text search and/or a
+  "Show pods" workload filter — a banner now appears above the grid naming the active filter, showing the
+  **shown-of-total** count, and offering a **✕ Clear filter** button that drops all filters at once. It
+  hides automatically when nothing is filtering.
+
 ## [1.20.0] - 2026-11-16
 
 ### Added

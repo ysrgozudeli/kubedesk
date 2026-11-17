@@ -192,6 +192,9 @@ public class MainView extends BorderPane {
     private final VBox healthView = new VBox(10);
     private final TableView<HealthFinding> healthTable = new TableView<>();
     private final Label healthSummary = new Label();
+    // Full (unfiltered) backing lists for the Health and Events views, so the search box can re-filter them.
+    private List<HealthFinding> healthAllFindings = List.of();
+    private List<List<String>> nsEventsAllRows = List.of();
 
     private final ToggleButton eventsToggle = new ToggleButton("›  Events");
     private final VBox eventsView = new VBox(10);
@@ -1807,29 +1810,78 @@ public class MainView extends BorderPane {
         return box;
     }
 
-    /** The "Showing pods of …" bar above the table; hidden until a workload-pod filter is active. */
+    /**
+     * The filter banner above the grid. It appears whenever a filter is narrowing the list — a text
+     * search and/or a "Show pods" workload filter — naming the filter, the shown/total counts, and a
+     * Clear button that drops all of them. Hidden when nothing is filtering.
+     */
     private void buildFilterBar() {
         filterBarLabel.getStyleClass().add("filter-bar-label");
-        Button clear = new Button("Clear");
+        Button clear = new Button("✕ Clear filter");
         clear.getStyleClass().add("filter-bar-clear");
-        clear.setOnAction(e -> {
-            clearWorkloadFilter();
-            applyFilter();
-        });
+        clear.setOnAction(e -> clearAllFilters());
         filterBar.setAlignment(Pos.CENTER_LEFT);
         filterBar.getStyleClass().add("filter-bar");
-        filterBar.getChildren().setAll(filterBarLabel, clear);
+        filterBar.getChildren().setAll(filterBarLabel, spacer(), clear);
         filterBar.setVisible(false);
         filterBar.setManaged(false);
     }
 
+    /** Drop both the text search and any "Show pods" workload filter, then re-render the active view. */
+    private void clearAllFilters() {
+        workloadPodFilter = null;
+        workloadFilterLabel = null;
+        searchField.setText(""); // may fire the listener; the explicit re-filter below covers the no-change case
+        applyActiveFilter();
+    }
+
+    /** True for the views the search box actually filters (list/grid views, not the graph or charts). */
+    private boolean isFilterableView() {
+        return currentView == ViewMode.RESOURCE || currentView == ViewMode.HELM
+                || currentView == ViewMode.HEALTH || currentView == ViewMode.EVENTS;
+    }
+
+    private int activeShownCount() {
+        return switch (currentView) {
+            case HELM -> helmTable.getItems().size();
+            case HEALTH -> healthTable.getItems().size();
+            case EVENTS -> nsEventsTable.getItems().size();
+            default -> table.getItems().size();
+        };
+    }
+
+    private int activeTotalCount() {
+        return switch (currentView) {
+            case HELM -> helmAllReleases.size();
+            case HEALTH -> healthAllFindings.size();
+            case EVENTS -> nsEventsAllRows.size();
+            default -> currentData != null ? currentData.rows().size() : table.getItems().size();
+        };
+    }
+
     private void updateFilterBar() {
-        boolean active = workloadPodFilter != null;
+        String q = searchField.getText() == null ? "" : searchField.getText().trim();
+        boolean textActive = !q.isEmpty() && isFilterableView();
+        boolean workloadActive = workloadPodFilter != null;
+        boolean active = textActive || workloadActive;
         filterBar.setVisible(active);
         filterBar.setManaged(active);
-        if (active) {
-            filterBarLabel.setText("Showing pods of " + workloadFilterLabel);
+        if (!active) {
+            return;
         }
+        StringBuilder sb = new StringBuilder();
+        if (workloadActive) {
+            sb.append("Showing pods of ").append(workloadFilterLabel);
+        }
+        if (workloadActive && textActive) {
+            sb.append("   ·   ");
+        }
+        if (textActive) {
+            sb.append("Filter: “").append(q).append('”');
+        }
+        sb.append("      ").append(activeShownCount()).append(" of ").append(activeTotalCount())
+                .append(" shown");
+        filterBarLabel.setText(sb.toString());
     }
 
     /** Drop any active "Show pods" workload filter (does not re-render — caller applies the filter). */
@@ -4791,6 +4843,8 @@ public class MainView extends BorderPane {
         boolean onCronJobs = mode == ViewMode.RESOURCE && currentKind == ResourceKind.CRONJOBS;
         cronBtn.setVisible(onCronJobs);
         cronBtn.setManaged(onCronJobs);
+        // Refresh the filter banner for the new view (e.g. hide it on the graph/charts views).
+        updateFilterBar();
     }
 
     private void loadTopology() {
@@ -4905,7 +4959,8 @@ public class MainView extends BorderPane {
         healthSummary.setText("Scanning…");
         status("Running health scan…");
         runAsync(() -> service.healthCheck(ctx.name(), ns), findings -> {
-            healthTable.setItems(FXCollections.observableArrayList(findings));
+            healthAllFindings = findings;
+            healthApplyFilter();
             long crit = findings.stream().filter(h -> h.severity() == HealthSeverity.CRITICAL).count();
             long warn = findings.size() - crit;
             if (findings.isEmpty()) {
@@ -5694,7 +5749,8 @@ public class MainView extends BorderPane {
         status("Loading events…");
         final String namespace = ns;
         runAsync(() -> service.listEvents(ctx.name(), namespace), data -> {
-            nsEventsTable.setItems(FXCollections.observableArrayList(data.rows()));
+            nsEventsAllRows = data.rows();
+            eventsApplyFilter();
             long warns = data.rows().stream()
                     .filter(r -> !r.isEmpty() && "Warning".equals(r.get(0))).count();
             eventsSummary.setText(data.rows().size() + " events · " + warns
@@ -5804,6 +5860,7 @@ public class MainView extends BorderPane {
                     .toList();
         }
         helmTable.setItems(FXCollections.observableArrayList(shown));
+        updateFilterBar();
     }
 
     /** Collapse the detail pane so the releases table uses the full width. */
@@ -6646,12 +6703,19 @@ public class MainView extends BorderPane {
     }
 
     /** Client-side filter across all columns of the current data. */
-    /** Route the global search box to whichever view is active (resource table vs. Helm releases). */
+    /** Route the global search box to whichever item view is active. */
     private void onSearchChanged() {
-        if (currentView == ViewMode.HELM) {
-            helmApplyFilter();
-        } else {
-            applyFilter();
+        applyActiveFilter();
+    }
+
+    /** Re-run the active view's filter (resource table, Helm, Health or Events); no-op for non-list views. */
+    private void applyActiveFilter() {
+        switch (currentView) {
+            case HELM -> helmApplyFilter();
+            case HEALTH -> healthApplyFilter();
+            case EVENTS -> eventsApplyFilter();
+            case RESOURCE -> applyFilter();
+            default -> updateFilterBar(); // TOPOLOGY / OVERVIEW: search doesn't apply
         }
     }
 
@@ -6666,6 +6730,28 @@ public class MainView extends BorderPane {
             rows = rows.filter(row -> row.stream().anyMatch(c -> c != null && c.toLowerCase().contains(q)));
         }
         table.setItems(FXCollections.observableArrayList(rows.toList()));
+        updateFilterBar();
+    }
+
+    private void healthApplyFilter() {
+        String q = searchField.getText() == null ? "" : searchField.getText().trim().toLowerCase();
+        List<HealthFinding> shown = q.isEmpty() ? healthAllFindings
+                : healthAllFindings.stream()
+                        .filter(h -> (h.severity() + " " + h.kind().label() + " " + h.name() + " "
+                                + h.check() + " " + h.detail()).toLowerCase().contains(q))
+                        .toList();
+        healthTable.setItems(FXCollections.observableArrayList(shown));
+        updateFilterBar();
+    }
+
+    private void eventsApplyFilter() {
+        String q = searchField.getText() == null ? "" : searchField.getText().trim().toLowerCase();
+        List<List<String>> shown = q.isEmpty() ? nsEventsAllRows
+                : nsEventsAllRows.stream()
+                        .filter(row -> row.stream().anyMatch(c -> c != null && c.toLowerCase().contains(q)))
+                        .toList();
+        nsEventsTable.setItems(FXCollections.observableArrayList(shown));
+        updateFilterBar();
     }
 
     // --- async plumbing ---------------------------------------------------------------------
