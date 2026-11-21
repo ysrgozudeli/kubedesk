@@ -36,6 +36,7 @@ import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
+import javafx.beans.value.ChangeListener;
 import javafx.collections.FXCollections;
 import javafx.concurrent.Task;
 import javafx.css.PseudoClass;
@@ -77,6 +78,7 @@ import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.TitledPane;
 import javafx.scene.control.ToggleButton;
@@ -332,6 +334,9 @@ public class MainView extends BorderPane {
     private final TextField shellInput = new TextField();
     private final Button shellConnectBtn = new Button("Connect");
     private final Button shellScriptBtn = new Button("Run script…");
+    private final ToggleGroup shellModeGroup = new ToggleGroup();
+    private final RadioButton shellTtyRadio = new RadioButton("TTY");
+    private final RadioButton shellConsoleRadio = new RadioButton("Console");
     private ExecSession execSession;
     private String shellPod;
     /** Remembered "pipe into" command for the Run-script dialog (pre-filled next time). */
@@ -2327,14 +2332,34 @@ public class MainView extends BorderPane {
                 + "quotes survive intact — unlike typing it line by line."));
         shellScriptBtn.setOnAction(e -> openRunScriptDialog());
 
-        Label note = new Label("Command console (not a full TTY — no vim/top).");
+        Label note = new Label("Console = whole lines, no TTY. TTY = a real terminal (vim/top/less).");
         note.getStyleClass().add("muted");
+
+        // Mode toggle: Console (safer default) vs TTY (interactive). Switching while connected
+        // closes the live session first.
+        shellTtyRadio.setToggleGroup(shellModeGroup);
+        shellConsoleRadio.setToggleGroup(shellModeGroup);
+        shellConsoleRadio.setSelected(true);
+        shellTtyRadio.setTooltip(new Tooltip("A real PTY: live prompt, arrow-key history, and interactive "
+                + "programs like vim, top and less. Click the terminal to type."));
+        shellConsoleRadio.setTooltip(new Tooltip("Type whole commands in the line below and press Enter. "
+                + "No TTY — interactive programs won't work, but it's the simplest way to run a quick "
+                + "command."));
+        HBox modeGroup = new HBox(6, shellTtyRadio, shellConsoleRadio);
+        modeGroup.setAlignment(Pos.CENTER_LEFT);
+        modeGroup.getStyleClass().add("shell-mode");
+        shellModeGroup.selectedToggleProperty().addListener((o, a, b) -> {
+            if (execSession != null) {
+                closeExec();
+            }
+        });
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
         HBox controls = new HBox(8,
-                new Label("Container:"), shellContainerBox, shellConnectBtn, shellScriptBtn, spacer, note);
+                new Label("Container:"), shellContainerBox, shellConnectBtn, shellScriptBtn,
+                modeGroup, spacer, note);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
@@ -2342,6 +2367,11 @@ public class MainView extends BorderPane {
         shellArea.setWrapText(false);
         shellArea.getStyleClass().addAll("yaml-area", "logs-area");
         VBox.setVgrow(shellArea, Priority.ALWAYS);
+        // In TTY mode the terminal itself is the keyboard: capture raw keystrokes and forward them.
+        shellArea.setOnKeyPressed(e -> { if (shellTtyMode()) { forwardTtyKey(e); } });
+        // Keep the PTY's viewport in sync with the on-screen terminal so top/vim/less redraw on resize.
+        shellArea.widthProperty().addListener((ChangeListener<Number>) (o, a, b) -> sendTtyResize());
+        shellArea.heightProperty().addListener((ChangeListener<Number>) (o, a, b) -> sendTtyResize());
 
         shellInput.setPromptText("Type a command and press Enter…");
         shellInput.getStyleClass().add("shell-input");
@@ -2350,6 +2380,113 @@ public class MainView extends BorderPane {
 
         VBox pane = new VBox(controls, shellArea, shellInput);
         return pane;
+    }
+
+    private boolean shellTtyMode() {
+        return execSession != null && execSession.isTty();
+    }
+
+    /**
+     * Map a JavaFX key event to the raw bytes a PTY expects and forward them. This is the heart of
+     * the "real terminal" experience: printable chars go straight through, Enter is CR (0x0d), and
+     * control keys are the classic Ctrl+letter codes.
+     */
+    private void forwardTtyKey(javafx.scene.input.KeyEvent e) {
+        ExecSession s = execSession;
+        if (s == null || !s.isTty()) {
+            return;
+        }
+        KeyCode code = e.getCode();
+        if (code == null) {
+            return;
+        }
+        boolean ctrl = e.isControlDown();
+        boolean shift = e.isShiftDown();
+
+        switch (code) {
+            case ENTER:
+            case NUMPAD0: // numpad Enter
+                s.sendRaw(new byte[]{0x0d}); // CR
+                e.consume();
+                return;
+            case BACK_SPACE:
+                s.sendRaw(new byte[]{0x7f}); // DEL
+                e.consume();
+                return;
+            case TAB:
+                s.sendRaw(new byte[]{0x09});
+                e.consume();
+                return;
+            case ESCAPE:
+                s.sendRaw(new byte[]{0x1b});
+                e.consume();
+                return;
+            case UP:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x41}); e.consume(); return;
+            case DOWN:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x42}); e.consume(); return;
+            case RIGHT:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x43}); e.consume(); return;
+            case LEFT:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x44}); e.consume(); return;
+            case HOME:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x48}); e.consume(); return;
+            case END:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x46}); e.consume(); return;
+            case PAGE_UP:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x35, 0x3b, 0x32}); e.consume(); return;
+            case PAGE_DOWN:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x36, 0x3b, 0x32}); e.consume(); return;
+            case INSERT:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x32}); e.consume(); return;
+            case DELETE:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x33}); e.consume(); return;
+            case F1:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x31}); e.consume(); return;
+            case F2:
+                s.sendRaw(new byte[]{0x1b, 0x5b, 0x32}); e.consume(); return;
+            default:
+                break;
+        }
+
+        if (ctrl) {
+            // Ctrl+letter -> control code (a=0x01 … z=0x1a). Ctrl+@ is NUL.
+            if (code.isLetterKey()) {
+                int c = Character.toLowerCase(code.getName().charAt(code.getName().length() - 1));
+                int b = (c - 'a') + 1;
+                s.sendRaw(new byte[]{(byte) b});
+                e.consume();
+                return;
+            }
+        }
+
+        // Printable character? Send it. In TTY mode we are the keyboard, so the TextArea is not
+        // editable and these events would otherwise be swallowed.
+        String ch = e.getCharacter();
+        if (ch != null && !ch.isEmpty()) {
+            boolean printable = ch.chars().allMatch(c -> (c >= 0x20 && c != 0x7f) || c == '\t');
+            if (printable) {
+                s.sendRaw(ch.getBytes(StandardCharsets.UTF_8));
+                e.consume();
+            }
+        }
+    }
+
+    /** Push the terminal's current size to the PTY so interactive apps lay out correctly. */
+    private void sendTtyResize() {
+        ExecSession s = execSession;
+        if (s == null || !s.isTty()) {
+            return;
+        }
+        double w = shellArea.getWidth();
+        double h = shellArea.getHeight();
+        if (w < 20 || h < 20) {
+            return;
+        }
+        // Rough char metrics for the monospace font the area uses (~8.4px wide, ~16px tall).
+        int cols = Math.max(2, (int) (w / 8.4));
+        int rows = Math.max(1, (int) (h / 16.0));
+        s.resize(cols, rows);
     }
 
     private void toggleShell() {
@@ -2368,14 +2505,20 @@ public class MainView extends BorderPane {
         String container = shellContainerBox.getValue();
         String pod = shellPod;
         String ns = namespaceBox.getValue();
+        boolean tty = shellTtyRadio.isSelected();
         shellArea.appendText("Connecting to " + pod
-                + (container != null ? " [" + container + "]" : "") + " …\n");
+                + (container != null ? " [" + container + "]" : "")
+                + (tty ? " (TTY)" : " (console)") + " …\n");
         shellConnectBtn.setDisable(true);
 
+        final boolean wantTty = tty;
         Task<ExecSession> task = new Task<>() {
             @Override protected ExecSession call() {
-                return service.exec(ctx.name(), ns, pod, container,
-                        MainView.this::appendShellOutput, MainView.this::onExecClosed);
+                return wantTty
+                        ? service.execTty(ctx.name(), ns, pod, container,
+                                MainView.this::appendShellOutput, MainView.this::onExecClosed)
+                        : service.exec(ctx.name(), ns, pod, container,
+                                MainView.this::appendShellOutput, MainView.this::onExecClosed);
             }
         };
         task.setOnSucceeded(e -> {
@@ -2386,12 +2529,22 @@ public class MainView extends BorderPane {
                 return;
             }
             execSession = session;
-            shellArea.appendText("✓ Connected (" + session.shell() + "). There's no prompt in this console: "
-                    + "type a command below (e.g. ls, env, cat /etc/os-release) and press Enter.\n");
+            if (session.isTty()) {
+                shellArea.appendText("✓ Connected (" + session.shell() + "), real terminal. "
+                        + "Click the terminal and type — arrows, Ctrl+C, Ctrl+L, and interactive "
+                        + "programs (vim, top, less) all work.\n");
+                shellInput.setDisable(true);
+                shellScriptBtn.setDisable(true);
+                shellArea.requestFocus();
+                sendTtyResize();
+            } else {
+                shellArea.appendText("✓ Connected (" + session.shell() + "). There's no prompt in this console: "
+                        + "type a command below (e.g. ls, env, cat /etc/os-release) and press Enter.\n");
+                shellInput.setDisable(false);
+                shellScriptBtn.setDisable(false);
+                shellInput.requestFocus();
+            }
             shellConnectBtn.setText("Disconnect");
-            shellInput.setDisable(false);
-            shellScriptBtn.setDisable(false);
-            shellInput.requestFocus();
         });
         task.setOnFailed(e -> {
             shellConnectBtn.setDisable(false);
@@ -2524,6 +2677,7 @@ public class MainView extends BorderPane {
             shellScriptBtn.setDisable(true);
         });
     }
+
 
     /** Close any active shell session (on pod change, panel close, or app shutdown). */
     private void closeExec() {
