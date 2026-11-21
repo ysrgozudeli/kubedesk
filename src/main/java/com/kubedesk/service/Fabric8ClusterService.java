@@ -941,6 +941,12 @@ public class Fabric8ClusterService implements ClusterService {
             String log = withPrev.tailingLines(tailLines).getLog();
             return (log == null || log.isEmpty()) ? "(no log output)" : log;
         } catch (Exception e) {
+            // A container that never restarted has no previous instance: the API answers 400
+            // "previous terminated container ... not found". That's an expected state, not an error;
+            // return empty so the UI shows its friendly "has not restarted yet" message.
+            if (previous && rootMessage(e).toLowerCase().contains("previous terminated container")) {
+                return "";
+            }
             throw new ClusterException("Could not load logs for " + pod + ": " + rootMessage(e), e);
         }
     }

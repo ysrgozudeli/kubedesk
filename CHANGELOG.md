@@ -3,6 +3,11 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.23.2] - 2026-11-21
+
+### Fixed
+- **Logs → Previous** on a container that has never restarted showed a raw `400 previous terminated container ... not found` error. It now shows the friendly "has not restarted yet" message (Logs tab and detached log window).
+
 ## [1.23.1] - 2026-11-21
 
 ### Changed

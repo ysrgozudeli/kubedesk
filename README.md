@@ -323,7 +323,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.23.1**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
+Shipped through **v1.23.2**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a **Helm releases** view with a
@@ -339,6 +339,8 @@ Candidate next:
 - **Multi-pod log tailing** (stern-style — one merged stream across a Deployment's pods; single-pod
   follow + detachable windows already shipped) and optional Loki/cloud-logging integration.
 - **Headless health CLI** for CI/CD gates (reuses `ClusterService.healthCheck`).
+- **Open-windows bar.** Show every detached shell and log window in a strip inside the main window
+  (Headlamp-style): click to focus it, close it, or bring it back into the main area.
 - **Shell, next steps.** Make **Detach** a true move (hand the live session and screen to the window and back
   on close, instead of opening a separate session); answer terminal queries (cursor-position / device
   attributes) and bracketed paste; double-width (CJK/emoji) characters; mouse reporting for `vim`/`htop`;
