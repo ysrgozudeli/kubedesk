@@ -2875,31 +2875,155 @@ public class MainView extends BorderPane {
         Label count = new Label();
         count.getStyleClass().add("log-filter-count");
         // Update the count whenever the query changes; the buffer re-renders as a side effect.
-        filterField.textProperty().addListener((o, a, b) -> {
-            buffer.setFilter(b);
-            updateFilterCount(count, buffer);
-        });
+        filterField.textProperty().addListener((o, a, b) -> buffer.setFilter(b));
+        // The buffer tells us whenever the view changes (text filter, level choice, grouping, new lines).
+        buffer.addChangeListener(() -> updateFilterCount(count, buffer));
 
         HBox group = new HBox(4, filterField, clearFilter, count);
         group.setAlignment(Pos.CENTER_LEFT);
         return group;
     }
 
-    /** "showing X of Y lines" for an active filter; hidden (and the "✕" cleared) when there's none. */
+    /** "showing X of Y lines" while any view option narrows the log; hidden when everything is shown. */
     private static void updateFilterCount(Label count, LogBuffer buffer) {
-        String f = buffer.filter();
-        if (f == null || f.isEmpty()) {
+        if (!buffer.isNarrowed()) {
             count.setText("");
             count.setVisible(false);
             count.setManaged(false);
             return;
         }
-        long shown = buffer.raw().isEmpty() ? 0
-                : buffer.raw().lines().filter(l -> l.toLowerCase().contains(f)).count();
-        long total = buffer.raw().lines().count();
-        count.setText("showing " + shown + " of " + total);
+        count.setText("showing " + buffer.shownLineCount() + " of " + buffer.totalLineCount());
         count.setVisible(true);
         count.setManaged(true);
+    }
+
+    /**
+     * A "Level" menu for the log toolbar: tick which severities to show (with live counts) or use a quick
+     * pick ("Errors only", "Warnings and above"). Lines without a level of their own (stack traces) follow the
+     * line above them. Disabled until a recognisable severity shows up in the logs. Shared by the inline Logs tab
+     * and the detached {@link LogWindow}.
+     */
+    public static javafx.scene.control.MenuButton buildLevelControl(LogBuffer buffer) {
+        javafx.scene.control.MenuButton btn = new javafx.scene.control.MenuButton("Level");
+        btn.getStyleClass().add("icon-button");
+
+        java.util.Map<LogLevel, javafx.scene.control.CheckMenuItem> items = new java.util.EnumMap<>(LogLevel.class);
+        for (LogLevel l : LogLevel.values()) {
+            javafx.scene.control.CheckMenuItem it = new javafx.scene.control.CheckMenuItem(l.label());
+            it.setSelected(true);
+            it.setOnAction(e -> {
+                java.util.Set<LogLevel> sel = java.util.EnumSet.noneOf(LogLevel.class);
+                items.forEach((lv, mi) -> {
+                    if (mi.isSelected()) {
+                        sel.add(lv);
+                    }
+                });
+                buffer.setVisibleLevels(sel);
+            });
+            items.put(l, it);
+        }
+
+        javafx.scene.control.MenuItem errorsOnly = new javafx.scene.control.MenuItem("Errors only");
+        errorsOnly.setOnAction(e -> applyLevels(buffer, items, java.util.EnumSet.of(LogLevel.ERROR)));
+        javafx.scene.control.MenuItem warnUp = new javafx.scene.control.MenuItem("Warnings and above");
+        warnUp.setOnAction(e -> applyLevels(buffer, items, java.util.EnumSet.of(LogLevel.ERROR, LogLevel.WARN)));
+        javafx.scene.control.MenuItem all = new javafx.scene.control.MenuItem("Show all");
+        all.setOnAction(e -> applyLevels(buffer, items, java.util.EnumSet.allOf(LogLevel.class)));
+
+        btn.getItems().addAll(errorsOnly, warnUp, all, new SeparatorMenuItem());
+        btn.getItems().addAll(items.values());
+
+        Runnable refresh = () -> {
+            for (LogLevel l : LogLevel.values()) {
+                items.get(l).setText(l.label() + "  (" + buffer.countOf(l) + ")");
+            }
+            boolean any = buffer.hasLevels();
+            btn.setDisable(!any);
+            btn.setTooltip(new Tooltip(any
+                    ? "Show only some severities (ERROR / WARN / …)"
+                    : "No severity levels (ERROR / WARN / INFO …) detected in these logs yet"));
+            java.util.Set<LogLevel> vis = buffer.visibleLevels();
+            for (LogLevel l : LogLevel.values()) {
+                items.get(l).setSelected(vis.contains(l)); // keep in step when the banner changes levels
+            }
+            String label = "Level";
+            if (vis.size() != LogLevel.values().length) {
+                label += ": " + (vis.size() <= 2
+                        ? vis.stream().map(LogLevel::label).collect(java.util.stream.Collectors.joining(" · "))
+                        : vis.size() + " of " + LogLevel.values().length);
+            }
+            btn.setText(label);
+        };
+        buffer.addChangeListener(refresh);
+        refresh.run();
+        return btn;
+    }
+
+    /**
+     * A warning strip for heavy log streams, hidden otherwise. It explains that older lines are being
+     * dropped to keep the app responsive and offers the three sensible responses: narrow to errors,
+     * pause the view, or switch to a raw view with all processing off. Shared by the inline Logs tab and
+     * the detached {@link LogWindow}.
+     */
+    public static HBox buildLogHealthBanner(LogBuffer buffer) {
+        Label text = new Label();
+        text.setWrapText(true);
+        text.setMinWidth(0);
+        HBox.setHgrow(text, Priority.ALWAYS);
+
+        Button errorsOnly = new Button("Errors only");
+        errorsOnly.getStyleClass().add("icon-button");
+        errorsOnly.setTooltip(new Tooltip("Keep only ERROR lines (filtered as they arrive, so it reaches further back)"));
+        errorsOnly.setOnAction(e -> buffer.setVisibleLevels(java.util.EnumSet.of(LogLevel.ERROR)));
+
+        Button pause = new Button("Pause");
+        pause.getStyleClass().add("icon-button");
+        pause.setOnAction(e -> buffer.setPaused(!buffer.isPaused()));
+
+        Button rawBtn = new Button("Raw view");
+        rawBtn.getStyleClass().add("icon-button");
+        rawBtn.setOnAction(e -> buffer.setRawMode(!buffer.isRawMode()));
+
+        HBox banner = new HBox(10, text, errorsOnly, pause, rawBtn);
+        banner.getStyleClass().add("log-warning");
+        banner.setAlignment(Pos.CENTER_LEFT);
+        banner.setPadding(new Insets(6, 12, 6, 12));
+
+        Runnable refresh = () -> {
+            boolean show = buffer.isHeavy();
+            banner.setVisible(show);
+            banner.setManaged(show);
+            if (!show) {
+                return;
+            }
+            StringBuilder sb = new StringBuilder("⚠ High-volume logs");
+            if (buffer.lastRate() > 0) {
+                sb.append(" (~").append(Math.round(buffer.lastRate())).append(" lines/s)");
+            }
+            sb.append(" — showing the latest ").append(LogBuffer.RETAIN_LINES)
+                    .append(" lines; ").append(buffer.droppedLines()).append(" older dropped to keep the app responsive.");
+            if (buffer.isRawMode()) {
+                sb.append(" Raw view: filters off.");
+            } else if (buffer.isNarrowed()) {
+                sb.append(" Filtering as lines arrive; filtered-out lines are not kept.");
+            }
+            if (buffer.isPaused()) {
+                sb.append(" Paused — ").append(buffer.linesWhilePaused()).append(" new lines.");
+            }
+            text.setText(sb.toString());
+            pause.setText(buffer.isPaused() ? "Resume" : "Pause");
+            rawBtn.setText(buffer.isRawMode() ? "Use filters" : "Raw view");
+        };
+        buffer.addChangeListener(refresh);
+        refresh.run();
+        return banner;
+    }
+
+    private static void applyLevels(LogBuffer buffer,
+                                    java.util.Map<LogLevel, javafx.scene.control.CheckMenuItem> items,
+                                    java.util.Set<LogLevel> levels) {
+        items.forEach((lv, mi) -> mi.setSelected(levels.contains(lv)));
+        buffer.setVisibleLevels(levels);
     }
 
     /** A thin vertical rule that visually groups the log toolbar (what / how / actions). */
@@ -3019,7 +3143,7 @@ public class MainView extends BorderPane {
         FlowPane controls = new FlowPane(8, 8,
                 logStatusDot, containerGroup, tailGroup, refresh,
                 toolbarSep(), howGroup,
-                toolbarSep(), filterGroup, wrap, clear, copy, save,
+                toolbarSep(), filterGroup, buildLevelControl(logBuffer), wrap, clear, copy, save,
                 toolbarSep(), detach);
         controls.getStyleClass().add("log-toolbar");
         controls.setAlignment(Pos.CENTER_LEFT);
@@ -3041,7 +3165,7 @@ public class MainView extends BorderPane {
         StackPane logStack = new StackPane(logsArea, jump);
         VBox.setVgrow(logStack, Priority.ALWAYS);
 
-        VBox pane = new VBox(controls, logStack);
+        VBox pane = new VBox(controls, buildLogHealthBanner(logBuffer), logStack);
         return pane;
     }
 

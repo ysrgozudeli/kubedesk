@@ -830,3 +830,13 @@
     -fx-border-width: 0;
     -fx-highlight-fill: #cfe0ff;
 }
+
+/* Heavy-log warning strip (above the log view). */
+.log-warning {
+    -fx-background-color: #fff4e0;
+    -fx-border-color: #f0c36d;
+    -fx-border-width: 1 0 1 0;
+}
+.log-warning .label {
+    -fx-text-fill: #7a4b00;
+}

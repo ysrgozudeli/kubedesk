@@ -3,6 +3,24 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.25.0] - 2026-11-21
+
+### Added
+- **Log severity filter.** A **Level** menu in the Logs toolbar (and the detached log window) detects each
+  line's severity (ERROR / WARN / INFO / DEBUG / TRACE) from common formats: Spring/logback, JSON
+  (`level` / `severity`), logfmt, nginx `[error]`, glog, uvicorn. Tick levels to show, or use the quick picks
+  **Errors only** and **Warnings and above**. Each level shows a live count. Stack-trace lines stay attached
+  to the error above them. The "showing X of Y" counter reflects the level choice too.
+- **Heavy-log protection.** When a followed log floods (about 500+ lines/s, or 20,000+ lines held), KubeDesk
+  keeps only the latest 5,000 lines, drops the oldest, and updates the screen a few times a second so the
+  app stays responsive. An amber banner explains this and offers **Errors only**, **Pause / Resume** and
+  **Raw view** (all filtering off). While heavy, a level or text filter is applied as lines arrive, so an
+  errors-only view reaches much further back than the last few seconds of the flood.
+
+### Fixed
+- Following with a filter on no longer yanks you back to the bottom or drops your text selection on every new
+  chunk: the view only redraws when something visible changed, and keeps your scroll position when you've
+  scrolled up.
 ## [1.24.0] - 2026-11-21
 
 ### Added

@@ -92,6 +92,11 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   Deployments.
 - **Pod failure diagnostics** — container state, exit codes, and eviction reasons (surfaces *why* a
   pod is failing even after its events have expired).
+- **Log severity filter** — a **Level** menu on the Logs tab (and detached log windows) detects ERROR / WARN /
+  INFO / DEBUG / TRACE from common formats (Spring, JSON, logfmt, nginx, glog), with live counts and quick
+  picks (*Errors only*, *Warnings and above*); stack traces stay with their error. On a flooding stream
+  KubeDesk keeps the latest 5,000 lines, drops the oldest, and shows a banner with *Errors only* / *Pause* /
+  *Raw view* so the app stays responsive.
 - **Live pod metrics** (pod → **Metrics** tab): live CPU/Memory line charts polled from the Metrics
   API — a quick read on whether a pod is climbing toward its limits.
 - **Live log follow** (`kubectl logs -f`) — a **▶ / ⏸** button on the Logs tab streams new lines as
@@ -327,7 +332,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.24.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
+Shipped through **v1.25.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a **Helm releases** view with a

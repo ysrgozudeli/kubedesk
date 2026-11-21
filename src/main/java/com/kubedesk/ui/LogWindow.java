@@ -165,7 +165,7 @@ public final class LogWindow {
         FlowPane controls = new FlowPane(8, 8,
                 statusDot, containerGroup, tailGroup, refresh,
                 MainView.toolbarSep(), howGroup,
-                MainView.toolbarSep(), filterGroup, wrap, clear, copy, save);
+                MainView.toolbarSep(), filterGroup, MainView.buildLevelControl(logBuffer), wrap, clear, copy, save);
         controls.getStyleClass().add("log-toolbar");
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
@@ -184,7 +184,7 @@ public final class LogWindow {
         StackPane logStack = new StackPane(logsArea, jump);
         VBox.setVgrow(logStack, Priority.ALWAYS);
 
-        VBox root = new VBox(controls, logStack);
+        VBox root = new VBox(controls, MainView.buildLogHealthBanner(logBuffer), logStack);
         root.getStyleClass().add("root-pane");
 
         Scene scene = new Scene(root, 860, 540);
