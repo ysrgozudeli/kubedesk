@@ -2348,6 +2348,7 @@ public class MainView extends BorderPane {
         HBox modeGroup = new HBox(6, shellTtyRadio, shellConsoleRadio);
         modeGroup.setAlignment(Pos.CENTER_LEFT);
         modeGroup.getStyleClass().add("shell-mode");
+        modeGroup.setPadding(new Insets(2, 6, 2, 8));
         shellModeGroup.selectedToggleProperty().addListener((o, a, b) -> {
             if (execSession != null) {
                 closeExec();
@@ -2368,7 +2369,9 @@ public class MainView extends BorderPane {
         shellArea.getStyleClass().addAll("yaml-area", "logs-area");
         VBox.setVgrow(shellArea, Priority.ALWAYS);
         // In TTY mode the terminal itself is the keyboard: capture raw keystrokes and forward them.
-        shellArea.setOnKeyPressed(e -> { if (shellTtyMode()) { forwardTtyKey(e); } });
+        // In TTY mode the terminal is the keyboard. A focused non-editable TextArea swallows
+        // KeyEvent without delivering setOnKeyPressed reliably, so we capture at the scene level
+        // (bubbling phase) and forward when the terminal has focus. Installed/removed on connect/close.
         // Keep the PTY's viewport in sync with the on-screen terminal so top/vim/less redraw on resize.
         shellArea.widthProperty().addListener((ChangeListener<Number>) (o, a, b) -> sendTtyResize());
         shellArea.heightProperty().addListener((ChangeListener<Number>) (o, a, b) -> sendTtyResize());
@@ -2537,6 +2540,7 @@ public class MainView extends BorderPane {
                 shellScriptBtn.setDisable(true);
                 shellArea.requestFocus();
                 sendTtyResize();
+                installTtyKeyCapture();
             } else {
                 shellArea.appendText("✓ Connected (" + session.shell() + "). There's no prompt in this console: "
                         + "type a command below (e.g. ls, env, cat /etc/os-release) and press Enter.\n");
@@ -2675,6 +2679,7 @@ public class MainView extends BorderPane {
             shellConnectBtn.setText("Connect");
             shellInput.setDisable(true);
             shellScriptBtn.setDisable(true);
+            removeTtyKeyCapture();
         });
     }
 
@@ -2692,6 +2697,39 @@ public class MainView extends BorderPane {
         shellConnectBtn.setText("Connect");
         shellInput.setDisable(true);
         shellScriptBtn.setDisable(true);
+        removeTtyKeyCapture();
+    }
+
+    /**
+     * Install a scene-level key handler that forwards keystrokes to the PTY while the terminal
+     * has focus. A focused non-editable {@link TextArea} swallows KeyEvent without reliably
+     * delivering {@code setOnKeyPressed}, so we capture at the scene level (bubbling phase).
+     */
+    private void installTtyKeyCapture() {
+        javafx.scene.Scene scene = shellArea.getScene();
+        if (scene == null) {
+            return;
+        }
+        // Chain onto any existing handler so we don't clobber it.
+        @SuppressWarnings("unchecked")
+        javafx.event.EventHandler<javafx.scene.input.KeyEvent> prev =
+                (javafx.event.EventHandler<javafx.scene.input.KeyEvent>) (javafx.event.EventHandler<? super javafx.scene.input.KeyEvent>) scene.getOnKeyPressed();
+        scene.setOnKeyPressed(e -> {
+            if (prev != null) {
+                prev.handle(e);
+            }
+            if (shellTtyMode() && shellArea.isFocused()) {
+                forwardTtyKey(e);
+            }
+        });
+    }
+
+    /** Remove the TTY key-capture handler installed by {@link #installTtyKeyCapture()}. */
+    private void removeTtyKeyCapture() {
+        javafx.scene.Scene scene = shellArea.getScene();
+        if (scene != null) {
+            scene.setOnKeyPressed(null);
+        }
     }
 
     private void reloadYaml() {
