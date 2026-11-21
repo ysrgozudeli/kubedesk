@@ -24,6 +24,8 @@ public enum ResourceKind {
     GRPCROUTES("Network", "GRPCRoutes", true, "gateway.networking.k8s.io", "grpcroutes", true),
     CONFIGMAPS("Config", "ConfigMaps", true, "", "configmaps"),
     SECRETS("Config", "Secrets", true, "", "secrets"),
+    // Sealed Secrets (read-only, CRD-backed — shown only when the controller's CRD exists; see service.crd.SealedSecretsApi)
+    SEALEDSECRETS("Config", "SealedSecrets", true, "bitnami.com", "sealedsecrets", true),
     PVCS("Storage", "PVCs", true, "", "persistentvolumeclaims"),
     NODES("Cluster", "Nodes", false, "", "nodes");
 

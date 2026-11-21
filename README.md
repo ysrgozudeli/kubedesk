@@ -142,7 +142,10 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   → *Seal as SealedSecret…*): paste a `Secret` manifest (kubeseal-style) or fill a form, and copy / save /
   apply the result. Values are encrypted **locally** against the controller's public cert (auto-discovered,
   with a paste-PEM fallback) — the plaintext never leaves your machine. Strict / namespace-wide / cluster-wide
-  scopes supported; binary values and re-sealing an existing Secret both work.
+  scopes supported; binary values and re-sealing an existing Secret both work. Once the controller is
+  installed, **Config → SealedSecrets** lists the SealedSecret objects (read-only), and their **Status** tab
+  shows whether each one is *Synced* (with the controller's reason when it isn't, e.g. "Secret already
+  exists and is not managed by SealedSecret"), which Secret it creates, and its encrypted key names.
 - **Base64 encode / decode** — a `⇄ Base64…` button on the **Config → Secrets** toolbar (and the command
   palette) opens a local converter: encode text to Base64, or decode a Secret's Base64 value back to
   plaintext. It all runs on your machine — the safe place to read a secret instead of an online decoder.
@@ -332,7 +335,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.25.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
+Shipped through **v1.26.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a **Helm releases** view with a

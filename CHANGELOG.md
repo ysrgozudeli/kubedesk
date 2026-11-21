@@ -3,6 +3,16 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.26.0] - 2026-11-22
+
+### Added
+- **SealedSecrets view (read-only).** Under **Config**, next to Secrets, whenever the Bitnami Sealed Secrets
+  controller is installed in the cluster. The list shows name, type, number of keys, scope (strict /
+  namespace-wide / cluster-wide), **Synced** and age. The **Status** tab shows the controller's conditions with
+  their reason and message (so you can see *why* a SealedSecret didn't decrypt, for example "Resource already
+  exists and is not managed by SealedSecret"), the Secret it creates (and whether it exists yet), and the
+  names of the encrypted keys. Encrypted values are never displayed. Built on the same CRD layer as the
+  Gateway API kinds, so the entry only appears on clusters that have the CRD.
 ## [1.25.0] - 2026-11-21
 
 ### Added
