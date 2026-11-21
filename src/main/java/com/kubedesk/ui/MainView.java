@@ -338,6 +338,7 @@ public class MainView extends BorderPane {
     private final RadioButton shellTtyRadio = new RadioButton("TTY");
     private final RadioButton shellConsoleRadio = new RadioButton("Console");
     private TerminalGrid shellTerminal; // lazily created on first TTY connect
+    private boolean ttyConnecting;      // route early PTY output (the first prompt) to the terminal
     private Button shellCopyBtn;
     private ExecSession execSession;
     private String shellPod;
@@ -2334,19 +2335,17 @@ public class MainView extends BorderPane {
                 + "quotes survive intact — unlike typing it line by line."));
         shellScriptBtn.setOnAction(e -> openRunScriptDialog());
 
-        Label note = new Label("Console = whole lines, no TTY. TTY = a real terminal (vim/top/less).");
-        note.getStyleClass().add("muted");
-
-        // Mode toggle: Console (safer default) vs TTY (interactive). Switching while connected
+        // Mode toggle: TTY (interactive, default) vs Console. Switching while connected
         // closes the live session first.
         shellTtyRadio.setToggleGroup(shellModeGroup);
         shellConsoleRadio.setToggleGroup(shellModeGroup);
-        shellConsoleRadio.setSelected(true);
+        shellTtyRadio.setSelected(true);
         shellTtyRadio.setTooltip(new Tooltip("A real PTY: live prompt, arrow-key history, and interactive "
                 + "programs like vim, top and less. Click the terminal to type."));
         shellConsoleRadio.setTooltip(new Tooltip("Type whole commands in the line below and press Enter. "
                 + "No TTY — interactive programs won't work, but it's the simplest way to run a quick "
                 + "command."));
+        // TTY is the default; the radio order matches.
         HBox modeGroup = new HBox(6, shellTtyRadio, shellConsoleRadio);
         modeGroup.setAlignment(Pos.CENTER_LEFT);
         modeGroup.getStyleClass().add("shell-mode");
@@ -2380,26 +2379,22 @@ public class MainView extends BorderPane {
         shellDetachBtn.setTooltip(new Tooltip("Open the shell in a separate window (keeps the session alive)"));
         shellDetachBtn.setOnAction(e -> detachShell());
 
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
-
-        HBox controls = new HBox(8,
-                new Label("Container:"), shellContainerBox, shellConnectBtn, shellScriptBtn,
-                modeGroup, shellCopyBtn, shellDetachBtn, spacer, note);
+        // A FlowPane wraps onto a second row on narrow windows instead of clipping/distorting.
+        // The mode explanation lives in the radio tooltips rather than a long inline note.
+        HBox containerGroup = new HBox(6, new Label("Container:"), shellContainerBox);
+        containerGroup.setAlignment(Pos.CENTER_LEFT);
+        FlowPane controls = new FlowPane(8, 6,
+                containerGroup, modeGroup, shellConnectBtn, shellScriptBtn, shellCopyBtn, shellDetachBtn);
         controls.setAlignment(Pos.CENTER_LEFT);
+        controls.setRowValignment(javafx.geometry.VPos.CENTER);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
         shellArea.setEditable(false);
         shellArea.setWrapText(false);
         shellArea.getStyleClass().addAll("yaml-area", "logs-area");
         VBox.setVgrow(shellArea, Priority.ALWAYS);
-        // In TTY mode the terminal itself is the keyboard: capture raw keystrokes and forward them.
-        // A focused non-editable TextArea (or Canvas) swallows KeyEvent without reliably delivering
-        // setOnKeyPressed, so we capture at the scene level (capturing-phase filters) and forward
-        // when the terminal has focus. Installed/removed on connect/close.
-        // Keep the PTY's viewport in sync with the on-screen terminal so top/vim/less redraw on resize.
-        shellArea.widthProperty().addListener((ChangeListener<Number>) (o, a, b) -> sendTtyResize());
-        shellArea.heightProperty().addListener((ChangeListener<Number>) (o, a, b) -> sendTtyResize());
+        // In TTY mode keystrokes are captured by scene-level filters (see installTtyKeyCapture) and the
+        // terminal grid reports its own size changes, which are forwarded to the PTY.
 
         shellInput.setPromptText("Type a command and press Enter…");
         shellInput.getStyleClass().add("shell-input");
@@ -2421,26 +2416,27 @@ public class MainView extends BorderPane {
     private void showTerminal(boolean show) {
         if (show) {
             if (shellTerminal == null) {
-                // Use a sensible default; the resize listener will correct it once laid out.
-                int cols = 100;
-                int rows = 30;
-                double w = shellArea.getWidth();
-                double h = shellArea.getHeight();
-                if (w > 100) cols = Math.max(40, (int) (w / TerminalGrid.CELL_W));
-                if (h > 100) rows = Math.max(12, (int) (h / TerminalGrid.CELL_H));
-                shellTerminal = new TerminalGrid(cols, rows);
+                // The grid sizes itself to the space it is given and reports every change.
+                shellTerminal = new TerminalGrid();
                 shellTerminal.setFocusTraversable(true);
+                shellTerminal.setOnGridResize((c, r) -> {
+                    ExecSession es = execSession;
+                    if (es != null && es.isTty()) {
+                        es.resize(c, r);
+                    }
+                });
+                shellTerminal.setOnPaste(txt -> {
+                    ExecSession es = execSession;
+                    if (es != null && es.isTty()) {
+                        es.sendRaw(txt.getBytes(StandardCharsets.UTF_8));
+                    }
+                });
                 // Insert the terminal at the same position as shellArea in the parent VBox.
                 javafx.scene.layout.VBox parent = (javafx.scene.layout.VBox) shellArea.getParent();
                 int idx = parent.getChildren().indexOf(shellArea);
                 parent.getChildren().add(idx, shellTerminal);
                 // Resize the terminal to fill the area (same growth policy).
                 VBox.setVgrow(shellTerminal, Priority.ALWAYS);
-                // Keep the PTY in sync with the terminal's viewport.
-                shellTerminal.widthProperty().addListener((ChangeListener<Number>) (o, a, b) -> sendTtyResize());
-                shellTerminal.heightProperty().addListener((ChangeListener<Number>) (o, a, b) -> sendTtyResize());
-                // Clicking the terminal focuses it (needed for key capture).
-                shellTerminal.setOnMouseClicked(e -> shellTerminal.requestFocus());
             }
             shellArea.setVisible(false);
             shellArea.setManaged(false);
@@ -2456,94 +2452,19 @@ public class MainView extends BorderPane {
         }
     }
 
-    /**
-     * Map a JavaFX key event to the raw bytes a PTY expects and forward them. This is the heart of
-     * the "real terminal" experience: printable chars go straight through, Enter is CR (0x0d), and
-     * control keys are the classic Ctrl+letter codes.
-     */
+    /** Forward a key press (special keys, Ctrl combos, copy/paste) from the terminal to the PTY. */
     private void forwardTtyKey(javafx.scene.input.KeyEvent e) {
         ExecSession s = execSession;
-        if (s == null || !s.isTty()) {
-            return;
+        if (s != null && s.isTty() && shellTerminal != null) {
+            shellTerminal.handleKeyPressed(e, s::sendRaw);
         }
-        KeyCode code = e.getCode();
-        if (code == null) {
-            return;
-        }
-        boolean ctrl = e.isControlDown();
-        boolean shift = e.isShiftDown();
-
-        switch (code) {
-            case ENTER:
-                s.sendRaw(new byte[]{0x0d}); // CR
-                e.consume();
-                return;
-            case BACK_SPACE:
-                s.sendRaw(new byte[]{0x7f}); // DEL
-                e.consume();
-                return;
-            case TAB:
-                s.sendRaw(new byte[]{0x09});
-                e.consume();
-                return;
-            case ESCAPE:
-                s.sendRaw(new byte[]{0x1b});
-                e.consume();
-                return;
-            case UP:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x41}); e.consume(); return;
-            case DOWN:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x42}); e.consume(); return;
-            case RIGHT:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x43}); e.consume(); return;
-            case LEFT:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x44}); e.consume(); return;
-            case HOME:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x48}); e.consume(); return;
-            case END:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x46}); e.consume(); return;
-            case PAGE_UP:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x35, 0x3b, 0x32}); e.consume(); return;
-            case PAGE_DOWN:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x36, 0x3b, 0x32}); e.consume(); return;
-            case INSERT:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x32}); e.consume(); return;
-            case DELETE:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x33}); e.consume(); return;
-            case F1:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x31}); e.consume(); return;
-            case F2:
-                s.sendRaw(new byte[]{0x1b, 0x5b, 0x32}); e.consume(); return;
-            default:
-                break;
-        }
-
-        if (ctrl) {
-            // Ctrl+letter -> control code (a=0x01 … z=0x1a). Ctrl+@ is NUL.
-            if (code.isLetterKey()) {
-                int c = Character.toLowerCase(code.getName().charAt(code.getName().length() - 1));
-                int b = (c - 'a') + 1;
-                s.sendRaw(new byte[]{(byte) b});
-                e.consume();
-                return;
-            }
-        }
-
-        // Printable characters are NOT sent here: KEY_PRESSED carries no character (getCharacter() is
-        // CHAR_UNDEFINED). They arrive via KEY_TYPED -> forwardTtyTyped().
     }
 
     /** Forward printable characters (letters, digits, symbols, IME text) from KEY_TYPED events. */
     private void forwardTtyTyped(javafx.scene.input.KeyEvent e) {
         ExecSession s = execSession;
-        if (s == null || !s.isTty() || e.isControlDown() || e.isMetaDown()) {
-            return;
-        }
-        String ch = e.getCharacter();
-        if (ch != null && !ch.isEmpty()
-                && ch.chars().allMatch(c -> c >= 0x20 && c != 0x7f)) {
-            s.sendRaw(ch.getBytes(StandardCharsets.UTF_8));
-            e.consume();
+        if (s != null && s.isTty() && shellTerminal != null) {
+            shellTerminal.handleKeyTyped(e, s::sendRaw);
         }
     }
 
@@ -2553,21 +2474,10 @@ public class MainView extends BorderPane {
         if (s == null || !s.isTty()) {
             return;
         }
-        double w, h;
         if (shellTerminal != null && shellTerminal.isVisible()) {
-            w = shellTerminal.getWidth();
-            h = shellTerminal.getHeight();
-        } else {
-            w = shellArea.getWidth();
-            h = shellArea.getHeight();
+            // The grid owns its own size; the PTY must match it exactly.
+            s.resize(shellTerminal.getCols(), shellTerminal.getRows());
         }
-        if (w < 20 || h < 20) {
-            return;
-        }
-        // Cell metrics match TerminalGrid's CELL_W / CELL_H.
-        int cols = Math.max(2, (int) (w / TerminalGrid.CELL_W));
-        int rows = Math.max(1, (int) (h / TerminalGrid.CELL_H));
-        s.resize(cols, rows);
     }
 
     private void toggleShell() {
@@ -2603,6 +2513,11 @@ public class MainView extends BorderPane {
         shellConnectBtn.setDisable(true);
 
         final boolean wantTty = tty;
+        ttyConnecting = wantTty;
+        if (wantTty) {
+            showTerminal(true); // so the shell's first prompt isn't lost while we finish connecting
+            shellTerminal.write("\u001bc\u001b[3J"); // fresh screen for the new session
+        }
         Task<ExecSession> task = new Task<>() {
             @Override protected ExecSession call() {
                 return wantTty
@@ -2614,6 +2529,7 @@ public class MainView extends BorderPane {
         };
         task.setOnSucceeded(e -> {
             shellConnectBtn.setDisable(false);
+            ttyConnecting = false;
             ExecSession session = task.getValue();
             if (!pod.equals(shellPod)) { // user moved to another pod while we were connecting
                 session.close();
@@ -2643,6 +2559,8 @@ public class MainView extends BorderPane {
         });
         task.setOnFailed(e -> {
             shellConnectBtn.setDisable(false);
+            ttyConnecting = false;
+            showTerminal(false);
             Throwable ex = task.getException();
             shellArea.appendText("✗ " + (ex != null ? ex.getMessage() : "Could not open a shell.") + "\n");
         });
@@ -2758,8 +2676,8 @@ public class MainView extends BorderPane {
 
     private void appendShellOutput(String text) {
         Platform.runLater(() -> {
-            if (shellTtyMode() && shellTerminal != null) {
-                shellTerminal.write(text.getBytes(StandardCharsets.UTF_8));
+            if ((shellTtyMode() || ttyConnecting) && shellTerminal != null) {
+                shellTerminal.write(text);
             } else {
                 shellArea.appendText(text);
                 shellArea.setScrollTop(Double.MAX_VALUE);
@@ -2771,10 +2689,12 @@ public class MainView extends BorderPane {
         Platform.runLater(() -> {
             boolean wasTty = shellTtyMode();
             execSession = null;
-            if (wasTty) {
-                showTerminal(false);
+            if (wasTty && shellTerminal != null) {
+                // Keep the final screen visible instead of swapping the view away.
+                shellTerminal.write("\r\n[session closed]\r\n");
+            } else {
+                shellArea.appendText("\n[session closed]\n");
             }
-            shellArea.appendText("\n[session closed]\n");
             shellConnectBtn.setText("Connect");
             shellInput.setDisable(true);
             shellScriptBtn.setDisable(true);

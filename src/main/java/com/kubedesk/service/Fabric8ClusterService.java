@@ -430,7 +430,8 @@ public class Fabric8ClusterService implements ClusterService {
                                Consumer<String> onOutput, Runnable onClosed) {
         KubernetesClient client = clientFor(context);
         try {
-            for (String shell : EXEC_SHELLS) {
+            // bash first: it has line editing and history (arrows, Ctrl+R); plain sh just echoes ^[[A.
+            for (String shell : TTY_SHELLS) {
                 ExecAttempt attempt = tryShellTty(client, namespace, pod, container, shell, onOutput, onClosed);
                 if (attempt.session() != null) {
                     return attempt.session();
@@ -440,7 +441,7 @@ public class Fabric8ClusterService implements ClusterService {
                 }
             }
             throw new ClusterException("This container has no shell (tried "
-                    + String.join(", ", EXEC_SHELLS) + "). It is probably a distroless or scratch "
+                    + String.join(", ", TTY_SHELLS) + "). It is probably a distroless or scratch "
                     + "image. Pick another container if the pod has one, or debug it from a terminal with: "
                     + "kubectl debug -it " + pod + " -n " + namespace + " --image=busybox"
                     + (container != null ? " --target=" + container : ""));
@@ -452,6 +453,9 @@ public class Fabric8ClusterService implements ClusterService {
             throw new ClusterException(explainExecFailure(namespace, rootMessage(e)), e);
         }
     }
+
+    /** TTY shells, bash first: it has line editing and history; plain sh (dash) just echoes ^[[A. */
+    private static final String[] TTY_SHELLS = {"/bin/bash", "/bin/sh", "/busybox/sh"};
 
     /** Shells tried in order: most images have /bin/sh; distroless :debug images have /busybox/sh. */
     private static final String[] EXEC_SHELLS = {"/bin/sh", "/bin/bash", "/busybox/sh"};
@@ -630,11 +634,10 @@ public class Fabric8ClusterService implements ClusterService {
         // TTY requires an explicit output sink (fabric8 rejects the op otherwise). Route it through a
         // simple OutputStream that forwards decoded UTF-8 to the UI callback.
         OutputStream uiOut = new OutputStream() {
-            private java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(4096);
-            private java.nio.CharBuffer cbuf = java.nio.CharBuffer.allocate(4096);
             private final java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
                     .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
                     .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
+            private byte[] carry = new byte[0]; // tail of a multi-byte char split across writes
 
             @Override
             public void write(int b) {
@@ -643,22 +646,18 @@ public class Fabric8ClusterService implements ClusterService {
 
             @Override
             public void write(byte[] b, int off, int len) {
-                // Grow the buffer if a single write exceeds current capacity (top, vim, etc.
-                // send large screen-refresh chunks that can exceed 4 KB).
-                if (len > buf.capacity()) {
-                    int newCap = Math.max(len, buf.capacity() * 2);
-                    buf = java.nio.ByteBuffer.allocate(newCap);
-                    cbuf = java.nio.CharBuffer.allocate(newCap * 2);
+                byte[] all = new byte[carry.length + len];
+                System.arraycopy(carry, 0, all, 0, carry.length);
+                System.arraycopy(b, off, all, carry.length, len);
+                java.nio.ByteBuffer in = java.nio.ByteBuffer.wrap(all);
+                java.nio.CharBuffer out = java.nio.CharBuffer.allocate(all.length + 1);
+                dec.decode(in, out, false); // not end-of-input: an incomplete tail stays in 'in'
+                carry = new byte[in.remaining()];
+                in.get(carry);
+                out.flip();
+                if (out.hasRemaining()) {
+                    onOutput.accept(out.toString());
                 }
-                buf.clear();
-                buf.put(b, off, len);
-                buf.flip();
-                cbuf.clear();
-                dec.reset();
-                dec.decode(buf, cbuf, true);
-                dec.flush(cbuf);
-                cbuf.flip();
-                onOutput.accept(cbuf.toString());
             }
         };
 
@@ -716,7 +715,7 @@ public class Fabric8ClusterService implements ClusterService {
         // Output is streamed to the UI by fabric8 via the uiOut sink above.
         boolean shellMissingEarly;
         try {
-            String early = failed.get(3, TimeUnit.SECONDS);
+            String early = failed.get(2, TimeUnit.SECONDS);
             watch.close();
             shellMissingEarly = true;
             // Failed fast; the loop will try the next shell.
@@ -734,9 +733,25 @@ public class Fabric8ClusterService implements ClusterService {
             }
 
             private final AtomicBoolean reportedNoInput = new AtomicBoolean(false);
+            // Writes go through one background thread: a big paste must not block the UI thread, and
+            // a single thread keeps keystrokes in order.
+            private final java.util.concurrent.ExecutorService inputPool =
+                    java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                        Thread th = new Thread(r, "kubedesk-tty-input");
+                        th.setDaemon(true);
+                        return th;
+                    });
 
             @Override
             public void sendRaw(byte[] data) {
+                try {
+                    inputPool.execute(() -> writeInput(data));
+                } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                    // session already closed
+                }
+            }
+
+            private void writeInput(byte[] data) {
                 try {
                     OutputStream stdin = watch.getInput();
                     if (stdin == null) {
@@ -761,9 +776,15 @@ public class Fabric8ClusterService implements ClusterService {
             @Override
             public void resize(int columns, int rows) {
                 try {
-                    watch.resize(columns, rows);
-                } catch (Exception ignored) {
-                    // Resize is best-effort; a failed resize just means the app may draw a stale size.
+                    inputPool.execute(() -> {
+                        try {
+                            watch.resize(columns, rows);
+                        } catch (Exception ignored) {
+                            // best-effort: a failed resize just means the app may draw a stale size
+                        }
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                    // session already closed
                 }
             }
 
@@ -779,6 +800,7 @@ public class Fabric8ClusterService implements ClusterService {
 
             @Override
             public void close() {
+                inputPool.shutdownNow();
                 try {
                     watch.close();
                 } finally {

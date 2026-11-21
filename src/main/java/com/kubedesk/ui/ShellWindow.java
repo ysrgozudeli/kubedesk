@@ -12,6 +12,7 @@ import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -48,6 +49,7 @@ public final class ShellWindow {
     private ExecSession execSession;
     private final ExecutorService pool = Executors.newSingleThreadExecutor();
     private Scene scene;
+    private boolean ttyView = true; // which view is showing (also routes output that arrives before connect finishes)
 
     public ShellWindow(ClusterService service, String ctxName, String namespace, String pod,
                        String initialContainer) {
@@ -84,20 +86,23 @@ public final class ShellWindow {
             }
         });
 
-        HBox controls = new HBox(8, new Label("Container:"), containerBox,
-                modeGroupBox, connectBtn, copyBtn, statusLabel);
+        ttyRadio.setTooltip(new Tooltip("A real terminal: live prompt, history, vim/top/less. Click it to type."));
+        consoleRadio.setTooltip(new Tooltip("Type whole commands in the line below. No TTY."));
+        HBox containerGroup = new HBox(6, new Label("Container:"), containerBox);
+        containerGroup.setAlignment(Pos.CENTER_LEFT);
+        statusLabel.getStyleClass().add("muted");
+        // FlowPane wraps to a second row in narrow windows instead of clipping.
+        FlowPane controls = new FlowPane(8, 6, containerGroup, modeGroupBox, connectBtn, copyBtn, statusLabel);
         controls.setAlignment(Pos.CENTER_LEFT);
+        controls.setRowValignment(javafx.geometry.VPos.CENTER);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
         // TTY terminal
-        terminal = new TerminalGrid(100, 30);
+        terminal = new TerminalGrid();
         VBox.setVgrow(terminal, Priority.ALWAYS);
         terminal.setFocusTraversable(true);
-        terminal.setOnMouseClicked(e -> terminal.requestFocus());
-        terminal.widthProperty().addListener((o, a, b) -> sendResize());
-        terminal.heightProperty().addListener((o, a, b) -> sendResize());
-        terminal.setVisible(false);
-        terminal.setManaged(false);
+        terminal.setOnGridResize((c, r) -> sendResize());
+        terminal.setOnPaste(txt -> { if (execSession != null) execSession.sendRaw(txt.getBytes(StandardCharsets.UTF_8)); });
 
         // Console area
         consoleArea = new TextArea();
@@ -111,7 +116,10 @@ public final class ShellWindow {
         consoleInput.getStyleClass().add("shell-input");
         consoleInput.setOnAction(e -> sendConsoleCommand());
 
+        showView(true); // TTY is the default mode
         VBox content = new VBox(terminal, consoleArea, consoleInput);
+        // Without this the content box keeps its preferred height and only fills part of the window.
+        VBox.setVgrow(content, Priority.ALWAYS);
         VBox root = new VBox(controls, content);
         root.getStyleClass().add("root-pane");
 
@@ -126,7 +134,7 @@ public final class ShellWindow {
         if (icon != null) {
             stage.getIcons().add(new javafx.scene.image.Image(icon));
         }
-        stage.setOnHidden(e -> closeSession());
+        stage.setOnHidden(e -> shutdown());
 
         // Key capture for TTY
         scene.addEventFilter(KeyEvent.KEY_PRESSED, e -> {
@@ -180,9 +188,24 @@ public final class ShellWindow {
         }
     }
 
+    /** Show either the terminal grid (TTY) or the console area + input line. */
+    private void showView(boolean tty) {
+        ttyView = tty;
+        terminal.setVisible(tty);
+        terminal.setManaged(tty);
+        consoleArea.setVisible(!tty);
+        consoleArea.setManaged(!tty);
+        consoleInput.setVisible(!tty);
+        consoleInput.setManaged(!tty);
+    }
+
     private void connect() {
         String container = containerBox.getValue();
         boolean tty = ttyRadio.isSelected();
+        showView(tty); // visible before connecting so the shell's first prompt isn't lost
+        if (tty) {
+            terminal.write("\u001bc\u001b[3J"); // fresh screen for a new session
+        }
         connectBtn.setDisable(true);
         statusLabel.setText("Connecting…");
 
@@ -205,22 +228,11 @@ public final class ShellWindow {
             connectBtn.setText("Disconnect");
             statusLabel.setText("Connected (" + session.shell() + ")");
             if (session.isTty()) {
-                terminal.setVisible(true);
-                terminal.setManaged(true);
-                consoleArea.setVisible(false);
-                consoleArea.setManaged(false);
-                consoleInput.setVisible(false);
-                consoleInput.setManaged(false);
                 terminal.requestFocus();
                 sendResize();
             } else {
-                terminal.setVisible(false);
-                terminal.setManaged(false);
-                consoleArea.setVisible(true);
-                consoleArea.setManaged(true);
-                consoleInput.setVisible(true);
-                consoleInput.setManaged(true);
                 consoleArea.appendText("Connected. Type a command below.\n");
+                consoleInput.setDisable(false);
                 consoleInput.requestFocus();
             }
         });
@@ -236,29 +248,25 @@ public final class ShellWindow {
         if (execSession != null) {
             try { execSession.close(); } catch (Exception ignored) {}
             execSession = null;
+            // Keep the final screen visible and say what happened (don't swap the view away).
+            if (ttyView) {
+                terminal.write("\r\n[session closed]\r\n");
+            } else {
+                consoleArea.appendText("\n[session closed]\n");
+            }
         }
         connectBtn.setText("Connect");
         connectBtn.setDisable(false);
         statusLabel.setText("Disconnected");
-        if (terminal != null) {
-            terminal.setVisible(false);
-            terminal.setManaged(false);
-        }
-        if (consoleArea != null) {
-            consoleArea.setVisible(true);
-            consoleArea.setManaged(true);
-        }
         if (consoleInput != null) {
-            consoleInput.setVisible(true);
-            consoleInput.setManaged(true);
             consoleInput.setDisable(true);
         }
     }
 
     private void onOutput(String text) {
         Platform.runLater(() -> {
-            if (execSession != null && execSession.isTty() && terminal != null) {
-                terminal.write(text.getBytes(StandardCharsets.UTF_8));
+            if (ttyView && terminal != null) {
+                terminal.write(text);
             } else if (consoleArea != null) {
                 consoleArea.appendText(text);
                 consoleArea.setScrollTop(Double.MAX_VALUE);
@@ -280,56 +288,20 @@ public final class ShellWindow {
 
     private void sendResize() {
         if (execSession == null || !execSession.isTty() || terminal == null) return;
-        double w = terminal.getWidth();
-        double h = terminal.getHeight();
-        if (w < 20 || h < 20) return;
-        int cols = Math.max(2, (int) (w / TerminalGrid.CELL_W));
-        int rows = Math.max(1, (int) (h / TerminalGrid.CELL_H));
-        execSession.resize(cols, rows);
+        execSession.resize(terminal.getCols(), terminal.getRows());
     }
 
     private void forwardKey(KeyEvent e) {
-        ExecSession s = execSession;
-        if (s == null || !s.isTty()) return;
-        KeyCode code = e.getCode();
-        if (code == null) return;
-        boolean ctrl = e.isControlDown();
-
-        switch (code) {
-            case ENTER: s.sendRaw(new byte[]{0x0d}); e.consume(); return;
-            case BACK_SPACE: s.sendRaw(new byte[]{0x7f}); e.consume(); return;
-            case TAB: s.sendRaw(new byte[]{0x09}); e.consume(); return;
-            case ESCAPE: s.sendRaw(new byte[]{0x1b}); e.consume(); return;
-            case UP: s.sendRaw(new byte[]{0x1b, 0x5b, 0x41}); e.consume(); return;
-            case DOWN: s.sendRaw(new byte[]{0x1b, 0x5b, 0x42}); e.consume(); return;
-            case RIGHT: s.sendRaw(new byte[]{0x1b, 0x5b, 0x43}); e.consume(); return;
-            case LEFT: s.sendRaw(new byte[]{0x1b, 0x5b, 0x44}); e.consume(); return;
-            case HOME: s.sendRaw(new byte[]{0x1b, 0x5b, 0x48}); e.consume(); return;
-            case END: s.sendRaw(new byte[]{0x1b, 0x5b, 0x46}); e.consume(); return;
-            case PAGE_UP: s.sendRaw(new byte[]{0x1b, 0x5b, 0x35, 0x3b, 0x32}); e.consume(); return;
-            case PAGE_DOWN: s.sendRaw(new byte[]{0x1b, 0x5b, 0x36, 0x3b, 0x32}); e.consume(); return;
-            case DELETE: s.sendRaw(new byte[]{0x1b, 0x5b, 0x33}); e.consume(); return;
-            default: break;
-        }
-
-        if (ctrl && code.isLetterKey()) {
-            int c = Character.toLowerCase(code.getName().charAt(code.getName().length() - 1));
-            s.sendRaw(new byte[]{(byte) ((c - 'a') + 1)});
-            e.consume();
+        if (execSession != null && execSession.isTty()) {
+            terminal.handleKeyPressed(e, execSession::sendRaw);
         }
     }
 
     private void forwardTyped(KeyEvent e) {
-        ExecSession s = execSession;
-        if (s == null || !s.isTty() || e.isControlDown() || e.isMetaDown()) return;
-        String ch = e.getCharacter();
-        if (ch != null && !ch.isEmpty()
-                && ch.chars().allMatch(c -> c >= 0x20 && c != 0x7f)) {
-            s.sendRaw(ch.getBytes(StandardCharsets.UTF_8));
-            e.consume();
+        if (execSession != null && execSession.isTty()) {
+            terminal.handleKeyTyped(e, execSession::sendRaw);
         }
     }
-
     /** Close the window and free resources. */
     public void shutdown() {
         closeSession();

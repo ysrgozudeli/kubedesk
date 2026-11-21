@@ -328,7 +328,7 @@ public interface ClusterService {
                      Consumer<String> onOutput, Runnable onClosed);
 
     /**
-     * Open an interactive TTY ({@code /bin/sh}) into a pod container — a real PTY with a live prompt,
+     * Open an interactive TTY (bash if present, else sh) into a pod container — a real PTY with a live prompt,
      * so interactive programs ({@code vim}, {@code top}, {@code less}) work. Unlike {@link #exec}, the
      * returned session is a TTY: feed it individual keystrokes with {@code sendRaw}, and keep the
      * viewport in sync with {@code resize}.
