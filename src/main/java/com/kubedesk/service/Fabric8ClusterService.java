@@ -630,8 +630,8 @@ public class Fabric8ClusterService implements ClusterService {
         // TTY requires an explicit output sink (fabric8 rejects the op otherwise). Route it through a
         // simple OutputStream that forwards decoded UTF-8 to the UI callback.
         OutputStream uiOut = new OutputStream() {
-            private final java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(2048);
-            private final java.nio.CharBuffer cbuf = java.nio.CharBuffer.allocate(2048);
+            private java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(4096);
+            private java.nio.CharBuffer cbuf = java.nio.CharBuffer.allocate(4096);
             private final java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
                     .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
                     .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
@@ -643,6 +643,13 @@ public class Fabric8ClusterService implements ClusterService {
 
             @Override
             public void write(byte[] b, int off, int len) {
+                // Grow the buffer if a single write exceeds current capacity (top, vim, etc.
+                // send large screen-refresh chunks that can exceed 4 KB).
+                if (len > buf.capacity()) {
+                    int newCap = Math.max(len, buf.capacity() * 2);
+                    buf = java.nio.ByteBuffer.allocate(newCap);
+                    cbuf = java.nio.CharBuffer.allocate(newCap * 2);
+                }
                 buf.clear();
                 buf.put(b, off, len);
                 buf.flip();
