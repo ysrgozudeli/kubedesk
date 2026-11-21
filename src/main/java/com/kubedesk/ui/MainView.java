@@ -176,6 +176,7 @@ public class MainView extends BorderPane {
     // Read-only TextField (not a Label) so the status message is selectable and copyable.
     private final TextField statusBar = new TextField("Ready.");
     private static final PseudoClass ERROR_PSEUDO = PseudoClass.getPseudoClass("error");
+    private static final PseudoClass ENDED_PSEUDO = PseudoClass.getPseudoClass("ended");
     // Auto-dismiss a lingering error from the status bar after a while (any new status cancels it).
     private final PauseTransition statusErrorClear = new PauseTransition(Duration.seconds(15));
 
@@ -319,6 +320,11 @@ public class MainView extends BorderPane {
     private final CheckBox previousCheck = new CheckBox("Previous");
     private final CheckBox timestampsCheck = new CheckBox("Timestamps");
     private AutoCloseable logStream;
+    /** True while a Follow stream is actively connected; flips to false on the "ended" notice so the
+     *  Follow button can't claim it's following when the stream has actually died. */
+    private boolean logStreamAlive = false;
+    /** The "● live"/"● ended" pill in the log toolbar (null until the Logs tab is built). */
+    private Label logLivePill;
 
     // Shell (exec) controls
     private final ComboBox<String> shellContainerBox = new ComboBox<>();
@@ -2595,6 +2601,75 @@ public class MainView extends BorderPane {
         return copy;
     }
 
+    /**
+     * A "Filter lines…" box plus its "✕" clear button and a live "showing X of Y" count. The case
+     * insensitive filter hides non-matching lines from view only — Copy/Save still grab everything —
+     * and the count makes it obvious when the box is narrowing the stream (e.g. to a handful of
+     * lines in a 5000-line tail). Shared by the inline Logs tab and the detached {@link LogWindow}.
+     */
+    public static HBox buildFilterGroup(TextField filterField, LogBuffer buffer) {
+        filterField.setPromptText("Filter lines…");
+        filterField.setPrefColumnCount(20);
+
+        Button clearFilter = new Button("✕");
+        clearFilter.getStyleClass().add("icon-button");
+        clearFilter.setTooltip(new Tooltip("Clear the line filter"));
+        clearFilter.setOnAction(e -> filterField.clear());
+
+        Label count = new Label();
+        count.getStyleClass().add("log-filter-count");
+        // Update the count whenever the query changes; the buffer re-renders as a side effect.
+        filterField.textProperty().addListener((o, a, b) -> {
+            buffer.setFilter(b);
+            updateFilterCount(count, buffer);
+        });
+
+        HBox group = new HBox(4, filterField, clearFilter, count);
+        group.setAlignment(Pos.CENTER_LEFT);
+        return group;
+    }
+
+    /** "showing X of Y lines" for an active filter; hidden (and the "✕" cleared) when there's none. */
+    private static void updateFilterCount(Label count, LogBuffer buffer) {
+        String f = buffer.filter();
+        if (f == null || f.isEmpty()) {
+            count.setText("");
+            count.setVisible(false);
+            count.setManaged(false);
+            return;
+        }
+        long shown = buffer.raw().isEmpty() ? 0
+                : buffer.raw().lines().filter(l -> l.toLowerCase().contains(f)).count();
+        long total = buffer.raw().lines().count();
+        count.setText("showing " + shown + " of " + total);
+        count.setVisible(true);
+        count.setManaged(true);
+    }
+
+    /** A thin vertical rule that visually groups the log toolbar (what / how / actions). */
+    public static Region toolbarSep() {
+        Region sep = new Region();
+        sep.getStyleClass().add("sep");
+        return sep;
+    }
+
+    /** A "● live"/"● ended" pill for a log stream, kept in sync with {@code alive}. */
+    public static Label logLiveIndicator() {
+        Label pill = new Label("● live");
+        pill.getStyleClass().add("log-live");
+        pill.setTooltip(new Tooltip("Live: new log lines stream in as they arrive"));
+        return pill;
+    }
+
+    /** Update a live/ended pill: green "● live" while {@code alive}, amber "● ended" (or hidden) after. */
+    public static void setLogLive(Label pill, boolean alive) {
+        pill.pseudoClassStateChanged(ENDED_PSEUDO, !alive);
+        pill.setText(alive ? "● live" : "● ended");
+        pill.setTooltip(new Tooltip(alive
+                ? "Live: new log lines stream in as they arrive"
+                : "The stream has ended — new lines won't arrive until you press Follow again"));
+    }
+
     /** The Logs tab content: container picker + tail-size picker + refresh + a monospace log view. */
     private VBox buildLogsPane() {
         containerBox.setMinWidth(150);
@@ -2612,19 +2687,26 @@ public class MainView extends BorderPane {
         refresh.getStyleClass().add("icon-button");
         refresh.setOnAction(e -> loadLogs());
 
-        // Follow = live tail (kubectl logs -f), rendered as a play/pause button: ▶ starts the stream,
-        // ⏸ (shown while following) stops it. Toggling re-runs loadLogs(), which starts or stops the
-        // stream based on this button's state; the glyph + tooltip track the state.
+        // Follow = live tail (kubectl logs -f). A toggle that starts/stops the stream; the button
+        // reads "Follow" (start) or "Following…" (stop), and the ● live / ● ended pill beside it
+        // shows whether the stream is actually connected. Toggling re-runs loadLogs(), which starts
+        // or stops the stream from this button's state.
+        Label livePill = logLivePill = logLiveIndicator();
+        livePill.setVisible(false);
+        livePill.setManaged(false);
         followToggle.getStyleClass().add("log-follow");
         followToggle.setOnAction(e -> loadLogs());
         followToggle.selectedProperty().addListener((o, was, following) -> {
-            followToggle.setText(following ? "⏸" : "▶");
-            followToggle.setTooltip(new Tooltip(following ? "Stop following" : "Follow live (kubectl logs -f)"));
+            followToggle.setText(following ? "Following…" : "Follow");
+            followToggle.setTooltip(new Tooltip(following
+                    ? "Stop following (keeps the lines shown so far)"
+                    : "Follow live — stream new log lines as they arrive (kubectl logs -f)"));
+            setLogLive(livePill, following && logStreamAlive);
         });
-        followToggle.setText("▶");
-        followToggle.setTooltip(new Tooltip("Follow live (kubectl logs -f)"));
+        followToggle.setText("Follow");
+        followToggle.setTooltip(new Tooltip("Follow live — stream new log lines as they arrive (kubectl logs -f)"));
 
-        Button detach = new Button("⧉");
+        Button detach = new Button("⧉ Detach");
         detach.getStyleClass().add("icon-button");
         detach.setTooltip(new Tooltip("Open these logs in a separate window (keeps streaming while you work)"));
         detach.setOnAction(e -> detachLogs());
@@ -2645,12 +2727,11 @@ public class MainView extends BorderPane {
 
         Button copy = copyButton("Copy the whole log tail to the clipboard", logBuffer::raw, "logs");
 
-        // Filter: a case-insensitive "show only matching lines" box. The full log is kept in logBuffer,
-        // so filtering only hides lines from view (Copy/Save still get everything).
+        // Filter: a case-insensitive "show only matching lines" box with a live "showing X of Y"
+        // count and a ✕ to clear it. The full log is kept in logBuffer, so filtering only hides
+        // lines from view (Copy/Save still get everything).
         TextField filterField = new TextField();
-        filterField.setPromptText("Filter lines…");
-        filterField.setPrefColumnCount(14);
-        filterField.textProperty().addListener((o, a, b) -> logBuffer.setFilter(b));
+        HBox filterGroup = buildFilterGroup(filterField, logBuffer);
 
         // Wrap long lines on/off.
         ToggleButton wrap = new ToggleButton("⤶");
@@ -2659,21 +2740,31 @@ public class MainView extends BorderPane {
         logsArea.wrapTextProperty().bind(wrap.selectedProperty());
 
         // Clear the current view (the stream, if following, keeps appending new lines after).
-        Button clear = new Button("⌫");
+        // A plain word, not "⌫" — that glyph reads as "delete" and this wipes the view without undo.
+        Button clear = new Button("Clear");
         clear.getStyleClass().add("icon-button");
-        clear.setTooltip(new Tooltip("Clear the log view"));
-        clear.setOnAction(e -> logBuffer.clear());
+        clear.setTooltip(new Tooltip("Clear the log view (the live stream keeps appending new lines)"));
+        clear.setOnAction(e -> {
+            logBuffer.clear();
+            livePill.setVisible(false);
+            livePill.setManaged(false);
+        });
 
-        // A FlowPane so the toolbar wraps to a second line on a narrow window instead of clipping.
-        // Label+combo pairs are grouped so they never split across the wrap.
+        // The toolbar groups into WHAT (container, tail) | HOW (follow, previous, timestamps) |
+        // ACTIONS (filter, wrap, clear, copy, save, detach), with thin rules between the groups so
+        // the row reads at a glance. A FlowPane wraps it to a second line on a narrow window.
         HBox containerGroup = new HBox(6, new Label("Container:"), containerBox);
         containerGroup.setAlignment(Pos.CENTER_LEFT);
         HBox tailGroup = new HBox(6, new Label("Tail:"), tailBox);
         tailGroup.setAlignment(Pos.CENTER_LEFT);
+        HBox howGroup = new HBox(8, followToggle, livePill, previousCheck, timestampsCheck);
+        howGroup.setAlignment(Pos.CENTER_LEFT);
 
         FlowPane controls = new FlowPane(8, 8,
-                logStatusDot, containerGroup, tailGroup, refresh, followToggle, previousCheck,
-                timestampsCheck, filterField, wrap, clear, copy, save, detach);
+                logStatusDot, containerGroup, tailGroup, refresh,
+                toolbarSep(), howGroup,
+                toolbarSep(), filterGroup, wrap, clear, copy, save,
+                toolbarSep(), detach);
         controls.getStyleClass().add("log-toolbar");
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
@@ -2937,6 +3028,13 @@ public class MainView extends BorderPane {
         boolean previous = previousCheck.isSelected();
         boolean timestamps = timestampsCheck.isSelected();
 
+        // Not following: the "live" pill is meaningless for a one-shot tail, so hide it.
+        if (logLivePill != null) {
+            setLogLive(logLivePill, false);
+            logLivePill.setVisible(false);
+            logLivePill.setManaged(false);
+        }
+
         // Follow streams a live container; a previous (terminated) container can't stream.
         if (followToggle.isSelected() && !previous) {
             startFollow(ctx.name(), ns, pod, container, tail, timestamps);
@@ -2944,13 +3042,27 @@ public class MainView extends BorderPane {
         }
         logsArea.setText("Loading logs…");
         runAsync(() -> service.podLogs(ctx.name(), ns, pod, container, tail, previous, timestamps),
-                logs -> logBuffer.setText(logs));
+                logs -> {
+                    logBuffer.setText(logs);
+                    // A pod that has emitted nothing shouldn't just show a blank "Loading…" box.
+                    if (logBuffer.raw() == null || logBuffer.raw().isBlank()) {
+                        logsArea.setText("No log lines for "
+                                + (container != null && !container.isBlank() ? container : "this pod") + "."
+                                + (previous ? " (the container has not restarted yet)" : ""));
+                    }
+                });
     }
 
     /** Open a live log stream (kubectl logs -f) and append chunks as they arrive, auto-scrolling. */
     private void startFollow(String ctxName, String ns, String pod, String container, int tail,
                              boolean timestamps) {
         logBuffer.clear();
+        logStreamAlive = true;
+        if (logLivePill != null) {
+            setLogLive(logLivePill, true);
+            logLivePill.setVisible(true);
+            logLivePill.setManaged(true);
+        }
         status("Following logs for " + pod + "… (toggle Follow off to stop)");
         try {
             logStream = service.followLogs(ctxName, ns, pod, container, tail, timestamps,
@@ -2962,12 +3074,21 @@ public class MainView extends BorderPane {
                         logBuffer.append(chunk);
                     }),
                     err -> Platform.runLater(() -> {
-                        if (pod.equals(currentLogPod) && followToggle.isSelected()) {
-                            logBuffer.append("\n[log stream ended"
-                                    + (err != null ? ": " + err.getMessage() : "") + "]\n");
+                        // Only the newest, still-active stream for this pod should mark itself ended.
+                        if (!pod.equals(currentLogPod) || !followToggle.isSelected()) {
+                            return;
                         }
+                        logStreamAlive = false;
+                        logBuffer.append("\n[log stream ended"
+                                + (err != null ? ": " + err.getMessage() : "") + "]\n");
+                        if (logLivePill != null) {
+                            setLogLive(logLivePill, false);
+                        }
+                        // The stream is dead: un-tick Follow so the button can't claim it's live.
+                        followToggle.setSelected(false);
                     }));
         } catch (Exception e) {
+            logStreamAlive = false;
             followToggle.setSelected(false);
             statusError("Could not follow logs: " + e.getMessage());
         }
@@ -3010,6 +3131,7 @@ public class MainView extends BorderPane {
             }
             logStream = null;
         }
+        logStreamAlive = false;
     }
 
     /**

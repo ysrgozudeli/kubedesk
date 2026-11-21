@@ -63,6 +63,16 @@ public final class LogBuffer {
         return raw.toString();
     }
 
+    /** Whether the buffer holds any log lines yet (drives the "no log lines" empty state). */
+    public boolean hasContent() {
+        return !raw.isEmpty();
+    }
+
+    /** The current filter query (empty when everything is shown). */
+    public String filter() {
+        return filter;
+    }
+
     private void render() {
         if (filter.isEmpty()) {
             area.setText(raw.toString());

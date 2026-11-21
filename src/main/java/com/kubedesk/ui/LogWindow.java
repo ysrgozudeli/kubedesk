@@ -57,8 +57,11 @@ public final class LogWindow {
     private final CheckBox previousCheck = new CheckBox("Previous");
     private final CheckBox timestampsCheck = new CheckBox("Timestamps");
     private final Label statusDot = new Label("●");
+    private Label logLivePill;
 
     private AutoCloseable logStream;
+    /** True while the live stream is connected; false once it ends, so the Follow button can't lie. */
+    private boolean logStreamAlive = false;
     /** Bumped on each (re)load so callbacks from a superseded stream can be ignored. */
     private int streamGen;
 
@@ -92,16 +95,22 @@ public final class LogWindow {
         refresh.getStyleClass().add("icon-button");
         refresh.setOnAction(e -> loadLogs());
 
-        // Follow play/pause — same look/semantics as the inline Logs tab (▶ start, ⏸ stop).
+        // Follow live/stop — same text + live-pill semantics as the inline Logs tab.
         follow.getStyleClass().add("log-follow");
         follow.setSelected(startFollowing);
-        follow.setText(startFollowing ? "⏸" : "▶");
-        follow.setTooltip(new Tooltip(startFollowing ? "Stop following" : "Follow live (kubectl logs -f)"));
+        follow.setText(startFollowing ? "Following…" : "Follow");
+        follow.setTooltip(new Tooltip(startFollowing
+                ? "Stop following (keeps the lines shown so far)"
+                : "Follow live — stream new log lines as they arrive (kubectl logs -f)"));
         follow.setOnAction(e -> loadLogs());
         follow.selectedProperty().addListener((o, was, on) -> {
-            follow.setText(on ? "⏸" : "▶");
-            follow.setTooltip(new Tooltip(on ? "Stop following" : "Follow live (kubectl logs -f)"));
+            follow.setText(on ? "Following…" : "Follow");
+            follow.setTooltip(new Tooltip(on
+                    ? "Stop following (keeps the lines shown so far)"
+                    : "Follow live — stream new log lines as they arrive (kubectl logs -f)"));
+            MainView.setLogLive(logLivePill, on && logStreamAlive);
         });
+        logLivePill = MainView.logLiveIndicator();
 
         Button copy = new Button("⧉ Copy");
         copy.getStyleClass().add("icon-button");
@@ -120,21 +129,23 @@ public final class LogWindow {
         save.getStyleClass().add("accent-button");
         save.setOnAction(e -> saveLogs());
 
-        // Filter lines (case-insensitive, hides non-matching lines from view only).
+        // Filter lines (case-insensitive, hides non-matching lines from view only) + a live count.
         TextField filterField = new TextField();
-        filterField.setPromptText("Filter lines…");
-        filterField.setPrefColumnCount(14);
-        filterField.textProperty().addListener((o, a, b) -> logBuffer.setFilter(b));
+        HBox filterGroup = MainView.buildFilterGroup(filterField, logBuffer);
 
         ToggleButton wrap = new ToggleButton("⤶");
         wrap.getStyleClass().add("log-follow");
         wrap.setTooltip(new Tooltip("Wrap long lines"));
         logsArea.wrapTextProperty().bind(wrap.selectedProperty());
 
-        Button clear = new Button("⌫");
+        Button clear = new Button("Clear");
         clear.getStyleClass().add("icon-button");
-        clear.setTooltip(new Tooltip("Clear the log view"));
-        clear.setOnAction(e -> logBuffer.clear());
+        clear.setTooltip(new Tooltip("Clear the log view (the live stream keeps appending new lines)"));
+        clear.setOnAction(e -> {
+            logBuffer.clear();
+            logLivePill.setVisible(false);
+            logLivePill.setManaged(false);
+        });
 
         previousCheck.setTooltip(new Tooltip("Show the previous (crashed/restarted) container's logs"));
         previousCheck.setOnAction(e -> loadLogs());
@@ -148,10 +159,13 @@ public final class LogWindow {
         containerGroup.setAlignment(Pos.CENTER_LEFT);
         HBox tailGroup = new HBox(6, new Label("Tail:"), tailBox);
         tailGroup.setAlignment(Pos.CENTER_LEFT);
+        HBox howGroup = new HBox(8, follow, logLivePill, previousCheck, timestampsCheck);
+        howGroup.setAlignment(Pos.CENTER_LEFT);
 
         FlowPane controls = new FlowPane(8, 8,
-                statusDot, containerGroup, tailGroup, refresh, follow, previousCheck, timestampsCheck,
-                filterField, wrap, clear, copy, save);
+                statusDot, containerGroup, tailGroup, refresh,
+                MainView.toolbarSep(), howGroup,
+                MainView.toolbarSep(), filterGroup, wrap, clear, copy, save);
         controls.getStyleClass().add("log-toolbar");
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8, 12, 8, 12));
@@ -221,6 +235,10 @@ public final class LogWindow {
 
         if (follow.isSelected() && !previous) {
             logBuffer.clear();
+            logStreamAlive = true;
+            MainView.setLogLive(logLivePill, true);
+            logLivePill.setVisible(true);
+            logLivePill.setManaged(true);
             try {
                 logStream = service.followLogs(ctxName, namespace, pod, container, tail, timestamps,
                         chunk -> Platform.runLater(() -> {
@@ -231,16 +249,25 @@ public final class LogWindow {
                         }),
                         err -> Platform.runLater(() -> {
                             if (gen == streamGen) {
+                                logStreamAlive = false;
                                 logBuffer.append("\n[log stream ended"
                                         + (err != null ? ": " + err.getMessage() : "") + "]\n");
+                                MainView.setLogLive(logLivePill, false);
+                                follow.setSelected(false); // a dead stream isn't "following"
                             }
                         }));
             } catch (Exception e) {
+                logStreamAlive = false;
                 follow.setSelected(false);
                 logsArea.setText("Could not follow logs: " + e.getMessage());
             }
             return;
         }
+
+        // Not following: hide the (meaningless) live pill for a one-shot tail.
+        MainView.setLogLive(logLivePill, false);
+        logLivePill.setVisible(false);
+        logLivePill.setManaged(false);
 
         logsArea.setText("Loading logs…");
         new Thread(() -> {
@@ -251,6 +278,11 @@ public final class LogWindow {
                         return;
                     }
                     logBuffer.setText(logs);
+                    if (logs == null || logs.isBlank()) {
+                        logsArea.setText("No log lines for "
+                                + (container != null && !container.isBlank() ? container : "this pod") + "."
+                                + (previous ? " (the container has not restarted yet)" : ""));
+                    }
                 });
             } catch (Exception ex) {
                 Platform.runLater(() -> {
@@ -287,6 +319,7 @@ public final class LogWindow {
             }
             logStream = null;
         }
+        logStreamAlive = false;
     }
 
     private void saveLogs() {
