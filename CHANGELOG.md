@@ -3,6 +3,17 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.22.0] - 2026-11-21
+
+### Changed
+- **Pod Logs tab, clearer toolbar.** Controls are grouped (what / how / actions) with dividers;
+  Follow, Clear and Detach are now labeled buttons instead of bare icons.
+- A **● live / ● ended** indicator shows whether the Follow stream is really connected, and Follow
+  un-ticks itself when the stream dies.
+- The line filter has a ✕ clear button and a "showing X of Y" count.
+- An empty pod shows "No log lines for …" instead of a blank view.
+- Same improvements in the detached log window.
+
 ## [1.21.1] - 2026-11-17
 
 Re-release of 1.21.0. Its macOS (`.dmg`) and Windows portable (`.zip`) builds didn't publish, so

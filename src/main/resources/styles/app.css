@@ -130,6 +130,31 @@
     -fx-pref-height: 32;
 }
 
+/* Thin vertical rule that groups the log toolbar (what / how / actions) so the row can be read at
+   a glance. Sized to match the 32px control height. */
+.log-toolbar .sep {
+    -fx-min-width: 1;
+    -fx-pref-width: 1;
+    -fx-background-color: #e3e6ea;
+}
+
+/* "Live" pill next to the Follow button: green while streaming, amber when the stream has ended. */
+.log-live {
+    -fx-font-size: 12px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #16a34a;
+    -fx-min-height: 32;
+}
+.log-live.ended {
+    -fx-text-fill: #b45309;
+}
+
+/* "showing X of Y lines" count next to the log filter box. */
+.log-filter-count {
+    -fx-font-size: 12px;
+    -fx-text-fill: #6b7280;
+}
+
 /* ---- cluster rail (left-edge quick switch) ---- */
 .cluster-rail-wrap {
     -fx-background-color: #e9ecf1;
