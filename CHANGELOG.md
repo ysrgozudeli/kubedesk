@@ -3,6 +3,31 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.23.0] - 2026-11-21
+
+### Added
+- **Real terminal in the pod Shell tab.** TTY is now the default: a live prompt, bash history and arrow
+  keys, Tab completion, Ctrl+C / Ctrl+L, and full-screen programs (`vim`, `top`, `less`) with colours,
+  256-colour and true-colour output. The terminal fits itself to the window and tells the pod its size,
+  so it redraws correctly on resize.
+- **Select and copy.** Drag to select (double-click for a word), Ctrl+C copies when text is selected
+  (otherwise it still sends ^C), Ctrl+Shift+C also copies, Ctrl+V / Shift+Insert / right-click pastes.
+  Mouse-wheel scrollback of up to 5000 lines.
+- **Detach the shell** into its own window (**⧉ Detach**), keeping its own session. A **Console** mode
+  (whole lines, no TTY) is still one click away.
+
+### Changed
+- The Shell toolbar wraps onto a second row on narrow windows; the long mode note moved into tooltips.
+- TTY sessions try `bash` first (history and line editing), then `sh`.
+- When a shell session ends, its last screen stays visible with a "[session closed]" line.
+
+### Fixed
+- Typing didn't register in the first TTY builds (letters arrive as typed-character events, not key presses).
+- Multi-byte characters split across network chunks no longer turn into `�`.
+- Keystrokes and pastes are sent off the UI thread, so a large paste can't freeze the window.
+- The detached shell window now fills the window, and no longer leaves a background thread running after
+  it closes.
+
 ## [1.22.0] - 2026-11-21
 
 ### Changed

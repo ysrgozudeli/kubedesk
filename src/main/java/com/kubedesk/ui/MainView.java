@@ -36,6 +36,7 @@ import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
+import javafx.beans.value.ChangeListener;
 import javafx.collections.FXCollections;
 import javafx.concurrent.Task;
 import javafx.css.PseudoClass;
@@ -77,6 +78,7 @@ import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.TitledPane;
 import javafx.scene.control.ToggleButton;
@@ -332,6 +334,12 @@ public class MainView extends BorderPane {
     private final TextField shellInput = new TextField();
     private final Button shellConnectBtn = new Button("Connect");
     private final Button shellScriptBtn = new Button("Run script…");
+    private final ToggleGroup shellModeGroup = new ToggleGroup();
+    private final RadioButton shellTtyRadio = new RadioButton("TTY");
+    private final RadioButton shellConsoleRadio = new RadioButton("Console");
+    private TerminalGrid shellTerminal; // lazily created on first TTY connect
+    private boolean ttyConnecting;      // route early PTY output (the first prompt) to the terminal
+    private Button shellCopyBtn;
     private ExecSession execSession;
     private String shellPod;
     /** Remembered "pipe into" command for the Run-script dialog (pre-filled next time). */
@@ -2327,21 +2335,66 @@ public class MainView extends BorderPane {
                 + "quotes survive intact — unlike typing it line by line."));
         shellScriptBtn.setOnAction(e -> openRunScriptDialog());
 
-        Label note = new Label("Command console (not a full TTY — no vim/top).");
-        note.getStyleClass().add("muted");
+        // Mode toggle: TTY (interactive, default) vs Console. Switching while connected
+        // closes the live session first.
+        shellTtyRadio.setToggleGroup(shellModeGroup);
+        shellConsoleRadio.setToggleGroup(shellModeGroup);
+        shellTtyRadio.setSelected(true);
+        shellTtyRadio.setTooltip(new Tooltip("A real PTY: live prompt, arrow-key history, and interactive "
+                + "programs like vim, top and less. Click the terminal to type."));
+        shellConsoleRadio.setTooltip(new Tooltip("Type whole commands in the line below and press Enter. "
+                + "No TTY — interactive programs won't work, but it's the simplest way to run a quick "
+                + "command."));
+        // TTY is the default; the radio order matches.
+        HBox modeGroup = new HBox(6, shellTtyRadio, shellConsoleRadio);
+        modeGroup.setAlignment(Pos.CENTER_LEFT);
+        modeGroup.getStyleClass().add("shell-mode");
+        modeGroup.setPadding(new Insets(2, 6, 2, 8));
+        shellModeGroup.selectedToggleProperty().addListener((o, a, b) -> {
+            if (execSession != null) {
+                closeExec();
+            }
+        });
 
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
+        shellCopyBtn = new Button("Copy");
+        shellCopyBtn.getStyleClass().add("icon-button");
+        shellCopyBtn.setTooltip(new Tooltip("Copy the terminal contents to the clipboard"));
+        shellCopyBtn.setOnAction(e -> {
+            String text = (shellTtyMode() && shellTerminal != null)
+                    ? shellTerminal.toText()
+                    : shellArea.getText();
+            if (text != null && !text.isEmpty()) {
+                var clipContent = new javafx.scene.input.ClipboardContent();
+                clipContent.putString(text);
+                javafx.scene.input.Clipboard.getSystemClipboard().setContent(clipContent);
+                shellCopyBtn.setText("✓");
+                javafx.animation.PauseTransition pt = new javafx.animation.PauseTransition(javafx.util.Duration.seconds(1.2));
+                pt.setOnFinished(ev -> shellCopyBtn.setText("Copy"));
+                pt.play();
+            }
+        });
 
-        HBox controls = new HBox(8,
-                new Label("Container:"), shellContainerBox, shellConnectBtn, shellScriptBtn, spacer, note);
+        Button shellDetachBtn = new Button("⧉ Detach");
+        shellDetachBtn.getStyleClass().add("icon-button");
+        shellDetachBtn.setTooltip(new Tooltip("Open the shell in a separate window (keeps the session alive)"));
+        shellDetachBtn.setOnAction(e -> detachShell());
+
+        // A FlowPane wraps onto a second row on narrow windows instead of clipping/distorting.
+        // The mode explanation lives in the radio tooltips rather than a long inline note.
+        HBox containerGroup = new HBox(6, new Label("Container:"), shellContainerBox);
+        containerGroup.setAlignment(Pos.CENTER_LEFT);
+        FlowPane controls = new FlowPane(8, 6,
+                containerGroup, modeGroup, shellConnectBtn, shellScriptBtn, shellCopyBtn, shellDetachBtn);
         controls.setAlignment(Pos.CENTER_LEFT);
+        controls.setRowValignment(javafx.geometry.VPos.CENTER);
         controls.setPadding(new Insets(8, 12, 8, 12));
 
         shellArea.setEditable(false);
         shellArea.setWrapText(false);
         shellArea.getStyleClass().addAll("yaml-area", "logs-area");
         VBox.setVgrow(shellArea, Priority.ALWAYS);
+        // In TTY mode keystrokes are captured by scene-level filters (see installTtyKeyCapture) and the
+        // terminal grid reports its own size changes, which are forwarded to the PTY.
 
         shellInput.setPromptText("Type a command and press Enter…");
         shellInput.getStyleClass().add("shell-input");
@@ -2352,12 +2405,97 @@ public class MainView extends BorderPane {
         return pane;
     }
 
+    private boolean shellTtyMode() {
+        return execSession != null && execSession.isTty();
+    }
+
+    /**
+     * Switch the Shell tab between the ANSI terminal grid (TTY) and the plain TextArea (console).
+     * The terminal is created lazily on first use, sized to the area it replaces.
+     */
+    private void showTerminal(boolean show) {
+        if (show) {
+            if (shellTerminal == null) {
+                // The grid sizes itself to the space it is given and reports every change.
+                shellTerminal = new TerminalGrid();
+                shellTerminal.setFocusTraversable(true);
+                shellTerminal.setOnGridResize((c, r) -> {
+                    ExecSession es = execSession;
+                    if (es != null && es.isTty()) {
+                        es.resize(c, r);
+                    }
+                });
+                shellTerminal.setOnPaste(txt -> {
+                    ExecSession es = execSession;
+                    if (es != null && es.isTty()) {
+                        es.sendRaw(txt.getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+                // Insert the terminal at the same position as shellArea in the parent VBox.
+                javafx.scene.layout.VBox parent = (javafx.scene.layout.VBox) shellArea.getParent();
+                int idx = parent.getChildren().indexOf(shellArea);
+                parent.getChildren().add(idx, shellTerminal);
+                // Resize the terminal to fill the area (same growth policy).
+                VBox.setVgrow(shellTerminal, Priority.ALWAYS);
+            }
+            shellArea.setVisible(false);
+            shellArea.setManaged(false);
+            shellTerminal.setVisible(true);
+            shellTerminal.setManaged(true);
+        } else {
+            if (shellTerminal != null) {
+                shellTerminal.setVisible(false);
+                shellTerminal.setManaged(false);
+            }
+            shellArea.setVisible(true);
+            shellArea.setManaged(true);
+        }
+    }
+
+    /** Forward a key press (special keys, Ctrl combos, copy/paste) from the terminal to the PTY. */
+    private void forwardTtyKey(javafx.scene.input.KeyEvent e) {
+        ExecSession s = execSession;
+        if (s != null && s.isTty() && shellTerminal != null) {
+            shellTerminal.handleKeyPressed(e, s::sendRaw);
+        }
+    }
+
+    /** Forward printable characters (letters, digits, symbols, IME text) from KEY_TYPED events. */
+    private void forwardTtyTyped(javafx.scene.input.KeyEvent e) {
+        ExecSession s = execSession;
+        if (s != null && s.isTty() && shellTerminal != null) {
+            shellTerminal.handleKeyTyped(e, s::sendRaw);
+        }
+    }
+
+    /** Push the terminal's current size to the PTY so interactive apps lay out correctly. */
+    private void sendTtyResize() {
+        ExecSession s = execSession;
+        if (s == null || !s.isTty()) {
+            return;
+        }
+        if (shellTerminal != null && shellTerminal.isVisible()) {
+            // The grid owns its own size; the PTY must match it exactly.
+            s.resize(shellTerminal.getCols(), shellTerminal.getRows());
+        }
+    }
+
     private void toggleShell() {
         if (execSession != null) {
             closeExec();
         } else {
             connectShell();
         }
+    }
+
+    /** Open the shell in a separate window (keeps the inline tab's session alive). */
+    private void detachShell() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null || shellPod == null) {
+            return;
+        }
+        new ShellWindow(service, ctx.name(), namespaceBox.getValue(), shellPod,
+                shellContainerBox.getValue()).show();
     }
 
     private void connectShell() {
@@ -2368,33 +2506,61 @@ public class MainView extends BorderPane {
         String container = shellContainerBox.getValue();
         String pod = shellPod;
         String ns = namespaceBox.getValue();
+        boolean tty = shellTtyRadio.isSelected();
         shellArea.appendText("Connecting to " + pod
-                + (container != null ? " [" + container + "]" : "") + " …\n");
+                + (container != null ? " [" + container + "]" : "")
+                + (tty ? " (TTY)" : " (console)") + " …\n");
         shellConnectBtn.setDisable(true);
 
+        final boolean wantTty = tty;
+        ttyConnecting = wantTty;
+        if (wantTty) {
+            showTerminal(true); // so the shell's first prompt isn't lost while we finish connecting
+            shellTerminal.write("\u001bc\u001b[3J"); // fresh screen for the new session
+        }
         Task<ExecSession> task = new Task<>() {
             @Override protected ExecSession call() {
-                return service.exec(ctx.name(), ns, pod, container,
-                        MainView.this::appendShellOutput, MainView.this::onExecClosed);
+                return wantTty
+                        ? service.execTty(ctx.name(), ns, pod, container,
+                                MainView.this::appendShellOutput, MainView.this::onExecClosed)
+                        : service.exec(ctx.name(), ns, pod, container,
+                                MainView.this::appendShellOutput, MainView.this::onExecClosed);
             }
         };
         task.setOnSucceeded(e -> {
             shellConnectBtn.setDisable(false);
+            ttyConnecting = false;
             ExecSession session = task.getValue();
             if (!pod.equals(shellPod)) { // user moved to another pod while we were connecting
                 session.close();
                 return;
             }
             execSession = session;
-            shellArea.appendText("✓ Connected (" + session.shell() + "). There's no prompt in this console: "
-                    + "type a command below (e.g. ls, env, cat /etc/os-release) and press Enter.\n");
+            if (session.isTty()) {
+                // Switch to the ANSI terminal grid.
+                showTerminal(true);
+                shellArea.clear();
+                shellInput.setDisable(true);
+                shellScriptBtn.setDisable(true);
+                sendTtyResize();
+                installTtyKeyCapture();
+                if (shellTerminal != null) {
+                    shellTerminal.requestFocus();
+                }
+            } else {
+                showTerminal(false);
+                shellArea.appendText("✓ Connected (" + session.shell() + "). There's no prompt in this console: "
+                        + "type a command below (e.g. ls, env, cat /etc/os-release) and press Enter.\n");
+                shellInput.setDisable(false);
+                shellScriptBtn.setDisable(false);
+                shellInput.requestFocus();
+            }
             shellConnectBtn.setText("Disconnect");
-            shellInput.setDisable(false);
-            shellScriptBtn.setDisable(false);
-            shellInput.requestFocus();
         });
         task.setOnFailed(e -> {
             shellConnectBtn.setDisable(false);
+            ttyConnecting = false;
+            showTerminal(false);
             Throwable ex = task.getException();
             shellArea.appendText("✗ " + (ex != null ? ex.getMessage() : "Could not open a shell.") + "\n");
         });
@@ -2510,20 +2676,32 @@ public class MainView extends BorderPane {
 
     private void appendShellOutput(String text) {
         Platform.runLater(() -> {
-            shellArea.appendText(text);
-            shellArea.setScrollTop(Double.MAX_VALUE);
+            if ((shellTtyMode() || ttyConnecting) && shellTerminal != null) {
+                shellTerminal.write(text);
+            } else {
+                shellArea.appendText(text);
+                shellArea.setScrollTop(Double.MAX_VALUE);
+            }
         });
     }
 
     private void onExecClosed() {
         Platform.runLater(() -> {
-            shellArea.appendText("\n[session closed]\n");
+            boolean wasTty = shellTtyMode();
             execSession = null;
+            if (wasTty && shellTerminal != null) {
+                // Keep the final screen visible instead of swapping the view away.
+                shellTerminal.write("\r\n[session closed]\r\n");
+            } else {
+                shellArea.appendText("\n[session closed]\n");
+            }
             shellConnectBtn.setText("Connect");
             shellInput.setDisable(true);
             shellScriptBtn.setDisable(true);
+            removeTtyKeyCapture();
         });
     }
+
 
     /** Close any active shell session (on pod change, panel close, or app shutdown). */
     private void closeExec() {
@@ -2538,6 +2716,68 @@ public class MainView extends BorderPane {
         shellConnectBtn.setText("Connect");
         shellInput.setDisable(true);
         shellScriptBtn.setDisable(true);
+        removeTtyKeyCapture();
+    }
+
+    /**
+     * Install a scene-level key handler that forwards keystrokes to the PTY while the terminal
+     * has focus. A focused non-editable {@link TextArea} swallows KeyEvent without reliably
+     * delivering {@code setOnKeyPressed}, so we capture at the scene level (bubbling phase).
+     */
+    private void installTtyKeyCapture() {
+        javafx.scene.Scene scene = shellArea.getScene();
+        if (scene == null) {
+            return;
+        }
+        removeTtyKeyCapture();
+        // Capturing-phase filters run before the focused TextArea (or focus traversal / shortcuts)
+        // can swallow the event, and don't clobber any existing scene handlers.
+        ttyKeyScene = scene;
+        scene.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, ttyPressedFilter);
+        scene.addEventFilter(javafx.scene.input.KeyEvent.KEY_TYPED, ttyTypedFilter);
+    }
+
+    private javafx.scene.Scene ttyKeyScene;
+    private final javafx.event.EventHandler<javafx.scene.input.KeyEvent> ttyPressedFilter = e -> {
+        // In TTY mode the TextArea is hidden; forward when the terminal (or any of its children)
+        // holds focus. We check the scene's focus owner to be safe.
+        if (shellTtyMode() && terminalFocused()) {
+            forwardTtyKey(e);
+        }
+    };
+    private final javafx.event.EventHandler<javafx.scene.input.KeyEvent> ttyTypedFilter = e -> {
+        if (shellTtyMode() && terminalFocused()) {
+            forwardTtyTyped(e);
+        }
+    };
+
+    /** True when the TTY terminal grid holds keyboard focus (or any descendant does). */
+    private boolean terminalFocused() {
+        if (shellTerminal == null || shellTerminal.getScene() == null) {
+            return false;
+        }
+        javafx.scene.Node focus = shellTerminal.getScene().getFocusOwner();
+        if (focus == null) {
+            return false;
+        }
+        // Walk up the parent chain: if any ancestor is the terminal, it's "focused".
+        javafx.scene.Node n = focus;
+        while (n != null) {
+            if (n == shellTerminal) {
+                return true;
+            }
+            n = n.getParent();
+        }
+        return false;
+    }
+
+    /** Remove the TTY key-capture filters installed by {@link #installTtyKeyCapture()}. */
+    private void removeTtyKeyCapture() {
+        if (ttyKeyScene != null) {
+            ttyKeyScene.removeEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, ttyPressedFilter);
+            ttyKeyScene.removeEventFilter(javafx.scene.input.KeyEvent.KEY_TYPED, ttyTypedFilter);
+            ttyKeyScene = null;
+        }
     }
 
     private void reloadYaml() {

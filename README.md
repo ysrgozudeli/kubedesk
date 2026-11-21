@@ -146,7 +146,10 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
 - **CronJob schedule explainer** — a `⏰ Schedule…` button on the **Workloads → CronJobs** toolbar (and
   right-click a CronJob → *Explain schedule…*) turns a cron expression into plain English and lists the next
   5 run times, in both UTC and your local zone (Kubernetes runs CronJobs in UTC unless `spec.timeZone` is set).
-- **Pod exec** command console.
+- **Pod shell** — a real terminal (TTY) into any container, the default: live prompt, bash history and
+  arrow keys, Tab completion, `vim` / `top` / `less`, colours, scrollback, mouse select + copy/paste, and
+  it resizes with the window. Detach it into its own window, or switch to the simpler line-by-line
+  **Console** mode.
 - **Port-forwarding** — open a tunnel to a pod port at `localhost:<port>`; a toolbar manager lists
   active tunnels (Copy / Open / Stop). Tunnels are persisted and offered for restore on next launch.
 - **Embedded kubectl console** (☰ menu, or **Ctrl/Cmd+K**) — a terminal drawer that runs *your own*

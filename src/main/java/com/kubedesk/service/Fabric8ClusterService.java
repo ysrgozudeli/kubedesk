@@ -419,6 +419,44 @@ public class Fabric8ClusterService implements ClusterService {
         }
     }
 
+    /**
+     * Open a real PTY into the container. Same shell fallback as {@link #exec}, but with a TTY: a live
+     * prompt appears as soon as the shell starts, keystrokes go in via {@code sendRaw}, and the merged
+     * stdout/stderr byte stream is decoded and fed to {@code onOutput}. There is no marker handshake —
+     * a PTY's prompt is the connected signal, and the exit/failure listener still reports a dead shell.
+     */
+    @Override
+    public ExecSession execTty(String context, String namespace, String pod, String container,
+                               Consumer<String> onOutput, Runnable onClosed) {
+        KubernetesClient client = clientFor(context);
+        try {
+            // bash first: it has line editing and history (arrows, Ctrl+R); plain sh just echoes ^[[A.
+            for (String shell : TTY_SHELLS) {
+                ExecAttempt attempt = tryShellTty(client, namespace, pod, container, shell, onOutput, onClosed);
+                if (attempt.session() != null) {
+                    return attempt.session();
+                }
+                if (!attempt.shellMissing()) {
+                    throw new ClusterException(explainExecFailure(namespace, attempt.reason()));
+                }
+            }
+            throw new ClusterException("This container has no shell (tried "
+                    + String.join(", ", TTY_SHELLS) + "). It is probably a distroless or scratch "
+                    + "image. Pick another container if the pod has one, or debug it from a terminal with: "
+                    + "kubectl debug -it " + pod + " -n " + namespace + " --image=busybox"
+                    + (container != null ? " --target=" + container : ""));
+        } catch (ClusterException ce) {
+            client.close();
+            throw ce;
+        } catch (Exception e) {
+            client.close();
+            throw new ClusterException(explainExecFailure(namespace, rootMessage(e)), e);
+        }
+    }
+
+    /** TTY shells, bash first: it has line editing and history; plain sh (dash) just echoes ^[[A. */
+    private static final String[] TTY_SHELLS = {"/bin/bash", "/bin/sh", "/busybox/sh"};
+
     /** Shells tried in order: most images have /bin/sh; distroless :debug images have /busybox/sh. */
     private static final String[] EXEC_SHELLS = {"/bin/sh", "/bin/bash", "/busybox/sh"};
 
@@ -569,6 +607,200 @@ public class Fabric8ClusterService implements ClusterService {
 
             @Override
             public void close() {
+                try {
+                    watch.close();
+                } finally {
+                    client.close();
+                }
+            }
+        };
+        return new ExecAttempt(session, null, false);
+    }
+
+    /**
+     * Start {@code shell} with a TTY. Unlike {@link #tryShell} there is no marker handshake: a real
+     * terminal prints its own prompt as soon as it starts, so we hand the session over the moment the
+     * WebSocket is up. Output is a single merged stream (a PTY combines stdout and stderr) read from
+     * {@code getOutput()}, decoded to UTF-8 and forwarded to the UI. If the shell doesn't exist, the
+     * exit listener flags it so the next shell is tried; everything else (a live PTY) is returned.
+     */
+    private ExecAttempt tryShellTty(KubernetesClient client, String namespace, String pod, String container,
+                                    String shell, Consumer<String> onOutput, Runnable onClosed) throws Exception {
+        CompletableFuture<String> failed = new CompletableFuture<>();
+        AtomicBoolean missing = new AtomicBoolean(false);
+        // Fires onClosed exactly once even when onExit and onClose both fire.
+        final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        // TTY requires an explicit output sink (fabric8 rejects the op otherwise). Route it through a
+        // simple OutputStream that forwards decoded UTF-8 to the UI callback.
+        OutputStream uiOut = new OutputStream() {
+            private final java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
+            private byte[] carry = new byte[0]; // tail of a multi-byte char split across writes
+
+            @Override
+            public void write(int b) {
+                write(new byte[]{(byte) b}, 0, 1);
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) {
+                byte[] all = new byte[carry.length + len];
+                System.arraycopy(carry, 0, all, 0, carry.length);
+                System.arraycopy(b, off, all, carry.length, len);
+                java.nio.ByteBuffer in = java.nio.ByteBuffer.wrap(all);
+                java.nio.CharBuffer out = java.nio.CharBuffer.allocate(all.length + 1);
+                dec.decode(in, out, false); // not end-of-input: an incomplete tail stays in 'in'
+                carry = new byte[in.remaining()];
+                in.get(carry);
+                out.flip();
+                if (out.hasRemaining()) {
+                    onOutput.accept(out.toString());
+                }
+            }
+        };
+
+        // redirectingInput() is what wires getInput() to the WebSocket: without it fabric8 leaves the
+        // input stream null and every keystroke silently vanishes. It must come first — it is the top
+        // of the TtyExec* fluent chain on ContainerResource.
+        ExecWatch watch = client.pods().inNamespace(namespace).withName(pod)
+                .inContainer(container)
+                .redirectingInput()
+                .writingOutput(uiOut)
+                .writingError(uiOut)
+                .withTTY()
+                .usingListener(new ExecListener() {
+                    @Override
+                    public void onFailure(Throwable t, ExecListener.Response response) {
+                        if (!failed.isDone()) {
+                            failed.complete(rootMessage(t));
+                        }
+                    }
+
+                    @Override
+                    public void onExit(int code, io.fabric8.kubernetes.api.model.Status status) {
+                        String detail = status != null && status.getMessage() != null ? status.getMessage() : "";
+                        String lower = detail.toLowerCase();
+                        if (lower.contains("no such file") || lower.contains("executable file not found")
+                                || code == 126 || code == 127) {
+                            missing.set(true);
+                        }
+                        if (!failed.isDone()) {
+                            failed.complete("exited with code " + code + (detail.isEmpty() ? "" : ": " + detail));
+                        } else if (closed.compareAndSet(false, true)) {
+                            // Live session: the shell exited. Surface it and end the session once.
+                            if (code != 0) {
+                                onOutput.accept("\n[shell exited with code " + code + "]\n");
+                            }
+                            onClosed.run();
+                        }
+                    }
+
+                    @Override
+                    public void onClose(int code, String reason) {
+                        if (!failed.isDone()) {
+                            failed.complete("connection closed"
+                                    + (reason != null && !reason.isBlank() ? ": " + reason : ""));
+                        } else if (closed.compareAndSet(false, true)) {
+                            onClosed.run();
+                        }
+                    }
+                })
+                .exec(shell);
+
+        // A PTY has no handshake: the moment exec() returns the WebSocket is up. But we still want to
+        // know whether the shell *exists* — so we wait a beat for an early "not found" exit. If one
+        // arrives within 3s we treat it as a shell miss and try the next one. Otherwise hand it over.
+        // Output is streamed to the UI by fabric8 via the uiOut sink above.
+        boolean shellMissingEarly;
+        try {
+            String early = failed.get(2, TimeUnit.SECONDS);
+            watch.close();
+            shellMissingEarly = true;
+            // Failed fast; the loop will try the next shell.
+        } catch (java.util.concurrent.TimeoutException te) {
+            shellMissingEarly = false; // No early exit — the PTY is live (or still starting).
+        }
+        if (shellMissingEarly) {
+            return new ExecAttempt(null, failed.join(), missing.get());
+        }
+
+        ExecSession session = new ExecSession() {
+            @Override
+            public void send(String input) {
+                sendRaw(input.getBytes(StandardCharsets.UTF_8));
+            }
+
+            private final AtomicBoolean reportedNoInput = new AtomicBoolean(false);
+            // Writes go through one background thread: a big paste must not block the UI thread, and
+            // a single thread keeps keystrokes in order.
+            private final java.util.concurrent.ExecutorService inputPool =
+                    java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                        Thread th = new Thread(r, "kubedesk-tty-input");
+                        th.setDaemon(true);
+                        return th;
+                    });
+
+            @Override
+            public void sendRaw(byte[] data) {
+                try {
+                    inputPool.execute(() -> writeInput(data));
+                } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                    // session already closed
+                }
+            }
+
+            private void writeInput(byte[] data) {
+                try {
+                    OutputStream stdin = watch.getInput();
+                    if (stdin == null) {
+                        // Surface it once so a silent null is visible; don't spam per keystroke.
+                        if (reportedNoInput.compareAndSet(false, true)) {
+                            onOutput.accept("\n[! no input stream on this session - keystrokes are being dropped. "
+                                    + "Reconnect.]\n");
+                        }
+                        return;
+                    }
+                    stdin.write(data);
+                    stdin.flush();
+                } catch (IOException e) {
+                    onOutput.accept("\n[could not send input: " + e.getMessage() + "]\n");
+                } catch (NullPointerException e) {
+                    if (reportedNoInput.compareAndSet(false, true)) {
+                        onOutput.accept("\n[! input stream is null - keystrokes are being dropped. Reconnect.]\n");
+                    }
+                }
+            }
+
+            @Override
+            public void resize(int columns, int rows) {
+                try {
+                    inputPool.execute(() -> {
+                        try {
+                            watch.resize(columns, rows);
+                        } catch (Exception ignored) {
+                            // best-effort: a failed resize just means the app may draw a stale size
+                        }
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                    // session already closed
+                }
+            }
+
+            @Override
+            public boolean isTty() {
+                return true;
+            }
+
+            @Override
+            public String shell() {
+                return shell;
+            }
+
+            @Override
+            public void close() {
+                inputPool.shutdownNow();
                 try {
                     watch.close();
                 } finally {

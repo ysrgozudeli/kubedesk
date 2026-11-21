@@ -327,6 +327,18 @@ public interface ClusterService {
     ExecSession exec(String context, String namespace, String pod, String container,
                      Consumer<String> onOutput, Runnable onClosed);
 
+    /**
+     * Open an interactive TTY (bash if present, else sh) into a pod container — a real PTY with a live prompt,
+     * so interactive programs ({@code vim}, {@code top}, {@code less}) work. Unlike {@link #exec}, the
+     * returned session is a TTY: feed it individual keystrokes with {@code sendRaw}, and keep the
+     * viewport in sync with {@code resize}.
+     *
+     * @param onOutput receives the merged stdout/stderr byte stream, decoded to text (background thread)
+     * @param onClosed invoked when the session ends
+     */
+    ExecSession execTty(String context, String namespace, String pod, String container,
+                        Consumer<String> onOutput, Runnable onClosed);
+
     /** The container ports declared by a pod (to pre-fill the port-forward dialog). */
     List<Integer> listPodPorts(String context, String namespace, String pod);
 
