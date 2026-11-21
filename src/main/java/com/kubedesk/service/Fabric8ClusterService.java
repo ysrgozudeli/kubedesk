@@ -726,12 +726,18 @@ public class Fabric8ClusterService implements ClusterService {
                 sendRaw(input.getBytes(StandardCharsets.UTF_8));
             }
 
+            private final AtomicBoolean reportedNoInput = new AtomicBoolean(false);
+
             @Override
             public void sendRaw(byte[] data) {
                 try {
                     OutputStream stdin = watch.getInput();
                     if (stdin == null) {
-                        onOutput.accept("\n[input stream unavailable - keystroke dropped]\n");
+                        // Surface it once so a silent null is visible; don't spam per keystroke.
+                        if (reportedNoInput.compareAndSet(false, true)) {
+                            onOutput.accept("\n[! no input stream on this session - keystrokes are being dropped. "
+                                    + "Reconnect.]\n");
+                        }
                         return;
                     }
                     stdin.write(data);
@@ -739,8 +745,9 @@ public class Fabric8ClusterService implements ClusterService {
                 } catch (IOException e) {
                     onOutput.accept("\n[could not send input: " + e.getMessage() + "]\n");
                 } catch (NullPointerException e) {
-                    // getInput() returned null before the WebSocket was ready; surface it instead of vanishing.
-                    onOutput.accept("\n[input stream not ready - keystroke dropped]\n");
+                    if (reportedNoInput.compareAndSet(false, true)) {
+                        onOutput.accept("\n[! input stream is null - keystrokes are being dropped. Reconnect.]\n");
+                    }
                 }
             }
 

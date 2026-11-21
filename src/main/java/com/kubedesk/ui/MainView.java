@@ -2408,7 +2408,6 @@ public class MainView extends BorderPane {
 
         switch (code) {
             case ENTER:
-            case NUMPAD0: // numpad Enter
                 s.sendRaw(new byte[]{0x0d}); // CR
                 e.consume();
                 return;
@@ -2463,15 +2462,21 @@ public class MainView extends BorderPane {
             }
         }
 
-        // Printable character? Send it. In TTY mode we are the keyboard, so the TextArea is not
-        // editable and these events would otherwise be swallowed.
+        // Printable characters are NOT sent here: KEY_PRESSED carries no character (getCharacter() is
+        // CHAR_UNDEFINED). They arrive via KEY_TYPED -> forwardTtyTyped().
+    }
+
+    /** Forward printable characters (letters, digits, symbols, IME text) from KEY_TYPED events. */
+    private void forwardTtyTyped(javafx.scene.input.KeyEvent e) {
+        ExecSession s = execSession;
+        if (s == null || !s.isTty() || e.isControlDown() || e.isMetaDown()) {
+            return;
+        }
         String ch = e.getCharacter();
-        if (ch != null && !ch.isEmpty()) {
-            boolean printable = ch.chars().allMatch(c -> (c >= 0x20 && c != 0x7f) || c == '\t');
-            if (printable) {
-                s.sendRaw(ch.getBytes(StandardCharsets.UTF_8));
-                e.consume();
-            }
+        if (ch != null && !ch.isEmpty()
+                && ch.chars().allMatch(c -> c >= 0x20 && c != 0x7f)) {
+            s.sendRaw(ch.getBytes(StandardCharsets.UTF_8));
+            e.consume();
         }
     }
 
@@ -2710,25 +2715,32 @@ public class MainView extends BorderPane {
         if (scene == null) {
             return;
         }
-        // Chain onto any existing handler so we don't clobber it.
-        @SuppressWarnings("unchecked")
-        javafx.event.EventHandler<javafx.scene.input.KeyEvent> prev =
-                (javafx.event.EventHandler<javafx.scene.input.KeyEvent>) (javafx.event.EventHandler<? super javafx.scene.input.KeyEvent>) scene.getOnKeyPressed();
-        scene.setOnKeyPressed(e -> {
-            if (prev != null) {
-                prev.handle(e);
-            }
-            if (shellTtyMode() && shellArea.isFocused()) {
-                forwardTtyKey(e);
-            }
-        });
+        removeTtyKeyCapture();
+        // Capturing-phase filters run before the focused TextArea (or focus traversal / shortcuts)
+        // can swallow the event, and don't clobber any existing scene handlers.
+        ttyKeyScene = scene;
+        scene.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, ttyPressedFilter);
+        scene.addEventFilter(javafx.scene.input.KeyEvent.KEY_TYPED, ttyTypedFilter);
     }
 
-    /** Remove the TTY key-capture handler installed by {@link #installTtyKeyCapture()}. */
+    private javafx.scene.Scene ttyKeyScene;
+    private final javafx.event.EventHandler<javafx.scene.input.KeyEvent> ttyPressedFilter = e -> {
+        if (shellTtyMode() && shellArea.isFocused()) {
+            forwardTtyKey(e);
+        }
+    };
+    private final javafx.event.EventHandler<javafx.scene.input.KeyEvent> ttyTypedFilter = e -> {
+        if (shellTtyMode() && shellArea.isFocused()) {
+            forwardTtyTyped(e);
+        }
+    };
+
+    /** Remove the TTY key-capture filters installed by {@link #installTtyKeyCapture()}. */
     private void removeTtyKeyCapture() {
-        javafx.scene.Scene scene = shellArea.getScene();
-        if (scene != null) {
-            scene.setOnKeyPressed(null);
+        if (ttyKeyScene != null) {
+            ttyKeyScene.removeEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, ttyPressedFilter);
+            ttyKeyScene.removeEventFilter(javafx.scene.input.KeyEvent.KEY_TYPED, ttyTypedFilter);
+            ttyKeyScene = null;
         }
     }
 
