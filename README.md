@@ -72,7 +72,11 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
 - Load **any** `kube.conf` file (file picker) — not just `~/.kube/config`.
 - Browse **contexts** and **namespaces** from the chosen config.
 - **12 resource kinds** in the sidebar: Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs,
-  Services, Ingresses, ConfigMaps, Secrets, PVCs, Nodes — Dashboard-style tables with status chips.
+  Services, Ingresses, ConfigMaps, Secrets, PVCs, Nodes — Dashboard-style tables with status chips. Plus
+  **Gateway API** (GatewayClasses, Gateways, HTTPRoutes, GRPCRoutes), read-only, shown only on clusters that have
+  the CRDs, with a **Status** tab: conditions (Accepted / Programmed / ResolvedRefs, with reason + message)
+  and clickable relations (a Gateway's attached routes, listeners and TLS secrets; a route's parent gateways
+  and backends).
 - **All-namespaces view** — pick **`✿ All namespaces`** to list a kind across every namespace in one
   table (a leading **Namespace** column), each namespace queried individually so it stays within
   namespace-scoped RBAC. Read-only in this mode (pick a row's namespace to act).
@@ -100,7 +104,7 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
 - **Log save-to-file** and a resizable details split.
 
 ### Views
-- **Topology** — a native, dependency-free **Ingress → Service → Workload → Pods** map with the *real*
+- **Topology** — a native, dependency-free **(Gateway →) Ingress / HTTPRoute → Service → Workload → Pods** map with the *real*
   edges (Service→Pod by label selector, Deployment→Pod by ownership via ReplicaSet). Click a node to
   focus + open details in place, click a line to trace a connection, drag to pan, Ctrl+scroll to zoom.
 - **Health scan** — one screen of "what's wrong right now": CrashLoop / ImagePull / OOM / Evicted /
@@ -323,7 +327,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.23.2**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
+Shipped through **v1.24.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a **Helm releases** view with a
@@ -345,6 +349,8 @@ Candidate next:
   on close, instead of opening a separate session); answer terminal queries (cursor-position / device
   attributes) and bracketed paste; double-width (CJK/emoji) characters; mouse reporting for `vim`/`htop`;
   reflow on resize; a copy-selection toolbar button.
+- **Gateway API, next:** health-scan checks (no address, unresolved backends, missing TLS secret), `ReferenceGrant` /
+  `TLSRoute` / `TCPRoute`. Other CRD families (cert-manager, External Secrets) plug into the same module.
 - Generic CRD support and macOS signing/notarization.
 
 ## 📖 Guides

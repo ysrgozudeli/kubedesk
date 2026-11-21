@@ -3,6 +3,23 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.24.0] - 2026-11-21
+
+### Added
+- **Gateway API support (read-only).** GatewayClasses, Gateways, HTTPRoutes and GRPCRoutes appear under
+  **Network**, only on clusters that have the Gateway API CRDs. They list with the columns you'd expect
+  (controller, class, address, listeners, hostnames, gateways, backends, Accepted / Programmed) and have YAML
+  and Events like any other kind. Delete and editing are off for these kinds.
+- **Status tab** for them: every condition with a ✓ / ✗ / ? mark, reason and message (so you can see *why* a
+  route isn't accepted or a backend didn't resolve), and clickable relations: a Gateway's class, listeners
+  (with attached-route counts), attached routes and TLS secrets; a route's parent gateways (and whether each
+  accepted it) and backends.
+- **Topology** now includes Gateway → HTTPRoute → Service edges. The Gateway column only appears when the
+  namespace has Gateways.
+
+### Changed
+- Internally, CRD-backed kinds go through a small reusable layer (`service/crd`), so more CRD families can
+  be added without touching the core switches.
 ## [1.23.2] - 2026-11-21
 
 ### Fixed

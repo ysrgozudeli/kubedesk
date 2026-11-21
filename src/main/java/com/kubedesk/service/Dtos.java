@@ -103,6 +103,23 @@ public final class Dtos {
     public record ResourceData(List<String> columns, List<List<String>> rows) {
     }
 
+    /** One status condition of a custom resource (e.g. Accepted=False, reason, message). */
+    public record CrdCondition(String scope, String type, String status, String reason, String message,
+                               String since) {
+    }
+
+    /**
+     * A resource related to the one being viewed, grouped under a heading ("Attached routes", "Backends"…).
+     * {@code kind} is the Kubernetes kind string (e.g. "Service", "HTTPRoute") so the UI can link to it;
+     * {@code namespace} is blank for cluster-scoped objects; {@code info} is a short extra line.
+     */
+    public record CrdRelation(String section, String kind, String namespace, String name, String info) {
+    }
+
+    /** The "Status" view of a CRD-backed resource: its conditions and how it connects to other objects. */
+    public record CrdDetails(List<CrdCondition> conditions, List<CrdRelation> relations) {
+    }
+
     /**
      * One Helm 3 release revision, decoded from its storage Secret
      * ({@code sh.helm.release.v1.<release>.v<n>}, type {@code helm.sh/release.v1}). Helm persists each

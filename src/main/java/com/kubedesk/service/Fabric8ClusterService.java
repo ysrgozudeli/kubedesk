@@ -226,6 +226,8 @@ public class Fabric8ClusterService implements ClusterService {
             case CRONJOBS -> cronJobs(client, namespace);
             case SERVICES -> services(client, namespace);
             case INGRESSES -> ingresses(client, namespace);
+            case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES ->
+                    com.kubedesk.service.crd.CrdSupport.list(client, kind.crd(), namespace);
             case CONFIGMAPS -> configMaps(client, namespace);
             case SECRETS -> secrets(client, namespace);
             case PVCS -> pvcs(client, namespace);
@@ -267,6 +269,32 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     @Override
+    public boolean apiGroupAvailable(String context, String group) {
+        try (KubernetesClient client = clientFor(context)) {
+            return com.kubedesk.service.crd.CrdSupport.groupAvailable(client, group);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    @Override
+    public Dtos.CrdDetails crdDetails(String context, String namespace, ResourceKind kind, String name) {
+        var crd = kind.crd();
+        if (crd == null || crd.inspector() == null) {
+            return new Dtos.CrdDetails(List.of(), List.of());
+        }
+        try (KubernetesClient client = clientFor(context)) {
+            GenericKubernetesResource obj = com.kubedesk.service.crd.CrdSupport.get(client, crd, namespace, name);
+            if (obj == null) {
+                return new Dtos.CrdDetails(List.of(), List.of());
+            }
+            return crd.inspector().inspect(client, obj);
+        } catch (Exception e) {
+            throw new ClusterException("Could not load status for " + name + ": " + rootMessage(e), e);
+        }
+    }
+
+    @Override
     public HealthSummary podHealth(String context, String namespace) {
         try (KubernetesClient client = clientFor(context)) {
             List<Pod> pods = client.pods().inNamespace(namespace).list().getItems();
@@ -301,6 +329,8 @@ public class Fabric8ClusterService implements ClusterService {
                 case CRONJOBS -> client.batch().v1().cronjobs().inNamespace(namespace).withName(name).get();
                 case SERVICES -> client.services().inNamespace(namespace).withName(name).get();
                 case INGRESSES -> client.network().v1().ingresses().inNamespace(namespace).withName(name).get();
+                case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES ->
+                        com.kubedesk.service.crd.CrdSupport.get(client, kind.crd(), namespace, name);
                 case CONFIGMAPS -> client.configMaps().inNamespace(namespace).withName(name).get();
                 case SECRETS -> client.secrets().inNamespace(namespace).withName(name).get();
                 case PVCS -> client.persistentVolumeClaims().inNamespace(namespace).withName(name).get();
@@ -872,6 +902,9 @@ public class Fabric8ClusterService implements ClusterService {
                         .watch(triggerWatcher(onChange, onClosed));
                 case INGRESSES -> client.network().v1().ingresses().inNamespace(namespace)
                         .watch(triggerWatcher(onChange, onClosed));
+                case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES ->
+                        com.kubedesk.service.crd.CrdSupport.watch(client, kind.crd(), namespace,
+                                this.<GenericKubernetesResource>triggerWatcher(onChange, onClosed));
                 case CONFIGMAPS -> client.configMaps().inNamespace(namespace)
                         .watch(triggerWatcher(onChange, onClosed));
                 case SECRETS -> client.secrets().inNamespace(namespace)
@@ -1008,6 +1041,8 @@ public class Fabric8ClusterService implements ClusterService {
                 case CRONJOBS -> client.batch().v1().cronjobs().inNamespace(namespace).withName(name).delete();
                 case SERVICES -> client.services().inNamespace(namespace).withName(name).delete();
                 case INGRESSES -> client.network().v1().ingresses().inNamespace(namespace).withName(name).delete();
+                case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES ->
+                        throw new ClusterException(kind.label() + " are read-only in KubeDesk.");
                 case CONFIGMAPS -> client.configMaps().inNamespace(namespace).withName(name).delete();
                 case SECRETS -> client.secrets().inNamespace(namespace).withName(name).delete();
                 case PVCS -> client.persistentVolumeClaims().inNamespace(namespace).withName(name).delete();
@@ -1677,6 +1712,7 @@ public class Fabric8ClusterService implements ClusterService {
             case CRONJOBS -> "CronJob";
             case SERVICES -> "Service";
             case INGRESSES -> "Ingress";
+            case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES -> kind.crd().kind();
             case CONFIGMAPS -> "ConfigMap";
             case SECRETS -> "Secret";
             case PVCS -> "PersistentVolumeClaim";
@@ -1713,6 +1749,42 @@ public class Fabric8ClusterService implements ClusterService {
                         edges.add(new TopoEdge(id, sid));
                     }
                 }
+            }
+
+            // Gateway API HTTPRoutes (tier 0, like Ingress) — edge to each backend Service. Best-effort:
+            // clusters without the CRDs (or without permission) just don't get these nodes.
+            try {
+                if (com.kubedesk.service.crd.CrdSupport.groupAvailable(client,
+                        com.kubedesk.service.crd.GatewayApi.GROUP)) {
+                    // Gateways sit in a column before the routes (tier -1 for now; shifted to 0 below).
+                    List<GenericKubernetesResource> gateways = com.kubedesk.service.crd.CrdSupport.items(client,
+                            com.kubedesk.service.crd.GatewayApi.GATEWAY, namespace);
+                    for (GenericKubernetesResource gw : gateways) {
+                        nodes.add(new TopoNode("Gateway/" + gw.getMetadata().getName(), "Gateway",
+                                gw.getMetadata().getName(), -1,
+                                com.kubedesk.service.crd.GatewayApi.GATEWAY.row().apply(gw).get(2)));
+                    }
+                    for (GenericKubernetesResource route : com.kubedesk.service.crd.CrdSupport.items(client,
+                            com.kubedesk.service.crd.GatewayApi.HTTP_ROUTE, namespace)) {
+                        String rname = route.getMetadata().getName();
+                        String id = "HTTPRoute/" + rname;
+                        nodes.add(new TopoNode(id, "HTTPRoute", rname, 0,
+                                com.kubedesk.service.crd.GatewayApi.hostnames(route)));
+                        for (GenericKubernetesResource gw : gateways) {
+                            if (com.kubedesk.service.crd.GatewayApi.routeAttachesTo(route, gw)) {
+                                edges.add(new TopoEdge("Gateway/" + gw.getMetadata().getName(), id));
+                            }
+                        }
+                        for (String svc : com.kubedesk.service.crd.GatewayApi.backendServices(route)) {
+                            String sid = "Service/" + svc;
+                            if (nodeIds.contains(sid)) {
+                                edges.add(new TopoEdge(id, sid));
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // optional layer
             }
 
             // Workloads (tier 2) — nodes only; their pods are connected below by ownership.
@@ -1784,6 +1856,11 @@ public class Fabric8ClusterService implements ClusterService {
                 }
             }
 
+            // Gateways were added at tier -1; when present, shift everything right by one column so the
+            // graph reads Gateway → HTTPRoute/Ingress → Service → Workload → Pod. No Gateways = no extra column.
+            if (nodes.stream().anyMatch(n -> n.tier() < 0)) {
+                nodes.replaceAll(n -> new TopoNode(n.id(), n.kind(), n.name(), n.tier() + 1, n.subtitle()));
+            }
             return new TopologyData(nodes, edges);
         } catch (Exception e) {
             throw new ClusterException("Could not build topology: " + rootMessage(e), e);
@@ -3415,7 +3492,7 @@ public class Fabric8ClusterService implements ClusterService {
     }
 
     /** Render an ISO-8601 creation timestamp as a compact age such as "5d", "3h" or "12m". */
-    static String age(String creationTimestamp) {
+    public static String age(String creationTimestamp) {
         if (creationTimestamp == null || creationTimestamp.isBlank()) {
             return "-";
         }

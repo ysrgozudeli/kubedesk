@@ -53,6 +53,18 @@ public interface ClusterService {
     Permissions permissions(String context, String namespace);
 
     /**
+     * Whether the cluster serves an API group (i.e. its CRDs are installed), e.g.
+     * {@code gateway.networking.k8s.io}. Used to show CRD-backed kinds only where they exist.
+     */
+    boolean apiGroupAvailable(String context, String group);
+
+    /**
+     * The Status view of a CRD-backed resource: its status conditions and the objects it connects to
+     * (e.g. a Gateway's attached routes, a route's backends). Empty for kinds that aren't CRD-backed.
+     */
+    Dtos.CrdDetails crdDetails(String context, String namespace, ResourceKind kind, String name);
+
+    /**
      * Fetch a resource collection as table-shaped data.
      *
      * @param namespace ignored for cluster-scoped kinds such as {@link ResourceKind#NODES}

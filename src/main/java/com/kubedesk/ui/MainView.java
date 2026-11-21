@@ -272,6 +272,10 @@ public class MainView extends BorderPane {
     private final Tab metricsTab = new Tab("Metrics");
     // Deployment rollout history (kubectl rollout history / undo).
     private final Tab historyTab = new Tab("History");
+    /** CRD-backed kinds (Gateway API…): status conditions + how the object connects to others. */
+    private final VBox statusBox = new VBox(10);
+    private final Tab statusTab = new Tab("Status");
+    private Button yamlApplyBtn;
     private final TableView<com.kubedesk.service.Dtos.DeploymentRevision> rolloutTable = new TableView<>();
     private final ListView<String> rolloutDiffList = new ListView<>();
     private final Label rolloutDiffHeader = new Label();
@@ -380,6 +384,8 @@ public class MainView extends BorderPane {
 
     // Proactive RBAC awareness: what the user can do in the current namespace (fail-open by default).
     private Permissions currentPermissions = Permissions.unknown();
+    /** Which optional API groups (CRD families, e.g. Gateway API) each cluster serves: "ctx|group" → yes/no. */
+    private final Map<String, Boolean> apiGroupAvailable = new HashMap<>();
     private String permKey; // context|namespace the current permissions were fetched for
     private final Map<String, Label> sectionLabels = new HashMap<>();
     private Button createBtn;
@@ -1015,7 +1021,9 @@ public class MainView extends BorderPane {
 
         // Resources — the most frequent jump.
         for (ResourceKind kind : ResourceKind.values()) {
-            items.add(new CommandPalette.Item("Resource", kind.label(), () -> selectKind(kind)));
+            if (kindAvailable(kind)) {
+                items.add(new CommandPalette.Item("Resource", kind.label(), () -> selectKind(kind)));
+            }
         }
         // Views.
         items.add(new CommandPalette.Item("View", "Overview", this::enterOverview));
@@ -2021,6 +2029,7 @@ public class MainView extends BorderPane {
             restartPod.setVisible(isPod && isControlledPod(row.getItem()));
             // Disable mutating actions the user isn't allowed to perform (RBAC-aware).
             String g = currentKind.apiGroup(), r = currentKind.resource();
+            delete.setVisible(!currentKind.crdBacked()); // CRD-backed kinds are read-only for now
             delete.setDisable(!currentPermissions.can(g, r, "delete"));
             restartPod.setDisable(!currentPermissions.can(g, r, "delete"));
             boolean canPatch = currentPermissions.can(g, r, "patch")
@@ -2103,6 +2112,11 @@ public class MainView extends BorderPane {
         metricsTab.setContent(buildMetricsPane());
         historyTab.setClosable(false);
         historyTab.setContent(buildRolloutPane());
+        statusBox.setPadding(new Insets(12));
+        javafx.scene.control.ScrollPane statusScroll = new javafx.scene.control.ScrollPane(statusBox);
+        statusScroll.setFitToWidth(true);
+        statusTab.setClosable(false);
+        statusTab.setContent(statusScroll);
         detailsTabs.getTabs().setAll(overviewTab, yamlTab, eventsTab);
         VBox.setVgrow(detailsTabs, Priority.ALWAYS);
 
@@ -2113,6 +2127,7 @@ public class MainView extends BorderPane {
     /** The YAML tab content: an editable manifest with Apply / Reload. */
     private VBox buildYamlPane() {
         Button apply = new Button("Apply");
+        yamlApplyBtn = apply;
         apply.getStyleClass().add("accent-button");
         apply.setOnAction(e -> applyYamlAction());
 
@@ -3095,6 +3110,14 @@ public class MainView extends BorderPane {
         // Build the tab set for this kind: Overview + YAML always; Events when applicable; Logs for pods.
         boolean isPod = kind == ResourceKind.PODS;
         detailsTabs.getTabs().setAll(overviewTab, yamlTab);
+        if (kind.crdBacked()) {
+            detailsTabs.getTabs().add(1, statusTab); // right after Overview
+        }
+        // CRD-backed kinds are read-only for now: no editing/Apply from the YAML tab.
+        yamlArea.setEditable(!kind.crdBacked());
+        if (yamlApplyBtn != null) {
+            yamlApplyBtn.setDisable(kind.crdBacked());
+        }
         if (kindHasEvents(kind)) {
             detailsTabs.getTabs().add(eventsTab);
         }
@@ -3131,6 +3154,10 @@ public class MainView extends BorderPane {
         runAsync(() -> service.describeYaml(ctx.name(), namespaceBox.getValue(), kind, name),
                 yamlArea::setText);
 
+        if (kind.crdBacked()) {
+            loadCrdStatus(ctx.name(), namespaceBox.getValue(), kind, name);
+        }
+
         // Events: the "why" behind a failing resource (skipped for kinds that don't emit events).
         if (kindHasEvents(kind)) {
             eventsArea.setText("Loading…");
@@ -3166,6 +3193,98 @@ public class MainView extends BorderPane {
             stopLogStream();
             stopMetricsPolling();
         }
+    }
+
+    // --- CRD status tab (Gateway API, …) ----------------------------------------------------
+
+    private void loadCrdStatus(String ctxName, String ns, ResourceKind kind, String name) {
+        statusBox.getChildren().setAll(muted("Loading…"));
+        runAsync(() -> service.crdDetails(ctxName, ns, kind, name), d -> {
+            // Ignore a late answer for a resource the user has already moved away from.
+            if (detailKind == kind && name.equals(currentDetailName)) {
+                renderCrdStatus(d, ns);
+            }
+        });
+    }
+
+    private Label muted(String text) {
+        Label l = new Label(text);
+        l.getStyleClass().add("muted");
+        l.setWrapText(true);
+        return l;
+    }
+
+    private Label sectionTitle(String text) {
+        Label l = new Label(text);
+        l.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
+        return l;
+    }
+
+    private void renderCrdStatus(com.kubedesk.service.Dtos.CrdDetails d, String currentNs) {
+        List<javafx.scene.Node> out = new ArrayList<>();
+
+        out.add(sectionTitle("Conditions"));
+        if (d.conditions().isEmpty()) {
+            out.add(muted("No status reported yet. This usually means no controller has processed the object "
+                    + "(for example, no Gateway controller is installed for this class)."));
+        }
+        for (var c : d.conditions()) {
+            boolean ok = "True".equals(c.status());
+            boolean bad = "False".equals(c.status());
+            Label glyph = new Label(ok ? "✓" : bad ? "✗" : "?");
+            glyph.setMinWidth(18);
+            glyph.setStyle("-fx-font-weight: bold; -fx-text-fill: "
+                    + (ok ? "#2e7d32" : bad ? "#d32f2f" : "#ed6c02") + ";");
+            Label title = new Label(c.type() + (c.scope().isBlank() ? "" : "  ·  " + c.scope()));
+            title.setStyle("-fx-font-weight: bold;");
+            VBox text = new VBox(2, title);
+            if (!c.reason().isBlank()) {
+                text.getChildren().add(muted(c.reason()));
+            }
+            if (!c.message().isBlank()) {
+                Label msg = new Label(c.message());
+                msg.setWrapText(true);
+                text.getChildren().add(msg);
+            }
+            HBox row = new HBox(8, glyph, text);
+            row.setAlignment(Pos.TOP_LEFT);
+            out.add(row);
+        }
+
+        java.util.Map<String, List<com.kubedesk.service.Dtos.CrdRelation>> bySection = new java.util.LinkedHashMap<>();
+        for (var r : d.relations()) {
+            bySection.computeIfAbsent(r.section(), k -> new ArrayList<>()).add(r);
+        }
+        for (var e : bySection.entrySet()) {
+            out.add(new Separator());
+            out.add(sectionTitle(e.getKey()));
+            for (var r : e.getValue()) {
+                ResourceKind target = r.kind().isBlank() ? null : resourceKindForEventKind(r.kind());
+                boolean sameNs = r.namespace().isBlank() || r.namespace().equals(currentNs);
+                javafx.scene.Node nameNode;
+                if (target != null && sameNs && kindAvailable(target)) {
+                    javafx.scene.control.Hyperlink link = new javafx.scene.control.Hyperlink(
+                            r.kind() + "  " + r.name());
+                    link.setOnAction(ev -> openDetails(target, r.name(), null, overviewTab));
+                    nameNode = link;
+                } else {
+                    String shown = (r.kind().isBlank() ? "" : r.kind() + "  ")
+                            + (!sameNs ? r.namespace() + "/" : "") + r.name();
+                    nameNode = new Label(shown);
+                }
+                HBox row = new HBox(10, nameNode);
+                row.setAlignment(Pos.CENTER_LEFT);
+                if (!r.info().isBlank()) {
+                    row.getChildren().add(muted(r.info()));
+                }
+                out.add(row);
+            }
+        }
+        if (d.relations().isEmpty()) {
+            out.add(new Separator());
+            out.add(muted("No related objects found."));
+        }
+        statusBox.getChildren().setAll(out);
     }
 
     // --- live pod metrics -------------------------------------------------------------------
@@ -3475,7 +3594,11 @@ public class MainView extends BorderPane {
         delete.getStyleClass().add("danger-item");
         delete.setOnAction(e -> deleteAction(kind, name));
         delete.setDisable(!currentPermissions.can(g, r, "delete"));
-        detailsActionsBtn.getItems().addAll(copyName, copyYaml, new SeparatorMenuItem(), delete);
+        if (kind.crdBacked()) { // read-only kinds: no Delete
+            detailsActionsBtn.getItems().addAll(copyName, copyYaml);
+        } else {
+            detailsActionsBtn.getItems().addAll(copyName, copyYaml, new SeparatorMenuItem(), delete);
+        }
     }
 
     /** Refresh whatever view is showing after a mutation (topology, health, or table). */
@@ -5302,6 +5425,7 @@ public class MainView extends BorderPane {
 
     /** Fetch what the user can do in this namespace (once per context+namespace), then adapt the UI. */
     private void refreshPermissions(ContextInfo ctx, String ns) {
+        refreshApiGroups(ctx);
         if (ctx == null || allNsMode.get() || ns == null || ns.isBlank()) {
             currentPermissions = Permissions.unknown(); // show everything (fail open)
             permKey = null;
@@ -5322,13 +5446,44 @@ public class MainView extends BorderPane {
         });
     }
 
+    /**
+     * Probe (once per cluster) which optional API groups — CRD families like Gateway API — the cluster
+     * serves, then re-evaluate the sidebar. Until answered, CRD-backed kinds stay hidden.
+     */
+    private void refreshApiGroups(ContextInfo ctx) {
+        if (ctx == null) {
+            return;
+        }
+        for (String group : com.kubedesk.service.crd.CrdModules.groups()) {
+            String key = ctx.name() + "|" + group;
+            if (apiGroupAvailable.containsKey(key)) {
+                continue;
+            }
+            apiGroupAvailable.put(key, false); // in flight; avoids duplicate probes
+            runAsync(() -> service.apiGroupAvailable(ctx.name(), group), yes -> {
+                apiGroupAvailable.put(key, yes);
+                updateNavVisibility();
+            });
+        }
+    }
+
+    /** False for a CRD-backed kind whose API group the current cluster doesn't serve. */
+    private boolean kindAvailable(ResourceKind kind) {
+        if (!kind.crdBacked()) {
+            return true;
+        }
+        ContextInfo ctx = contextBox.getValue();
+        return ctx != null && Boolean.TRUE.equals(apiGroupAvailable.get(ctx.name() + "|" + kind.apiGroup()));
+    }
+
     /** Hide resource kinds the user can't list; hide a section header when all its kinds are hidden. */
     private void updateNavVisibility() {
         for (var entry : navButtons.entrySet()) {
             ResourceKind kind = entry.getKey();
             ToggleButton btn = entry.getValue();
-            boolean visible = !kind.namespaced() // cluster-scoped kinds aren't covered by the namespace review
-                    || currentPermissions.can(kind.apiGroup(), kind.resource(), "list");
+            boolean visible = kindAvailable(kind)
+                    && (!kind.namespaced() // cluster-scoped kinds aren't covered by the namespace review
+                    || currentPermissions.can(kind.apiGroup(), kind.resource(), "list"));
             btn.setVisible(visible);
             btn.setManaged(visible);
         }
@@ -5343,7 +5498,7 @@ public class MainView extends BorderPane {
     private void updateCreateEnabled() {
         boolean canCreate = false;
         for (ResourceKind k : ResourceKind.values()) {
-            if (currentPermissions.can(k.apiGroup(), k.resource(), "create")) {
+            if (!k.crdBacked() && currentPermissions.can(k.apiGroup(), k.resource(), "create")) {
                 canCreate = true;
                 break;
             }
@@ -6267,7 +6422,7 @@ public class MainView extends BorderPane {
             case "Secret" -> ResourceKind.SECRETS;
             case "PersistentVolumeClaim" -> ResourceKind.PVCS;
             case "Node" -> ResourceKind.NODES;
-            default -> null;
+            default -> ResourceKind.forCrdKindName(kind); // CRD families (Gateway API, …)
         };
     }
 
@@ -6955,7 +7110,7 @@ public class MainView extends BorderPane {
             case "StatefulSet" -> ResourceKind.STATEFULSETS;
             case "DaemonSet" -> ResourceKind.DAEMONSETS;
             case "Pod" -> ResourceKind.PODS;
-            default -> null;
+            default -> ResourceKind.forCrdKindName(topoKind);
         };
     }
 
@@ -7018,7 +7173,11 @@ public class MainView extends BorderPane {
         MenuItem delete = new MenuItem("Delete");
         delete.getStyleClass().add("danger-item");
         delete.setOnAction(e -> deleteAction(kind, name));
-        menu.getItems().addAll(copyName, copyYaml, new SeparatorMenuItem(), delete);
+        if (kind.crdBacked()) {
+            menu.getItems().addAll(copyName, copyYaml);
+        } else {
+            menu.getItems().addAll(copyName, copyYaml, new SeparatorMenuItem(), delete);
+        }
         return menu;
     }
 
