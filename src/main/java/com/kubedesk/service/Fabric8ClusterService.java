@@ -655,9 +655,14 @@ public class Fabric8ClusterService implements ClusterService {
             }
         };
 
+        // redirectingInput() is what wires getInput() to the WebSocket: without it fabric8 leaves the
+        // input stream null and every keystroke silently vanishes. It must come first — it is the top
+        // of the TtyExec* fluent chain on ContainerResource.
         ExecWatch watch = client.pods().inNamespace(namespace).withName(pod)
                 .inContainer(container)
+                .redirectingInput()
                 .writingOutput(uiOut)
+                .writingError(uiOut)
                 .withTTY()
                 .usingListener(new ExecListener() {
                     @Override
@@ -725,10 +730,17 @@ public class Fabric8ClusterService implements ClusterService {
             public void sendRaw(byte[] data) {
                 try {
                     OutputStream stdin = watch.getInput();
+                    if (stdin == null) {
+                        onOutput.accept("\n[input stream unavailable - keystroke dropped]\n");
+                        return;
+                    }
                     stdin.write(data);
                     stdin.flush();
                 } catch (IOException e) {
                     onOutput.accept("\n[could not send input: " + e.getMessage() + "]\n");
+                } catch (NullPointerException e) {
+                    // getInput() returned null before the WebSocket was ready; surface it instead of vanishing.
+                    onOutput.accept("\n[input stream not ready - keystroke dropped]\n");
                 }
             }
 
