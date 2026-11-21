@@ -335,8 +335,8 @@ public class MainView extends BorderPane {
     private final Button shellConnectBtn = new Button("Connect");
     private final Button shellScriptBtn = new Button("Run script…");
     private final ToggleGroup shellModeGroup = new ToggleGroup();
-    private final RadioButton shellTtyRadio = new RadioButton("TTY");
-    private final RadioButton shellConsoleRadio = new RadioButton("Console");
+    private final RadioButton shellTtyRadio = new RadioButton("Terminal");
+    private final RadioButton shellConsoleRadio = new RadioButton("Simple");
     private TerminalGrid shellTerminal; // lazily created on first TTY connect
     private boolean ttyConnecting;      // route early PTY output (the first prompt) to the terminal
     private Button shellCopyBtn;
@@ -2340,10 +2340,10 @@ public class MainView extends BorderPane {
         shellTtyRadio.setToggleGroup(shellModeGroup);
         shellConsoleRadio.setToggleGroup(shellModeGroup);
         shellTtyRadio.setSelected(true);
-        shellTtyRadio.setTooltip(new Tooltip("A real PTY: live prompt, arrow-key history, and interactive "
+        shellTtyRadio.setTooltip(new Tooltip("A real terminal (TTY): live prompt, arrow-key history, and interactive "
                 + "programs like vim, top and less. Click the terminal to type."));
         shellConsoleRadio.setTooltip(new Tooltip("Type whole commands in the line below and press Enter. "
-                + "No TTY — interactive programs won't work, but it's the simplest way to run a quick "
+                + "Interactive programs won't work, but it's the simplest way to run a quick "
                 + "command."));
         // TTY is the default; the radio order matches.
         HBox modeGroup = new HBox(6, shellTtyRadio, shellConsoleRadio);
@@ -2376,7 +2376,8 @@ public class MainView extends BorderPane {
 
         Button shellDetachBtn = new Button("⧉ Detach");
         shellDetachBtn.getStyleClass().add("icon-button");
-        shellDetachBtn.setTooltip(new Tooltip("Open the shell in a separate window (keeps the session alive)"));
+        shellDetachBtn.setTooltip(new Tooltip("Open a new shell for this pod in its own window. It's a separate session: "
+                + "this tab's session isn't moved, and closing the window ends only that one."));
         shellDetachBtn.setOnAction(e -> detachShell());
 
         // A FlowPane wraps onto a second row on narrow windows instead of clipping/distorting.
@@ -2509,7 +2510,7 @@ public class MainView extends BorderPane {
         boolean tty = shellTtyRadio.isSelected();
         shellArea.appendText("Connecting to " + pod
                 + (container != null ? " [" + container + "]" : "")
-                + (tty ? " (TTY)" : " (console)") + " …\n");
+                + (tty ? " (terminal)" : " (simple)") + " …\n");
         shellConnectBtn.setDisable(true);
 
         final boolean wantTty = tty;

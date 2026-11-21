@@ -699,9 +699,9 @@
 
 /* TTY / Console mode toggle in the Shell toolbar. */
 .shell-mode {
-    -fx-background-color: derive(-fx-base, 4%);
+    -fx-background-color: #f3f5f8;
     -fx-background-radius: 4;
-    -fx-border-color: derive(-fx-base, -8%);
+    -fx-border-color: #e3e6ea;
     -fx-border-width: 1;
     -fx-border-radius: 4;
 }

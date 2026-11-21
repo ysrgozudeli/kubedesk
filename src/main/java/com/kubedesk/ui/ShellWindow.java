@@ -43,8 +43,8 @@ public final class ShellWindow {
     private TextArea consoleArea;
     private TextField consoleInput;
     private final ToggleGroup modeGroup = new ToggleGroup();
-    private final RadioButton ttyRadio = new RadioButton("TTY");
-    private final RadioButton consoleRadio = new RadioButton("Console");
+    private final RadioButton ttyRadio = new RadioButton("Terminal");
+    private final RadioButton consoleRadio = new RadioButton("Simple");
 
     private ExecSession execSession;
     private final ExecutorService pool = Executors.newSingleThreadExecutor();
@@ -86,8 +86,8 @@ public final class ShellWindow {
             }
         });
 
-        ttyRadio.setTooltip(new Tooltip("A real terminal: live prompt, history, vim/top/less. Click it to type."));
-        consoleRadio.setTooltip(new Tooltip("Type whole commands in the line below. No TTY."));
+        ttyRadio.setTooltip(new Tooltip("A real terminal (TTY): live prompt, history, vim/top/less. Click it to type."));
+        consoleRadio.setTooltip(new Tooltip("Type whole commands in the line below. Interactive programs won't work."));
         HBox containerGroup = new HBox(6, new Label("Container:"), containerBox);
         containerGroup.setAlignment(Pos.CENTER_LEFT);
         statusLabel.getStyleClass().add("muted");

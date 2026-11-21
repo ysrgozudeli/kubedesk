@@ -3,17 +3,26 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.23.1] - 2026-11-21
+
+### Changed
+- The Shell mode toggle is now **Terminal / Simple** (was TTY / Console), with Terminal the default.
+- The Detach tooltip says what it does: it opens a separate shell session in its own window.
+
+### Fixed
+- CSS warnings at startup from the Shell mode toggle's styling.
+
 ## [1.23.0] - 2026-11-21
 
 ### Added
-- **Real terminal in the pod Shell tab.** TTY is now the default: a live prompt, bash history and arrow
+- **Real terminal in the pod Shell tab.** Terminal (TTY) is now the default: a live prompt, bash history and arrow
   keys, Tab completion, Ctrl+C / Ctrl+L, and full-screen programs (`vim`, `top`, `less`) with colours,
   256-colour and true-colour output. The terminal fits itself to the window and tells the pod its size,
   so it redraws correctly on resize.
 - **Select and copy.** Drag to select (double-click for a word), Ctrl+C copies when text is selected
   (otherwise it still sends ^C), Ctrl+Shift+C also copies, Ctrl+V / Shift+Insert / right-click pastes.
   Mouse-wheel scrollback of up to 5000 lines.
-- **Detach the shell** into its own window (**⧉ Detach**), keeping its own session. A **Console** mode
+- **Detach the shell** into its own window (**⧉ Detach**), keeping its own session. A **Simple** mode
   (whole lines, no TTY) is still one click away.
 
 ### Changed

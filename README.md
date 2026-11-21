@@ -149,7 +149,7 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
 - **Pod shell** — a real terminal (TTY) into any container, the default: live prompt, bash history and
   arrow keys, Tab completion, `vim` / `top` / `less`, colours, scrollback, mouse select + copy/paste, and
   it resizes with the window. Detach it into its own window, or switch to the simpler line-by-line
-  **Console** mode.
+  **Simple** mode.
 - **Port-forwarding** — open a tunnel to a pod port at `localhost:<port>`; a toolbar manager lists
   active tunnels (Copy / Open / Stop). Tunnels are persisted and offered for restore on next launch.
 - **Embedded kubectl console** (☰ menu, or **Ctrl/Cmd+K**) — a terminal drawer that runs *your own*
@@ -323,7 +323,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.21.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
+Shipped through **v1.23.1**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a **Helm releases** view with a
@@ -339,6 +339,10 @@ Candidate next:
 - **Multi-pod log tailing** (stern-style — one merged stream across a Deployment's pods; single-pod
   follow + detachable windows already shipped) and optional Loki/cloud-logging integration.
 - **Headless health CLI** for CI/CD gates (reuses `ClusterService.healthCheck`).
+- **Shell, next steps.** Make **Detach** a true move (hand the live session and screen to the window and back
+  on close, instead of opening a separate session); answer terminal queries (cursor-position / device
+  attributes) and bracketed paste; double-width (CJK/emoji) characters; mouse reporting for `vim`/`htop`;
+  reflow on resize; a copy-selection toolbar button.
 - Generic CRD support and macOS signing/notarization.
 
 ## 📖 Guides
