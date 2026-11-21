@@ -624,15 +624,40 @@ public class Fabric8ClusterService implements ClusterService {
                                     String shell, Consumer<String> onOutput, Runnable onClosed) throws Exception {
         CompletableFuture<String> failed = new CompletableFuture<>();
         AtomicBoolean missing = new AtomicBoolean(false);
-        // Decoders must survive a single-thread read of getOutput(); the reader loop is the only writer.
-        final java.nio.ByteBuffer inBuf = java.nio.ByteBuffer.allocate(2048);
-        final java.nio.CharBuffer outBuf = java.nio.CharBuffer.allocate(2048);
-        final java.nio.charset.CharsetDecoder utf8 = StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
-                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
+        // Fires onClosed exactly once even when onExit and onClose both fire.
+        final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        // TTY requires an explicit output sink (fabric8 rejects the op otherwise). Route it through a
+        // simple OutputStream that forwards decoded UTF-8 to the UI callback.
+        OutputStream uiOut = new OutputStream() {
+            private final java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(2048);
+            private final java.nio.CharBuffer cbuf = java.nio.CharBuffer.allocate(2048);
+            private final java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
+
+            @Override
+            public void write(int b) {
+                write(new byte[]{(byte) b}, 0, 1);
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) {
+                buf.clear();
+                buf.put(b, off, len);
+                buf.flip();
+                cbuf.clear();
+                dec.reset();
+                dec.decode(buf, cbuf, true);
+                dec.flush(cbuf);
+                cbuf.flip();
+                onOutput.accept(cbuf.toString());
+            }
+        };
 
         ExecWatch watch = client.pods().inNamespace(namespace).withName(pod)
                 .inContainer(container)
+                .writingOutput(uiOut)
                 .withTTY()
                 .usingListener(new ExecListener() {
                     @Override
@@ -652,8 +677,8 @@ public class Fabric8ClusterService implements ClusterService {
                         }
                         if (!failed.isDone()) {
                             failed.complete("exited with code " + code + (detail.isEmpty() ? "" : ": " + detail));
-                        } else {
-                            // Live session: the shell exited. Surface it and end the session.
+                        } else if (closed.compareAndSet(false, true)) {
+                            // Live session: the shell exited. Surface it and end the session once.
                             if (code != 0) {
                                 onOutput.accept("\n[shell exited with code " + code + "]\n");
                             }
@@ -663,11 +688,11 @@ public class Fabric8ClusterService implements ClusterService {
 
                     @Override
                     public void onClose(int code, String reason) {
-                        if (failed.isDone()) {
-                            onClosed.run();
-                        } else {
+                        if (!failed.isDone()) {
                             failed.complete("connection closed"
                                     + (reason != null && !reason.isBlank() ? ": " + reason : ""));
+                        } else if (closed.compareAndSet(false, true)) {
+                            onClosed.run();
                         }
                     }
                 })
@@ -676,10 +701,7 @@ public class Fabric8ClusterService implements ClusterService {
         // A PTY has no handshake: the moment exec() returns the WebSocket is up. But we still want to
         // know whether the shell *exists* — so we wait a beat for an early "not found" exit. If one
         // arrives within 3s we treat it as a shell miss and try the next one. Otherwise hand it over.
-        //
-        // The output reader thread decodes the merged stream continuously; it runs until the session
-        // closes. It is started lazily only once we've decided this shell is good, so a failed attempt
-        // never leaks a thread.
+        // Output is streamed to the UI by fabric8 via the uiOut sink above.
         boolean shellMissingEarly;
         try {
             String early = failed.get(3, TimeUnit.SECONDS);
@@ -692,32 +714,6 @@ public class Fabric8ClusterService implements ClusterService {
         if (shellMissingEarly) {
             return new ExecAttempt(null, failed.join(), missing.get());
         }
-
-        // Reader: decode the PTY's merged byte stream and push it to the UI until the watch closes.
-        Thread reader = new Thread(() -> {
-            try {
-                InputStream in = watch.getOutput();
-                while (true) {
-                    int n = in.read(inBuf.array(), inBuf.position(), inBuf.limit());
-                    if (n < 0) {
-                        break;
-                    }
-                    inBuf.limit(inBuf.position() + n);
-                    inBuf.flip();
-                    outBuf.clear();
-                    utf8.reset();
-                    utf8.decode(inBuf, outBuf, false);
-                    outBuf.flip();
-                    onOutput.accept(outBuf.toString());
-                }
-            } catch (IOException ignored) {
-                // Stream closed — the session is ending.
-            } finally {
-                onClosed.run();
-            }
-        }, "kubedesk-tty-reader-" + pod);
-        reader.setDaemon(true);
-        reader.start();
 
         ExecSession session = new ExecSession() {
             @Override
