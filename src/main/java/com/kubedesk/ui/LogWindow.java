@@ -246,6 +246,7 @@ public final class LogWindow implements OpenWindows.Handle {
         return state;
     }
     @Override public void focus() {
+        if (!stage.isShowing()) return; // never resurrect a closed window
         if (stage.isIconified()) stage.setIconified(false);
         stage.show();
         stage.toFront();

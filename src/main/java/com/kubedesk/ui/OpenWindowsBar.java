@@ -1,6 +1,7 @@
 package com.kubedesk.ui;
 
 import javafx.beans.binding.Bindings;
+import javafx.beans.value.ChangeListener;
 import javafx.collections.ListChangeListener;
 import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
@@ -15,6 +16,10 @@ import com.kubedesk.ui.OpenWindows.State;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+
 /**
  * A horizontal strip of chips, one per open detached window (log or shell). Sits just above the
  * status bar in the main window. Hidden entirely when no windows are open.
@@ -26,6 +31,10 @@ public final class OpenWindowsBar extends HBox {
     private final HBox chipBox;
     private final ScrollPane scrollPane;
     private final Button closeAllBtn;
+    /** Chip + state listener per window, so chips are added/removed incrementally and listeners detached. */
+    private final Map<Handle, Chip> chips = new HashMap<>();
+
+    private record Chip(HBox node, ChangeListener<State> listener) { }
 
     public OpenWindowsBar(OpenWindows registry) {
         this.registry = registry;
@@ -53,7 +62,7 @@ public final class OpenWindowsBar extends HBox {
         closeAllBtn.getStyleClass().add("icon-button");
         closeAllBtn.setTooltip(new Tooltip("Close all detached windows"));
         closeAllBtn.setOnAction(e -> {
-            for (Handle h : windows) {
+            for (Handle h : new ArrayList<>(windows)) { // close() unregisters -> mutates the list
                 h.close();
             }
         });
@@ -69,43 +78,57 @@ public final class OpenWindowsBar extends HBox {
                 () -> windows.size() >= 2, windows));
         closeAllBtn.managedProperty().bind(closeAllBtn.visibleProperty());
 
-        windows.addListener((ListChangeListener<Handle>) change -> rebuildChips());
-        rebuildChips();
-    }
-
-    private void rebuildChips() {
-        chipBox.getChildren().clear();
+        windows.addListener((ListChangeListener<Handle>) change -> {
+            while (change.next()) {
+                for (Handle h : change.getRemoved()) {
+                    Chip c = chips.remove(h);
+                    if (c != null) {
+                        h.stateProperty().removeListener(c.listener());
+                        chipBox.getChildren().remove(c.node());
+                    }
+                }
+                for (Handle h : change.getAddedSubList()) {
+                    Chip c = buildChip(h);
+                    chips.put(h, c);
+                    chipBox.getChildren().add(c.node());
+                }
+            }
+        });
         for (Handle h : windows) {
-            chipBox.getChildren().add(buildChip(h));
+            Chip c = buildChip(h);
+            chips.put(h, c);
+            chipBox.getChildren().add(c.node());
         }
     }
 
-    private HBox buildChip(Handle h) {
+    private Chip buildChip(Handle h) {
         String glyph = h.kind() == OpenWindows.Kind.LOGS ? "📜" : "⌨";
 
         Label dot = new Label("●");
         dot.getStyleClass().add("status-dot");
         dot.getStyleClass().add(dotClass(h.stateProperty().get()));
         dot.setTooltip(new Tooltip(stateLabel(h.stateProperty().get())));
-        h.stateProperty().addListener((obs, old, s) -> {
+        ChangeListener<State> listener = (obs, old, s) -> {
             dot.getStyleClass().removeAll("dot-ok", "dot-warn", "dot-bad", "dot-neutral");
             dot.getStyleClass().add(dotClass(s));
             dot.setTooltip(new Tooltip(stateLabel(s)));
-        });
+        };
+        h.stateProperty().addListener(listener);
 
         Label name = new Label(h.title());
         name.setMaxWidth(160);
-        name.setStyle("-fx-text-overflow: ellipsis;");
 
         Button close = new Button("✕");
         close.getStyleClass().add("icon-button");
         close.setTooltip(new Tooltip("Close window"));
         close.setOnAction(e -> h.close());
+        // Don't let the click bubble to the chip, whose handler would focus (re-show) the closed window.
+        close.addEventHandler(javafx.scene.input.MouseEvent.MOUSE_CLICKED, javafx.event.Event::consume);
 
         HBox chip = new HBox(6, new Label(glyph), dot, name, close);
         chip.getStyleClass().add("ow-chip");
         chip.setAlignment(Pos.CENTER_LEFT);
-        Tooltip.install(chip, new Tooltip(h.kind().name().toLowerCase() + " · " +h.subtitle()));
+        Tooltip.install(chip, new Tooltip(h.kind().name().toLowerCase() + " · " + h.subtitle()));
         chip.setOnMouseClicked(e -> {
             if (e.getButton() == MouseButton.MIDDLE) {
                 h.close();
@@ -114,7 +137,7 @@ public final class OpenWindowsBar extends HBox {
             }
         });
 
-        return chip;
+        return new Chip(chip, listener);
     }
 
     private static String dotClass(State s) {

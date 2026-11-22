@@ -105,7 +105,8 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   Plus **filter lines**, a **Previous** toggle for the prior crashed container's logs
   (`kubectl logs --previous`), **Timestamps**, wrap, clear, and a pod-status dot.
 - **Detachable log window** — **⧉ Detach** pops a pod's logs into its own window that keeps streaming
-  while you work elsewhere; open several at once to watch multiple pods side by side.
+  while you work elsewhere; open several at once to watch multiple pods side by side. A bar above the status bar lists every open log/shell window
+  (with a live/idle/ended dot): click to bring one to the front, ✕ to close it.
 - **Log save-to-file** and a resizable details split.
 
 ### Views
@@ -335,7 +336,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.26.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
+Shipped through **v1.27.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a **Helm releases** view with a
