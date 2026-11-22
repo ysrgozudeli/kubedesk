@@ -186,6 +186,7 @@ public final class ShellWindow implements OpenWindows.Handle {
 
     @Override public OpenWindows.Kind kind() { return OpenWindows.Kind.SHELL; }
     @Override public String title() { return pod; }
+    @Override public String key() { return OpenWindows.key(OpenWindows.Kind.SHELL, ctxName, namespace, pod); }
     @Override public String subtitle() { return ctxName + " / " + namespace; }
     @Override public ReadOnlyObjectProperty<OpenWindows.State> stateProperty() {
         return state;

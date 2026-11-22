@@ -2512,6 +2512,10 @@ public class MainView extends BorderPane {
         if (ctx == null || shellPod == null) {
             return;
         }
+        if (openWindows.focusExisting(OpenWindows.key(OpenWindows.Kind.SHELL, ctx.name(),
+                namespaceBox.getValue(), shellPod))) {
+            return; // already detached: just bring it forward
+        }
         new ShellWindow(service, ctx.name(), namespaceBox.getValue(), shellPod,
                 shellContainerBox.getValue(), openWindows).show();
     }
@@ -3629,6 +3633,10 @@ public class MainView extends BorderPane {
         if (ctx == null || currentLogPod == null) {
             status("Open a pod's logs first, then detach.");
             return;
+        }
+        if (openWindows.focusExisting(OpenWindows.key(OpenWindows.Kind.LOGS, ctx.name(),
+                namespaceBox.getValue(), currentLogPod))) {
+            return; // already detached: just bring it forward
         }
         int tail = tailBox.getValue() != null ? tailBox.getValue() : 500;
         new LogWindow(service, ctx.name(), namespaceBox.getValue(), currentLogPod,

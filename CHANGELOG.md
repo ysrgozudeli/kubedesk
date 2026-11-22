@@ -10,7 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   the main window: kind icon, pod name and a state dot (green live / grey idle / red ended). Click a chip to
   bring that window to the front (restoring it if minimised); ✕ or middle-click closes it; **Close all**
   appears when two or more are open. The bar is hidden when nothing is detached, scrolls horizontally when
-  there are many, and closing the main window now releases every detached stream and shell cleanly.
+  there are many, Detaching a pod's logs (or shell) that is already detached just focuses the existing window — one per view per pod — and closing the main window now releases every detached stream and shell cleanly.
 
 ## [1.26.0] - 2026-11-22
 
