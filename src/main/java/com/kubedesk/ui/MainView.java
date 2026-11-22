@@ -404,6 +404,7 @@ public class MainView extends BorderPane {
     private final Button base64Btn = new Button("⇄ Base64…");
     private final Button jwtBtn = new Button("🎫 JWT…");
     private final Button certBtn = new Button("🔐 Cert…");
+    private final Button sealCertBtn = new Button("🔑 Seal cert…");
     // Contextual CronJob tool — shown only while browsing the CronJobs list.
     private final Button cronBtn = new Button("⏰ Schedule…");
 
@@ -870,6 +871,12 @@ public class MainView extends BorderPane {
         certBtn.setVisible(false);
         certBtn.setManaged(false);
 
+        sealCertBtn.setTooltip(new Tooltip("Fetch the Sealed Secrets controller's PUBLIC sealing certificate "
+                + "to copy or save (like kubeseal --fetch-cert). Safe to share — it can only encrypt."));
+        sealCertBtn.setOnAction(e -> openSealCertDialog());
+        sealCertBtn.setVisible(false);
+        sealCertBtn.setManaged(false);
+
         cronBtn.setTooltip(new Tooltip("Explain a CronJob schedule in plain English and list the next "
                 + "run times"));
         cronBtn.setOnAction(e -> openCronDialog(null));
@@ -917,7 +924,7 @@ public class MainView extends BorderPane {
         // clipping). Right: search + actions + menu, pinned to the right edge.
         FlowPane left = new FlowPane(10, 8, loadConfigBtn, kubeConfigLabel, ctxGroup, nsGroup);
         left.setAlignment(Pos.CENTER_LEFT);
-        HBox right = new HBox(10, searchField, refresh, liveBox, sealSecretBtn, base64Btn, jwtBtn, certBtn,
+        HBox right = new HBox(10, searchField, refresh, liveBox, sealSecretBtn, sealCertBtn, base64Btn, jwtBtn, certBtn,
                 cronBtn, pfButton, settingsBtn, appMenu);
         right.setAlignment(Pos.CENTER_RIGHT);
         right.setMinWidth(Region.USE_PREF_SIZE); // never let the right cluster shrink below its controls
@@ -1976,6 +1983,10 @@ public class MainView extends BorderPane {
         MenuItem seal = new MenuItem("🔒 Seal as SealedSecret…");
         seal.setOnAction(e -> sealExistingSecret(resourceName(row.getItem())));
 
+        // SealedSecrets: re-seal with edited values (pre-filled from the unsealed Secret).
+        MenuItem reseal = new MenuItem("🔒 Re-seal / edit…");
+        reseal.setOnAction(e -> resealSealedSecret(resourceName(row.getItem())));
+
         // CronJobs: explain the schedule and show the next run times.
         MenuItem explainSchedule = new MenuItem("⏰ Explain schedule…");
         explainSchedule.setOnAction(e -> openCronDialog(cellValue(row.getItem(), "Schedule")));
@@ -2004,7 +2015,7 @@ public class MainView extends BorderPane {
         delete.setOnAction(e -> deleteAction(currentKind, resourceName(row.getItem())));
 
         ContextMenu menu = new ContextMenu(details, yaml, events, logs, portForward,
-                goToOwner, goToService, showPods, seal, explainSchedule,
+                goToOwner, goToService, showPods, seal, reseal, explainSchedule,
                 new SeparatorMenuItem(), copyName, copyYaml,
                 new SeparatorMenuItem(), restart, restartPod, scale, history, delete);
         menu.setOnShowing(e -> {
@@ -2022,6 +2033,7 @@ public class MainView extends BorderPane {
                     || currentKind == ResourceKind.DAEMONSETS
                     || currentKind == ResourceKind.JOBS);
             seal.setVisible(currentKind == ResourceKind.SECRETS);
+            reseal.setVisible(currentKind == ResourceKind.SEALEDSECRETS);
             explainSchedule.setVisible(currentKind == ResourceKind.CRONJOBS);
             boolean isDeployment = currentKind == ResourceKind.DEPLOYMENTS;
             restart.setVisible(isDeployment);
@@ -4139,6 +4151,151 @@ public class MainView extends BorderPane {
     }
 
     /**
+     * Fetch the Sealed Secrets controller's public sealing certificate so it can be copied or saved
+     * (the equivalent of {@code kubeseal --fetch-cert}). It's a public key: it can encrypt but never
+     * decrypt, so sharing it is safe — the fingerprint lets you verify you got the right one.
+     */
+    private void openSealCertDialog() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            status("Select a context first.");
+            return;
+        }
+        javafx.stage.Window owner = getScene() != null ? getScene().getWindow() : null;
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("Sealed Secrets certificate");
+        dialog.setResizable(true);
+        if (owner != null) {
+            dialog.initOwner(owner);
+        }
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        Label intro = new Label("The controller's public sealing certificate. It can only encrypt — it "
+                + "cannot decrypt anything — so it's safe to share or commit. Use it to seal offline with "
+                + "kubeseal --cert, or in CI. Only the controller's private key (kept in the cluster) can "
+                + "decrypt.");
+        intro.setWrapText(true);
+        intro.getStyleClass().add("muted");
+
+        TextField ctrlNs = new TextField("kube-system");
+        ctrlNs.setPrefColumnCount(12);
+        TextField ctrlName = new TextField("sealed-secrets-controller");
+        ctrlName.setPrefColumnCount(20);
+        Button fetchBtn = new Button("Fetch");
+        HBox fetchRow = new HBox(8, new Label("Controller ns:"), ctrlNs, new Label("name:"), ctrlName, fetchBtn);
+        fetchRow.setAlignment(Pos.CENTER_LEFT);
+
+        Label info = new Label("Connecting to the Sealed Secrets controller…");
+        info.setWrapText(true);
+        info.getStyleClass().add("muted");
+
+        TextArea pemArea = new TextArea();
+        pemArea.setEditable(false);
+        pemArea.getStyleClass().add("yaml-area");
+        pemArea.setPrefRowCount(10);
+
+        Button copyBtn = new Button("Copy PEM");
+        copyBtn.setDisable(true);
+        copyBtn.setOnAction(e -> {
+            copyToClipboard(pemArea.getText());
+            status("Sealing certificate copied to clipboard.");
+        });
+        Button saveBtn = new Button("Save as .pem…");
+        saveBtn.setDisable(true);
+        saveBtn.setOnAction(e -> {
+            FileChooser fc = new FileChooser();
+            fc.setTitle("Save sealing certificate");
+            fc.setInitialFileName("sealed-secrets-cert.pem");
+            fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("PEM", "*.pem"));
+            File f = fc.showSaveDialog(owner);
+            if (f != null) {
+                try {
+                    Files.writeString(f.toPath(), pemArea.getText());
+                    status("Saved certificate to " + f.getName());
+                } catch (Exception ex) {
+                    status("Could not save: " + ex.getMessage());
+                }
+            }
+        });
+
+        Runnable doFetch = () -> {
+            info.setText("Connecting to the Sealed Secrets controller…");
+            info.setStyle("-fx-text-fill: #6b7280;");
+            pemArea.clear();
+            copyBtn.setDisable(true);
+            saveBtn.setDisable(true);
+            runAsync(() -> {
+                try {
+                    return service.fetchSealedSecretCert(ctx.name(), ctrlNs.getText().trim(),
+                            ctrlName.getText().trim());
+                } catch (RuntimeException ex) {
+                    return new com.kubedesk.service.Dtos.SealedSecretCert("", "", "# " + ex.getMessage());
+                }
+            }, cert -> {
+                if (cert.pem().startsWith("# ")) {
+                    info.setText("✗ " + cert.pem().substring(2));
+                    info.setStyle("-fx-text-fill: #b91c1c;");
+                    return;
+                }
+                try {
+                    java.security.cert.X509Certificate x = (java.security.cert.X509Certificate)
+                            java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(
+                                    new java.io.ByteArrayInputStream(cert.pem().getBytes(StandardCharsets.UTF_8)));
+                    byte[] fp = java.security.MessageDigest.getInstance("SHA-256").digest(x.getEncoded());
+                    String fpHex = java.util.HexFormat.ofDelimiter(":").withUpperCase().formatHex(fp);
+                    ctrlNs.setText(cert.namespace());
+                    ctrlName.setText(cert.name());
+                    pemArea.setText(cert.pem());
+                    info.setText("✓ From " + cert.namespace() + "/" + cert.name()
+                            + "\nExpires: " + x.getNotAfter() + "\nSHA-256: " + fpHex);
+                    info.setStyle("-fx-text-fill: #15803d;");
+                    copyBtn.setDisable(false);
+                    saveBtn.setDisable(false);
+                } catch (Exception ex) {
+                    pemArea.setText(cert.pem());
+                    info.setText("Fetched, but could not parse the certificate: " + ex.getMessage());
+                    copyBtn.setDisable(false);
+                    saveBtn.setDisable(false);
+                }
+            });
+        };
+        fetchBtn.setOnAction(e -> doFetch.run());
+
+        VBox body = new VBox(10, intro, fetchRow, info, pemArea, new HBox(8, copyBtn, saveBtn));
+        body.setPadding(new Insets(12));
+        body.setPrefWidth(640);
+        dialog.getDialogPane().setContent(body);
+        doFetch.run();
+        dialog.show();
+    }
+
+    /**
+     * Re-seal / edit a SealedSecret. Its own values are encrypted and unreadable, but the controller
+     * has already unsealed it into a Secret of the same name — load that to pre-fill the Seal dialog.
+     * If that Secret can't be read (not unsealed yet, or no RBAC), open an empty dialog instead.
+     */
+    private void resealSealedSecret(String name) {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            return;
+        }
+        String ns = effectiveNamespace();
+        status("Reading unsealed Secret " + name + "…");
+        runAsync(() -> {
+            try {
+                return service.readSecret(ctx.name(), ns, name);
+            } catch (RuntimeException ex) {
+                return null;
+            }
+        }, content -> {
+            if (content == null) {
+                status("No readable Secret named " + name + " — starting an empty Seal dialog.");
+            }
+            openSealSecretDialog(content);
+        });
+    }
+
+    /**
      * A small local Base64 encode/decode utility. Everything happens on this machine — the point is to
      * decode a Secret's Base64 value (or encode one to paste into a Secret) without sending it to a
      * website. The Secret view keeps showing values Base64-encoded, exactly as Kubernetes stores them.
@@ -5728,10 +5885,14 @@ public class MainView extends BorderPane {
         }
         // The Secret tools (Seal…, Base64…, JWT…, Cert…) belong only to the Secrets list view.
         boolean onSecrets = mode == ViewMode.RESOURCE && currentKind == ResourceKind.SECRETS;
-        sealSecretBtn.setVisible(onSecrets);
-        sealSecretBtn.setManaged(onSecrets);
-        base64Btn.setVisible(onSecrets);
-        base64Btn.setManaged(onSecrets);
+        // Seal… (create a new SealedSecret) and Base64 are also useful from the SealedSecrets list.
+        boolean onSealed = mode == ViewMode.RESOURCE && currentKind == ResourceKind.SEALEDSECRETS;
+        sealSecretBtn.setVisible(onSecrets || onSealed);
+        sealSecretBtn.setManaged(onSecrets || onSealed);
+        sealCertBtn.setVisible(onSecrets || onSealed);
+        sealCertBtn.setManaged(onSecrets || onSealed);
+        base64Btn.setVisible(onSecrets || onSealed);
+        base64Btn.setManaged(onSecrets || onSealed);
         jwtBtn.setVisible(onSecrets);
         jwtBtn.setManaged(onSecrets);
         certBtn.setVisible(onSecrets);
@@ -7298,6 +7459,11 @@ public class MainView extends BorderPane {
             MenuItem seal = new MenuItem("🔒 Seal as SealedSecret…");
             seal.setOnAction(e -> sealExistingSecret(name));
             menu.getItems().add(seal);
+        }
+        if (kind == ResourceKind.SEALEDSECRETS) {
+            MenuItem reseal = new MenuItem("🔒 Re-seal / edit…");
+            reseal.setOnAction(e -> resealSealedSecret(name));
+            menu.getItems().add(reseal);
         }
 
         MenuItem copyName = new MenuItem("Copy name");

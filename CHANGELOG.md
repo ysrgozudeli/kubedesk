@@ -3,6 +3,16 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.28.0] - 2026-11-22
+
+### Added
+- **SealedSecrets pane tools.** The SealedSecrets list now has **🔒 Seal…** (create a new SealedSecret) and
+  **⇄ Base64…** in the top bar, like the Secrets pane.
+- **Re-seal / edit…** row action on a SealedSecret: pre-fills the Seal dialog from the controller-unsealed
+  Secret of the same name (falls back to an empty dialog if it can't be read).
+- **🔑 Seal cert…** — fetch the controller's public sealing certificate (like `kubeseal --fetch-cert`) with
+  its expiry and SHA-256 fingerprint; copy it or save it as a `.pem` for offline / CI sealing.
+
 ## [1.27.0] - 2026-11-22
 
 ### Added
