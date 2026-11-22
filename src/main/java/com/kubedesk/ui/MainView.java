@@ -141,6 +141,7 @@ import java.util.function.Supplier;
 public class MainView extends BorderPane {
 
     private final ClusterService service;
+    private final OpenWindows openWindows = new OpenWindows();
 
     // Persisted preferences
     private final SettingsStore settingsStore = new SettingsStore();
@@ -445,7 +446,8 @@ public class MainView extends BorderPane {
         VBox.setVgrow(verticalSplit, Priority.ALWAYS);
         centerPane.setMinHeight(0);
         setCenter(centerPane);
-        setBottom(buildStatusBar());
+        VBox bottomBox = new VBox(new OpenWindowsBar(openWindows), buildStatusBar());
+        setBottom(bottomBox);
 
         // Toolbar with the update banner stacked just under it (hidden until an update is found).
         configureUpdateBanner();
@@ -2511,7 +2513,7 @@ public class MainView extends BorderPane {
             return;
         }
         new ShellWindow(service, ctx.name(), namespaceBox.getValue(), shellPod,
-                shellContainerBox.getValue()).show();
+                shellContainerBox.getValue(), openWindows).show();
     }
 
     private void connectShell() {
@@ -3630,7 +3632,7 @@ public class MainView extends BorderPane {
         }
         int tail = tailBox.getValue() != null ? tailBox.getValue() : 500;
         new LogWindow(service, ctx.name(), namespaceBox.getValue(), currentLogPod,
-                containerBox.getValue(), tail, followToggle.isSelected(), currentLogPodStatus).show();
+                containerBox.getValue(), tail, followToggle.isSelected(), currentLogPodStatus, openWindows).show();
     }
 
     /** Save the full (unfiltered) log to a .log file the user can share with colleagues. */
@@ -7395,6 +7397,10 @@ public class MainView extends BorderPane {
 
     /** Release the watch and worker threads on shutdown so the JVM can exit cleanly. */
     public void shutdown() {
+        // Close all detached windows first so their streams/sessions are released cleanly.
+        for (OpenWindows.Handle h : new java.util.ArrayList<>(openWindows.windows())) {
+            h.close();
+        }
         closeExec();
         stopLogStream();
         stopMetricsPolling();

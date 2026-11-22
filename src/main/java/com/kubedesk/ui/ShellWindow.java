@@ -3,6 +3,9 @@ package com.kubedesk.ui;
 import com.kubedesk.service.ClusterService;
 import com.kubedesk.service.ExecSession;
 import javafx.application.Platform;
+import javafx.beans.property.ObjectProperty;
+import javafx.beans.property.ReadOnlyObjectProperty;
+import javafx.beans.property.SimpleObjectProperty;
 import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -28,12 +31,13 @@ import java.util.concurrent.Executors;
  * over the shared {@link ClusterService}, so it keeps working while you navigate the main window.
  * Several can be open at once; each holds its own connection and frees it when the window closes.
  */
-public final class ShellWindow {
+public final class ShellWindow implements OpenWindows.Handle {
 
     private final ClusterService service;
     private final String ctxName;
     private final String namespace;
     private final String pod;
+    private final OpenWindows registry;
 
     private final Stage stage = new Stage();
     private final ComboBox<String> containerBox = new ComboBox<>();
@@ -50,13 +54,18 @@ public final class ShellWindow {
     private final ExecutorService pool = Executors.newSingleThreadExecutor();
     private Scene scene;
     private boolean ttyView = true; // which view is showing (also routes output that arrives before connect finishes)
+    /** True when the remote side (pod) closed the session, as opposed to the user clicking Disconnect. */
+    private boolean remoteClosed;
+
+    private final ObjectProperty<OpenWindows.State> state = new SimpleObjectProperty<>(OpenWindows.State.IDLE);
 
     public ShellWindow(ClusterService service, String ctxName, String namespace, String pod,
-                       String initialContainer) {
+                       String initialContainer, OpenWindows registry) {
         this.service = service;
         this.ctxName = ctxName;
         this.namespace = namespace;
         this.pod = pod;
+        this.registry = registry;
         build(initialContainer);
     }
 
@@ -134,7 +143,10 @@ public final class ShellWindow {
         if (icon != null) {
             stage.getIcons().add(new javafx.scene.image.Image(icon));
         }
-        stage.setOnHidden(e -> shutdown());
+        stage.setOnHidden(e -> {
+            registry.unregister(this);
+            shutdown();
+        });
 
         // Key capture for TTY
         scene.addEventFilter(KeyEvent.KEY_PRESSED, e -> {
@@ -167,6 +179,29 @@ public final class ShellWindow {
 
     public void show() {
         stage.show();
+        registry.register(this);
+    }
+
+    // --- OpenWindows.Handle ---------------------------------------------------------------
+
+    @Override public OpenWindows.Kind kind() { return OpenWindows.Kind.SHELL; }
+    @Override public String title() { return pod; }
+    @Override public String subtitle() { return ctxName + " / " + namespace; }
+    @Override public ReadOnlyObjectProperty<OpenWindows.State> stateProperty() {
+        return state;
+    }
+    @Override public void focus() {
+        if (stage.isIconified()) stage.setIconified(false);
+        stage.show();
+        stage.toFront();
+        stage.requestFocus();
+    }
+    @Override public void close() {
+        stage.hide();
+    }
+
+    private void setState(OpenWindows.State s) {
+        state.set(s);
     }
 
     private boolean terminalFocused() {
@@ -225,6 +260,8 @@ public final class ShellWindow {
             ExecSession session = task.getValue();
             if (session == null) return;
             execSession = session;
+            remoteClosed = false;
+            setState(OpenWindows.State.LIVE);
             connectBtn.setText("Disconnect");
             statusLabel.setText("Connected (" + session.shell() + ")");
             if (session.isTty()) {
@@ -247,6 +284,7 @@ public final class ShellWindow {
     private void closeSession() {
         if (execSession != null) {
             try { execSession.close(); } catch (Exception ignored) {}
+            setState(remoteClosed ? OpenWindows.State.ENDED : OpenWindows.State.IDLE);
             execSession = null;
             // Keep the final screen visible and say what happened (don't swap the view away).
             if (ttyView) {
@@ -275,7 +313,10 @@ public final class ShellWindow {
     }
 
     private void onClosed() {
-        Platform.runLater(this::closeSession);
+        Platform.runLater(() -> {
+            remoteClosed = true;
+            closeSession();
+        });
     }
 
     private void sendConsoleCommand() {

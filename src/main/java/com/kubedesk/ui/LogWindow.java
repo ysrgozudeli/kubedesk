@@ -2,6 +2,9 @@ package com.kubedesk.ui;
 
 import com.kubedesk.service.ClusterService;
 import javafx.application.Platform;
+import javafx.beans.property.ObjectProperty;
+import javafx.beans.property.ReadOnlyObjectProperty;
+import javafx.beans.property.SimpleObjectProperty;
 import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -40,12 +43,13 @@ import java.time.format.DateTimeFormatter;
  * <p>Deliberately self-contained (its own controls + streaming), with no reach into {@code MainView}'s
  * details-panel state — the only shared thing is the {@code ClusterService}.
  */
-public final class LogWindow {
+public final class LogWindow implements OpenWindows.Handle {
 
     private final ClusterService service;
     private final String ctxName;
     private final String namespace;
     private final String pod;
+    private final OpenWindows registry;
 
     private final Stage stage = new Stage();
     private final ComboBox<String> containerBox = new ComboBox<>();
@@ -65,12 +69,16 @@ public final class LogWindow {
     /** Bumped on each (re)load so callbacks from a superseded stream can be ignored. */
     private int streamGen;
 
+    private final ObjectProperty<OpenWindows.State> state = new SimpleObjectProperty<>(OpenWindows.State.IDLE);
+
     public LogWindow(ClusterService service, String ctxName, String namespace, String pod,
-                     String initialContainer, int initialTail, boolean startFollowing, String status) {
+                     String initialContainer, int initialTail, boolean startFollowing, String status,
+                     OpenWindows registry) {
         this.service = service;
         this.ctxName = ctxName;
         this.namespace = namespace;
         this.pod = pod;
+        this.registry = registry;
         build(initialContainer, initialTail, startFollowing, status);
     }
 
@@ -199,7 +207,10 @@ public final class LogWindow {
             stage.getIcons().add(new Image(icon));
         }
         // Free the stream (and its connection) when the window is closed.
-        stage.setOnHidden(e -> stopStream());
+        stage.setOnHidden(e -> {
+            registry.unregister(this);
+            stopStream();
+        });
 
         // Populate the container list off the FX thread, then kick off the first load.
         logsArea.setText("Loading…");
@@ -223,6 +234,29 @@ public final class LogWindow {
 
     public void show() {
         stage.show();
+        registry.register(this);
+    }
+
+    // --- OpenWindows.Handle ---------------------------------------------------------------
+
+    @Override public OpenWindows.Kind kind() { return OpenWindows.Kind.LOGS; }
+    @Override public String title() { return pod; }
+    @Override public String subtitle() { return ctxName + " / " + namespace; }
+    @Override public ReadOnlyObjectProperty<OpenWindows.State> stateProperty() {
+        return state;
+    }
+    @Override public void focus() {
+        if (stage.isIconified()) stage.setIconified(false);
+        stage.show();
+        stage.toFront();
+        stage.requestFocus();
+    }
+    @Override public void close() {
+        stage.hide();
+    }
+
+    private void setState(OpenWindows.State s) {
+        state.set(s);
     }
 
     private void loadLogs() {
@@ -236,6 +270,7 @@ public final class LogWindow {
         if (follow.isSelected() && !previous) {
             logBuffer.clear();
             logStreamAlive = true;
+            setState(OpenWindows.State.LIVE);
             MainView.setLogLive(logLivePill, true);
             logLivePill.setVisible(true);
             logLivePill.setManaged(true);
@@ -250,6 +285,7 @@ public final class LogWindow {
                         err -> Platform.runLater(() -> {
                             if (gen == streamGen) {
                                 logStreamAlive = false;
+                                setState(OpenWindows.State.ENDED);
                                 logBuffer.append("\n[log stream ended"
                                         + (err != null ? ": " + err.getMessage() : "") + "]\n");
                                 MainView.setLogLive(logLivePill, false);
@@ -258,6 +294,7 @@ public final class LogWindow {
                         }));
             } catch (Exception e) {
                 logStreamAlive = false;
+                setState(OpenWindows.State.ENDED);
                 follow.setSelected(false);
                 logsArea.setText("Could not follow logs: " + e.getMessage());
             }
@@ -265,6 +302,7 @@ public final class LogWindow {
         }
 
         // Not following: hide the (meaningless) live pill for a one-shot tail.
+        setState(OpenWindows.State.IDLE);
         MainView.setLogLive(logLivePill, false);
         logLivePill.setVisible(false);
         logLivePill.setManaged(false);
@@ -320,6 +358,9 @@ public final class LogWindow {
             logStream = null;
         }
         logStreamAlive = false;
+        if (state.get() == OpenWindows.State.LIVE) {
+            setState(OpenWindows.State.IDLE);
+        }
     }
 
     private void saveLogs() {
