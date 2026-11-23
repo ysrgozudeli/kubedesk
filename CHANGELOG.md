@@ -3,6 +3,13 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.1] - 2026-11-23
+
+### Changed
+- Release downloads now have self-describing names: `KubeDesk-<version>-<os>[-<arch>].<ext>`, e.g.
+  `KubeDesk-1.29.1-windows.msi`, `KubeDesk-1.29.1-macos-arm64.dmg`, `KubeDesk-1.29.1-linux-amd64.deb`,
+  `KubeDesk-1.29.1-linux-x86_64.rpm` (the portable zip is `…-windows-portable.zip`).
+
 ## [1.29.0] - 2026-11-23
 
 ### Added

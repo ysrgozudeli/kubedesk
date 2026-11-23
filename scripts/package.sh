@@ -78,5 +78,28 @@ esac
 echo "==> Running jpackage ($TYPE)..."
 "$JPACKAGE" "${ARGS[@]}"
 
+# jpackage's default file names carry no platform hint (and differ per type), so rename the
+# installers to one self-describing pattern for the GitHub Release assets:
+#   KubeDesk-<version>-<os>[-<arch>].<ext>
+ARCH="$(uname -m)"
+case "$TYPE" in
+  deb) OS_TAG="linux"; PATTERN="dist/*.deb"; EXT="deb"; ARCH="$( (dpkg --print-architecture 2>/dev/null) || echo "$ARCH")" ;;
+  rpm) OS_TAG="linux"; PATTERN="dist/*.rpm"; EXT="rpm" ;;
+  dmg) OS_TAG="macos"; PATTERN="dist/*.dmg"; EXT="dmg" ;;
+  pkg) OS_TAG="macos"; PATTERN="dist/*.pkg"; EXT="pkg" ;;
+  *)   OS_TAG="" ;;
+esac
+if [ -n "$OS_TAG" ]; then
+  # shellcheck disable=SC2086
+  PRODUCED=$(ls $PATTERN 2>/dev/null | head -1 || true)
+  if [ -n "$PRODUCED" ]; then
+    NEW_NAME="dist/KubeDesk-${APP_VERSION}-${OS_TAG}-${ARCH}.${EXT}"
+    if [ "$PRODUCED" != "$NEW_NAME" ]; then
+      mv "$PRODUCED" "$NEW_NAME"
+    fi
+    echo "==> Renamed -> $NEW_NAME"
+  fi
+fi
+
 echo "==> Done. Output in dist/"
 ls -la dist

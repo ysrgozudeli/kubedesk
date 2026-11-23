@@ -11,7 +11,7 @@
 .EXAMPLE
     ./scripts/package.ps1                 # app-image  -> dist\KubeDesk\KubeDesk.exe
     ./scripts/package.ps1 -Zip            # portable    -> dist\KubeDesk-<ver>-windows-portable.zip
-    ./scripts/package.ps1 -Type msi       # installer  -> dist\KubeDesk-<ver>.msi
+    ./scripts/package.ps1 -Type msi       # installer  -> dist\KubeDesk-<ver>-windows.msi
 #>
 param(
     [ValidateSet("app-image", "msi", "exe")]
@@ -65,6 +65,17 @@ if ($Type -ne "app-image") {
 Write-Host "==> Running jpackage ($Type)..." -ForegroundColor Cyan
 & $jpackage @jpArgs
 if ($LASTEXITCODE -ne 0) { throw "jpackage failed (for msi/exe make sure WiX v3 is on PATH)." }
+
+# jpackage names the installer "KubeDesk-<ver>.msi" with no platform hint — rename to include
+# "windows" so the GitHub Release asset is self-describing (like the portable zip already is).
+if ($Type -eq "msi") {
+    $produced = "dist\KubeDesk-$AppVersion.msi"
+    $renamed  = "dist\KubeDesk-$AppVersion-windows.msi"
+    if (Test-Path $produced) {
+        Move-Item -Force $produced $renamed
+        Write-Host "==> Renamed -> $renamed" -ForegroundColor Cyan
+    }
+}
 
 # Portable zip: bundle the self-contained app-image folder so it can be unzipped and run anywhere
 # (no installer, no admin rights, no Java on the target machine).
