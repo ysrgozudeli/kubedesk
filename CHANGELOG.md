@@ -3,6 +3,15 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.0] - 2026-11-23
+
+### Added
+- **➕ New Secret…** in the Secrets pane: create a Secret from a form instead of YAML. Name, namespace
+  (pre-filled), type, and key/value rows with masked values (**Show values** toggle), **📎 Attach file…** for
+  binary/multi-line values and **📋 Paste .env…** to add many entries at once. Live validation keeps
+  **Create Secret** disabled until the form is valid and shows the reason inline. Applying an existing name
+  updates that Secret.
+
 ## [1.28.0] - 2026-11-22
 
 ### Added

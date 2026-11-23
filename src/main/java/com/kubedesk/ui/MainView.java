@@ -400,6 +400,7 @@ public class MainView extends BorderPane {
     private final Button pfButton = new Button("Port-forwards");
 
     // Contextual Secret tools — shown in the toolbar only while browsing the Secrets list.
+    private final Button newSecretBtn = new Button("➕ New Secret…");
     private final Button sealSecretBtn = new Button("🔒 Seal…");
     private final Button base64Btn = new Button("⇄ Base64…");
     private final Button jwtBtn = new Button("🎫 JWT…");
@@ -847,6 +848,13 @@ public class MainView extends BorderPane {
         pfButton.setVisible(false);
         pfButton.setManaged(false);
 
+        newSecretBtn.getStyleClass().add("accent-button");
+        newSecretBtn.setTooltip(new Tooltip("Create a Secret in the cluster from a simple form "
+                + "(name, namespace, type, key=value lines)"));
+        newSecretBtn.setOnAction(e -> openNewSecretDialog());
+        newSecretBtn.setVisible(false);
+        newSecretBtn.setManaged(false);
+
         sealSecretBtn.setTooltip(new Tooltip("Generate an encrypted SealedSecret (safe to commit to Git) "
                 + "from plaintext values"));
         sealSecretBtn.setOnAction(e -> openSealSecretDialog());
@@ -924,7 +932,7 @@ public class MainView extends BorderPane {
         // clipping). Right: search + actions + menu, pinned to the right edge.
         FlowPane left = new FlowPane(10, 8, loadConfigBtn, kubeConfigLabel, ctxGroup, nsGroup);
         left.setAlignment(Pos.CENTER_LEFT);
-        HBox right = new HBox(10, searchField, refresh, liveBox, sealSecretBtn, sealCertBtn, base64Btn, jwtBtn, certBtn,
+        HBox right = new HBox(10, searchField, refresh, liveBox, newSecretBtn, sealSecretBtn, sealCertBtn, base64Btn, jwtBtn, certBtn,
                 cronBtn, pfButton, settingsBtn, appMenu);
         right.setAlignment(Pos.CENTER_RIGHT);
         right.setMinWidth(Region.USE_PREF_SIZE); // never let the right cluster shrink below its controls
@@ -5201,6 +5209,342 @@ public class MainView extends BorderPane {
         dialog.showAndWait();
     }
 
+    /** One editable entry row in the New Secret dialog (typed value, or an attached file's bytes). */
+    private static final class SecretRow {
+        final TextField key = new TextField();
+        final javafx.scene.control.PasswordField masked = new javafx.scene.control.PasswordField();
+        final TextField plain = new TextField();
+        byte[] file; // non-null => attached file, value fields unused
+
+        String text() {
+            return plain.getText() == null ? "" : plain.getText();
+        }
+    }
+
+    /** Create a plain Secret from a form: name, namespace, type, key/value rows, file attachments. */
+    private void openNewSecretDialog() {
+        ContextInfo ctx = contextBox.getValue();
+        if (ctx == null) {
+            status("Select a context first.");
+            return;
+        }
+        javafx.stage.Window owner = getScene() != null ? getScene().getWindow() : null;
+        String inferredNs = allNsMode.get() ? "" : effectiveNamespace();
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("New Secret");
+        dialog.setResizable(true);
+        if (owner != null) {
+            dialog.initOwner(owner);
+        }
+        ButtonType createType = new ButtonType("Create Secret", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(createType, ButtonType.CANCEL);
+
+        // --- header ---
+        Label title = new Label("Create a Secret");
+        title.setStyle("-fx-font-size: 18px; -fx-font-weight: bold;");
+        Label subtitle = new Label("in cluster " + ctx.name() + " — values are stored Base64-encoded by Kubernetes.");
+        subtitle.getStyleClass().add("muted");
+        subtitle.setWrapText(true);
+        VBox header = new VBox(2, title, subtitle);
+
+        // --- details grid ---
+        TextField nameField = new TextField();
+        nameField.setPromptText("e.g. db-credentials");
+        nameField.setMaxWidth(Double.MAX_VALUE);
+
+        ComboBox<String> nsBox = new ComboBox<>();
+        nsBox.setEditable(true);
+        nsBox.setPromptText("namespace");
+        nsBox.setMaxWidth(Double.MAX_VALUE);
+        for (String n : namespaceBox.getItems()) {
+            if (n != null && !n.isBlank() && !ALL_NAMESPACES.equals(n)) {
+                nsBox.getItems().add(n);
+            }
+        }
+        if (!inferredNs.isBlank()) {
+            if (!nsBox.getItems().contains(inferredNs)) {
+                nsBox.getItems().add(0, inferredNs);
+            }
+            nsBox.setValue(inferredNs);
+        }
+        Supplier<String> nsValue = () -> {
+            String v = nsBox.getEditor().getText();
+            if (v == null || v.isBlank()) {
+                v = nsBox.getValue();
+            }
+            return v == null ? "" : v.trim();
+        };
+
+        ComboBox<String> typeBox = new ComboBox<>(FXCollections.observableArrayList(
+                "Opaque", "kubernetes.io/tls", "kubernetes.io/dockerconfigjson",
+                "kubernetes.io/basic-auth", "kubernetes.io/ssh-auth"));
+        typeBox.setEditable(true);
+        typeBox.setValue("Opaque");
+        typeBox.setMaxWidth(Double.MAX_VALUE);
+
+        javafx.scene.layout.GridPane grid = new javafx.scene.layout.GridPane();
+        grid.setHgap(12);
+        grid.setVgap(10);
+        javafx.scene.layout.ColumnConstraints c0 = new javafx.scene.layout.ColumnConstraints();
+        c0.setMinWidth(90);
+        javafx.scene.layout.ColumnConstraints c1 = new javafx.scene.layout.ColumnConstraints();
+        c1.setHgrow(Priority.ALWAYS);
+        grid.getColumnConstraints().addAll(c0, c1);
+        grid.addRow(0, new Label("Name"), nameField);
+        grid.addRow(1, new Label("Namespace"), nsBox);
+        grid.addRow(2, new Label("Type"), typeBox);
+
+        // --- entries (key / value rows) ---
+        List<SecretRow> rows = new ArrayList<>();
+        VBox rowsBox = new VBox(6);
+        CheckBox showValues = new CheckBox("Show values");
+        Label statusLine = new Label();
+        statusLine.setWrapText(true);
+        statusLine.setMinHeight(Region.USE_PREF_SIZE);
+        Runnable[] revalidate = new Runnable[1];
+        Runnable[] addRow = new Runnable[1];
+
+        Runnable render = () -> {
+            rowsBox.getChildren().clear();
+            for (SecretRow r : rows) {
+                r.key.setPromptText("key");
+                r.key.setPrefColumnCount(14);
+                r.masked.setPromptText("value");
+                r.plain.setPromptText("value");
+                HBox.setHgrow(r.masked, Priority.ALWAYS);
+                HBox.setHgrow(r.plain, Priority.ALWAYS);
+                r.masked.visibleProperty().bind(showValues.selectedProperty().not());
+                r.masked.managedProperty().bind(r.masked.visibleProperty());
+                r.plain.visibleProperty().bind(showValues.selectedProperty());
+                r.plain.managedProperty().bind(r.plain.visibleProperty());
+                Button rm = new Button("✕");
+                rm.getStyleClass().add("icon-button");
+                rm.setTooltip(new Tooltip("Remove this entry"));
+                rm.setOnAction(e -> {
+                    rows.remove(r);
+                    if (rows.isEmpty()) {
+                        addRow[0].run();
+                    }
+                    revalidate[0].run();
+                });
+                HBox line;
+                if (r.file != null) {
+                    Label f = new Label("📄 file · " + r.file.length + " bytes");
+                    f.getStyleClass().add("muted");
+                    HBox.setHgrow(f, Priority.ALWAYS);
+                    f.setMaxWidth(Double.MAX_VALUE);
+                    line = new HBox(8, r.key, f, rm);
+                } else {
+                    line = new HBox(8, r.key, r.masked, r.plain, rm);
+                }
+                line.setAlignment(Pos.CENTER_LEFT);
+                rowsBox.getChildren().add(line);
+            }
+        };
+        addRow[0] = () -> {
+            SecretRow r = new SecretRow();
+            // The two value fields stay in sync so toggling "Show values" keeps what was typed.
+            r.masked.textProperty().bindBidirectional(r.plain.textProperty());
+            r.key.textProperty().addListener((o, a, b) -> revalidate[0].run());
+            r.plain.textProperty().addListener((o, a, b) -> revalidate[0].run());
+            // Enter in the value field adds another entry.
+            r.plain.setOnAction(e -> {
+                if (rows.get(rows.size() - 1) == r) {
+                    addRow[0].run();
+                }
+            });
+            r.masked.setOnAction(r.plain.getOnAction());
+            rows.add(r);
+            render.run();
+            Platform.runLater(r.key::requestFocus);
+        };
+
+        Button addBtn = new Button("＋ Add entry");
+        addBtn.setOnAction(e -> addRow[0].run());
+
+        Button attachBtn = new Button("📎 Attach file…");
+        attachBtn.setTooltip(new Tooltip("For binary or multi-line values — a .p12, a .json, a certificate"));
+        attachBtn.setOnAction(e -> {
+            FileChooser fc = new FileChooser();
+            fc.setTitle("Attach a file as a key");
+            File f = fc.showOpenDialog(dialog.getDialogPane().getScene().getWindow());
+            if (f == null) {
+                return;
+            }
+            try {
+                SecretRow r = new SecretRow();
+                r.file = Files.readAllBytes(f.toPath());
+                r.key.setText(f.getName());
+                r.key.textProperty().addListener((o, a, b) -> revalidate[0].run());
+                // Drop a trailing empty typed row so attachments don't leave blank lines behind.
+                if (rows.size() == 1 && rows.get(0).file == null && rows.get(0).key.getText().isBlank()
+                        && rows.get(0).text().isEmpty()) {
+                    rows.clear();
+                }
+                rows.add(r);
+                render.run();
+                revalidate[0].run();
+            } catch (Exception ex) {
+                statusLine.setText("Could not read file: " + ex.getMessage());
+                statusLine.setStyle("-fx-text-fill: #b91c1c;");
+            }
+        });
+
+        Button pasteBtn = new Button("📋 Paste .env…");
+        pasteBtn.setTooltip(new Tooltip("Paste several key=value lines at once"));
+        pasteBtn.setOnAction(e -> {
+            TextArea area = new TextArea();
+            area.setPromptText("username=admin\npassword=s3cr3t\napi-key: abc123");
+            area.getStyleClass().add("yaml-area");
+            area.setPrefRowCount(10);
+            area.setPrefColumnCount(48);
+            Dialog<ButtonType> pd = new Dialog<>();
+            pd.setTitle("Paste entries");
+            pd.initOwner(dialog.getDialogPane().getScene().getWindow());
+            pd.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+            Label l = new Label("One entry per line — key=value or key: value. Lines starting with # are ignored.");
+            l.getStyleClass().add("muted");
+            VBox pv = new VBox(8, l, area);
+            pv.setPadding(new Insets(8));
+            pd.getDialogPane().setContent(pv);
+            if (pd.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                return;
+            }
+            if (rows.size() == 1 && rows.get(0).file == null && rows.get(0).key.getText().isBlank()
+                    && rows.get(0).text().isEmpty()) {
+                rows.clear();
+            }
+            for (Map.Entry<String, String> en : parseBulkEntries(area.getText()).entrySet()) {
+                SecretRow r = new SecretRow();
+                r.masked.textProperty().bindBidirectional(r.plain.textProperty());
+                r.key.setText(en.getKey());
+                r.plain.setText(en.getValue());
+                r.key.textProperty().addListener((o, a, b) -> revalidate[0].run());
+                r.plain.textProperty().addListener((o, a, b) -> revalidate[0].run());
+                rows.add(r);
+            }
+            if (rows.isEmpty()) {
+                addRow[0].run();
+            } else {
+                render.run();
+            }
+            revalidate[0].run();
+        });
+
+        Label entriesLabel = new Label("Entries");
+        entriesLabel.setStyle("-fx-font-weight: bold;");
+        Region sp = new Region();
+        HBox.setHgrow(sp, Priority.ALWAYS);
+        HBox entriesHead = new HBox(8, entriesLabel, sp, showValues);
+        entriesHead.setAlignment(Pos.CENTER_LEFT);
+        ScrollPane rowsScroll = new ScrollPane(rowsBox);
+        rowsScroll.setFitToWidth(true);
+        rowsScroll.setPrefViewportHeight(190);
+        rowsScroll.setMinHeight(120);
+        VBox.setVgrow(rowsScroll, Priority.ALWAYS);
+        HBox actions = new HBox(8, addBtn, attachBtn, pasteBtn);
+
+        VBox entriesSection = new VBox(8, entriesHead, rowsScroll, actions);
+        entriesSection.getStyleClass().add("form-section");
+        VBox.setVgrow(entriesSection, Priority.ALWAYS);
+
+        VBox content = new VBox(16, header, grid, entriesSection, statusLine);
+        content.setPadding(new Insets(14));
+        content.setPrefSize(680, 560);
+        dialog.getDialogPane().setContent(content);
+
+        // --- live validation: Create stays disabled until the form is valid; the reason shows inline ---
+        Button createBtn = (Button) dialog.getDialogPane().lookupButton(createType);
+        createBtn.getStyleClass().add("accent-button");
+        Supplier<String> problem = () -> {
+            String name = nameField.getText() == null ? "" : nameField.getText().trim();
+            String ns = nsValue.get();
+            String type = typeBox.getEditor().getText() == null ? "" : typeBox.getEditor().getText().trim();
+            if (name.isEmpty()) {
+                return "Enter a secret name.";
+            }
+            if (!name.matches("[a-z0-9]([-a-z0-9.]*[a-z0-9])?")) {
+                return "Name must be lowercase letters, digits, '-' or '.', starting and ending alphanumeric.";
+            }
+            if (ns.isEmpty()) {
+                return "Choose or type a namespace.";
+            }
+            if (!ns.matches("[a-z0-9]([-a-z0-9]*[a-z0-9])?")) {
+                return "Invalid namespace name.";
+            }
+            if (!type.isEmpty() && !type.matches("[A-Za-z0-9./_-]+")) {
+                return "Invalid secret type.";
+            }
+            int count = 0;
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            for (SecretRow r : rows) {
+                String k = r.key.getText() == null ? "" : r.key.getText().trim();
+                boolean hasVal = r.file != null || !r.text().isEmpty();
+                if (k.isEmpty() && !hasVal) {
+                    continue; // untouched blank row
+                }
+                if (k.isEmpty()) {
+                    return "An entry has a value but no key.";
+                }
+                if (!k.matches("[-._a-zA-Z0-9]+")) {
+                    return "Invalid key \"" + k + "\" — use letters, digits, '-', '_' and '.'.";
+                }
+                if (!seen.add(k)) {
+                    return "Duplicate key \"" + k + "\".";
+                }
+                count++;
+            }
+            return count == 0 ? "Add at least one key and value." : null;
+        };
+        revalidate[0] = () -> {
+            String p = problem.get();
+            createBtn.setDisable(p != null);
+            statusLine.setText(p == null ? "" : p);
+            statusLine.setStyle("-fx-text-fill: #6b7280;");
+        };
+        nameField.textProperty().addListener((o, a, b) -> revalidate[0].run());
+        nsBox.getEditor().textProperty().addListener((o, a, b) -> revalidate[0].run());
+        nsBox.valueProperty().addListener((o, a, b) -> revalidate[0].run());
+        typeBox.getEditor().textProperty().addListener((o, a, b) -> revalidate[0].run());
+
+        addRow[0].run();
+        revalidate[0].run();
+        // Don't nag about the empty form before the user has typed anything.
+        statusLine.setText("");
+
+        createBtn.addEventFilter(javafx.event.ActionEvent.ACTION, ev -> {
+            String name = nameField.getText().trim();
+            String ns = nsValue.get();
+            String type = typeBox.getEditor().getText() == null || typeBox.getEditor().getText().isBlank()
+                    ? "Opaque" : typeBox.getEditor().getText().trim();
+            Map<String, byte[]> data = new LinkedHashMap<>();
+            for (SecretRow r : rows) {
+                String k = r.key.getText().trim();
+                if (k.isEmpty()) {
+                    continue;
+                }
+                data.put(k, r.file != null ? r.file : r.text().getBytes(StandardCharsets.UTF_8));
+            }
+            // Everything is emitted as Base64 under `data`, so any characters are safe in the YAML.
+            StringBuilder yaml = new StringBuilder("apiVersion: v1\nkind: Secret\nmetadata:\n  name: ")
+                    .append(name).append("\n  namespace: ").append(ns)
+                    .append("\ntype: ").append(type).append("\ndata:\n");
+            for (Map.Entry<String, byte[]> en : data.entrySet()) {
+                yaml.append("  ").append(en.getKey()).append(": ")
+                        .append(Base64.getEncoder().encodeToString(en.getValue())).append('\n');
+            }
+            status("Creating Secret " + name + "…");
+            runAsync(() -> service.applyManifests(ctx.name(), ns, yaml.toString()), summary -> {
+                status("Secret " + name + " applied in " + ns + ".");
+                afterMutation();
+            });
+        });
+
+        Platform.runLater(nameField::requestFocus);
+        dialog.showAndWait();
+    }
+
     /** Show a multi-line, read-only report (e.g. the result of applying manifests). */
     private void showReport(String header, String text) {
         Alert alert = new Alert(Alert.AlertType.INFORMATION);
@@ -5887,6 +6231,8 @@ public class MainView extends BorderPane {
         boolean onSecrets = mode == ViewMode.RESOURCE && currentKind == ResourceKind.SECRETS;
         // Seal… (create a new SealedSecret) and Base64 are also useful from the SealedSecrets list.
         boolean onSealed = mode == ViewMode.RESOURCE && currentKind == ResourceKind.SEALEDSECRETS;
+        newSecretBtn.setVisible(onSecrets);
+        newSecretBtn.setManaged(onSecrets);
         sealSecretBtn.setVisible(onSecrets || onSealed);
         sealSecretBtn.setManaged(onSecrets || onSealed);
         sealCertBtn.setVisible(onSecrets || onSealed);
