@@ -2335,6 +2335,11 @@ public class Fabric8ClusterService implements ClusterService {
         }
     }
 
+    private record PodRequests(double cpu, double mem, int scheduled, long atMs) { }
+
+    private static final long POD_REQUESTS_TTL_MS = 60_000;
+    private final Map<String, PodRequests> podRequestsCache = new java.util.concurrent.ConcurrentHashMap<>();
+
     @Override
     public Dtos.ClusterCapacity clusterCapacity(String context) {
         try (KubernetesClient client = clientFor(context)) {
@@ -2356,9 +2361,16 @@ public class Fabric8ClusterService implements ClusterService {
 
             // Requests + scheduled-pod count from the non-terminal pods across all namespaces.
             // A namespace-scoped token may be unable to list cluster-wide — then leave these at 0.
+            // The cluster-wide pod list is the expensive part, and requests change slowly, so reuse
+            // it for a minute — the 5–30s usage sampling then only costs a nodes + metrics call.
             double cpuReq = 0, memReq = 0;
             int scheduled = 0;
-            try {
+            PodRequests cachedReq = podRequestsCache.get(context);
+            if (cachedReq != null && System.currentTimeMillis() - cachedReq.atMs() < POD_REQUESTS_TTL_MS) {
+                cpuReq = cachedReq.cpu();
+                memReq = cachedReq.mem();
+                scheduled = cachedReq.scheduled();
+            } else try {
                 for (Pod pod : client.pods().inAnyNamespace().list().getItems()) {
                     String phase = pod.getStatus() != null ? pod.getStatus().getPhase() : null;
                     if ("Succeeded".equals(phase) || "Failed".equals(phase)) {
@@ -2376,6 +2388,8 @@ public class Fabric8ClusterService implements ClusterService {
                         memReq += mib(c.getResources().getRequests().get("memory"));
                     }
                 }
+                podRequestsCache.put(context,
+                        new PodRequests(cpuReq, memReq, scheduled, System.currentTimeMillis()));
             } catch (Exception ignore) {
                 // cluster-wide pod list not permitted — requests/scheduled stay 0
             }
@@ -3472,8 +3486,61 @@ public class Fabric8ClusterService implements ClusterService {
 
     // --- helpers ----------------------------------------------------------------------------
 
-    /** Build a short-lived client bound to a specific kube.conf context, honoring any override file. */
+    /** One cached client per context; the key carries the kubeconfig identity so edits invalidate it. */
+    private record CachedClient(String key, KubernetesClient client) { }
+
+    private final Map<String, CachedClient> clientCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static final java.util.concurrent.ScheduledExecutorService CLIENT_REAPER =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "kubedesk-client-reaper");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /**
+     * A shared client for the context. Building a client re-parses the kubeconfig, spins up an HTTP
+     * client + thread pools, does a TLS handshake and may launch an exec auth plugin — far too costly to
+     * repeat per call. The returned handle ignores {@code close()} so existing try-with-resources and
+     * watch/log cleanup keep working without tearing down the shared instance.
+     */
     private KubernetesClient clientFor(String context) {
+        File file = kubeConfigFile();
+        String key = file.getAbsolutePath() + "|" + file.lastModified() + "|" + (kubeConfigOverride != null);
+        CachedClient cc = clientCache.compute(context, (c, existing) -> {
+            if (existing != null && existing.key().equals(key)) {
+                return existing;
+            }
+            if (existing != null) {
+                // Config changed: retire the old client after in-flight watches/logs have had time.
+                KubernetesClient old = existing.client();
+                CLIENT_REAPER.schedule(() -> {
+                    try {
+                        old.close();
+                    } catch (Exception ignored) {
+                        // best-effort
+                    }
+                }, 5, TimeUnit.MINUTES);
+            }
+            return new CachedClient(key, buildClient(context));
+        });
+        KubernetesClient real = cc.client();
+        return (KubernetesClient) java.lang.reflect.Proxy.newProxyInstance(
+                KubernetesClient.class.getClassLoader(), new Class<?>[]{KubernetesClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("close") && method.getParameterCount() == 0) {
+                        return null; // shared — never closed by callers
+                    }
+                    try {
+                        return method.invoke(real, args);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+    }
+
+    /** Build a client bound to a specific kube.conf context, honoring any override file. */
+    private KubernetesClient buildClient(String context) {
         try {
             Config config;
             File file = kubeConfigFile();

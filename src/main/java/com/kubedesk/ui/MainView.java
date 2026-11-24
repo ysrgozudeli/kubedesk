@@ -6511,6 +6511,11 @@ public class MainView extends BorderPane {
 
     /** Start (or restart) polling cluster CPU/memory while the Overview is open, honoring settings. */
     private void startOverviewMetrics(String ctxName, boolean force) {
+        startOverviewMetrics(ctxName, force, true);
+    }
+
+    /** {@code sampleNow=false} lets the caller feed the first sample itself (loadOverview already fetches capacity). */
+    private void startOverviewMetrics(String ctxName, boolean force, boolean sampleNow) {
         boolean on = settings.metricsChartsEnabled;
         if (!force && on && overviewMetricsTimeline != null && ctxName != null
                 && ctxName.equals(overviewMetricsContext)) {
@@ -6538,11 +6543,26 @@ public class MainView extends BorderPane {
         rebuildClusterSeries();
         overviewMetricsHint.setText("Live · sampling cluster-wide usage every "
                 + settings.metricsIntervalSeconds + "s (needs metrics-server).");
-        sampleClusterMetrics(ctxName); // first sample immediately
+        if (sampleNow) {
+            sampleClusterMetrics(ctxName); // first sample immediately
+        }
         overviewMetricsTimeline = new Timeline(new KeyFrame(
-                Duration.seconds(settings.metricsIntervalSeconds), e -> sampleClusterMetrics(ctxName)));
+                Duration.seconds(settings.metricsIntervalSeconds), e -> {
+                    if (windowActive()) { // don't poll the cluster while minimized / in the background
+                        sampleClusterMetrics(ctxName);
+                    }
+                }));
         overviewMetricsTimeline.setCycleCount(Timeline.INDEFINITE);
         overviewMetricsTimeline.play();
+    }
+
+    /** True while the app window is visible and not minimized. */
+    private boolean windowActive() {
+        javafx.scene.Scene sc = overviewMetricsBox.getScene();
+        if (sc == null || !(sc.getWindow() instanceof javafx.stage.Stage st)) {
+            return true;
+        }
+        return st.isShowing() && !st.isIconified();
     }
 
     private void stopOverviewMetrics() {
@@ -6569,28 +6589,46 @@ public class MainView extends BorderPane {
     }
 
     private void sampleClusterMetrics(String ctxName) {
-        runAsync(() -> service.clusterCapacity(ctxName), cap -> {
-            if (!ctxName.equals(overviewMetricsContext)) {
-                return; // context switched since this sample was requested
+        runAsync(() -> service.clusterCapacity(ctxName), cap -> recordClusterSample(ctxName, cap));
+    }
+
+    private void recordClusterSample(String ctxName, ClusterCapacity cap) {
+        if (!ctxName.equals(overviewMetricsContext) || !settings.metricsChartsEnabled) {
+            return; // context switched since this sample was requested, or charts are off
+        }
+        if (cap == null || !cap.metricsAvailable()) {
+            overviewMetricsHint.setText("No live metrics — metrics-server isn't available on this "
+                    + "cluster. (The charts need it; everything else still works.)");
+            return;
+        }
+        long nowSec = System.currentTimeMillis() / 1000L;
+        double[] sample = {nowSec, cap.cpuUsedMillicores(), cap.memUsedMiB()};
+        clusterSamples.add(sample);
+        int before = clusterSamples.size();
+        trimClusterSamples();
+        int dropped = before - clusterSamples.size();
+        var cpuData = clusterCpuSeries.getData();
+        var memData = clusterMemSeries.getData();
+        if (cpuData.size() + 1 - dropped == clusterSamples.size() && memData.size() == cpuData.size()) {
+            // Incremental update: drop expired points in one change, append the new one.
+            if (dropped > 0) {
+                cpuData.remove(0, dropped);
+                memData.remove(0, dropped);
             }
-            if (cap == null || !cap.metricsAvailable()) {
-                overviewMetricsHint.setText("No live metrics — metrics-server isn't available on this "
-                        + "cluster. (The charts need it; everything else still works.)");
-                return;
-            }
-            long nowSec = System.currentTimeMillis() / 1000L;
-            clusterSamples.add(new double[]{nowSec, cap.cpuUsedMillicores(), cap.memUsedMiB()});
-            trimClusterSamples();
+            double x = sample[0] - metricsBaseEpochSec;
+            cpuData.add(new XYChart.Data<>(x, sample[1]));
+            memData.add(new XYChart.Data<>(x, sample[2]));
+        } else {
             rebuildClusterSeries();
-            overviewMetricsHint.setText("Live · sampling cluster-wide usage every "
-                    + settings.metricsIntervalSeconds + "s · showing the last "
-                    + windowLabel(settings.metricsWindowMinutes)
-                    + " (metrics-server keeps no history, so this builds up while the app is open).");
-            if (settings.metricsPersist && (++overviewMetricsSaveTick % 3 == 0)) {
-                List<double[]> copy = new ArrayList<>(clusterSamples);
-                pool.submit(() -> metricsHistoryStore.save(ctxName, copy));
-            }
-        });
+        }
+        overviewMetricsHint.setText("Live · sampling cluster-wide usage every "
+                + settings.metricsIntervalSeconds + "s · showing the last "
+                + windowLabel(settings.metricsWindowMinutes)
+                + " (metrics-server keeps no history, so this builds up while the app is open).");
+        if (settings.metricsPersist && (++overviewMetricsSaveTick % 3 == 0)) {
+            List<double[]> copy = new ArrayList<>(clusterSamples);
+            pool.submit(() -> metricsHistoryStore.save(ctxName, copy));
+        }
     }
 
     private void trimClusterSamples() {
@@ -6599,13 +6637,15 @@ public class MainView extends BorderPane {
     }
 
     private void rebuildClusterSeries() {
-        clusterCpuSeries.getData().clear();
-        clusterMemSeries.getData().clear();
+        List<XYChart.Data<Number, Number>> cpu = new ArrayList<>(clusterSamples.size());
+        List<XYChart.Data<Number, Number>> mem = new ArrayList<>(clusterSamples.size());
         for (double[] s : clusterSamples) {
             double x = s[0] - metricsBaseEpochSec; // relative seconds; small values keep the axis sane
-            clusterCpuSeries.getData().add(new XYChart.Data<>(x, s[1]));
-            clusterMemSeries.getData().add(new XYChart.Data<>(x, s[2]));
+            cpu.add(new XYChart.Data<>(x, s[1]));
+            mem.add(new XYChart.Data<>(x, s[2]));
         }
+        clusterCpuSeries.getData().setAll(cpu); // one change event per series, not one per point
+        clusterMemSeries.getData().setAll(mem);
     }
 
     private static String windowLabel(int minutes) {
@@ -6642,7 +6682,8 @@ public class MainView extends BorderPane {
                 ? "default ~/.kube/config" : src.getAbsolutePath();
         ovMeta.setText("namespace: " + safeNamespace() + "    ·    " + fileText);
 
-        startOverviewMetrics(ctx.name());
+        // The first sample comes from the capacity fetch below, so don't fetch it twice.
+        startOverviewMetrics(ctx.name(), false, false);
 
         final int gen = ++overviewGen;
         tilePods.set("…", "");
@@ -6695,6 +6736,13 @@ public class MainView extends BorderPane {
             long ready = rd.rows().stream()
                     .filter(r -> "Ready".equalsIgnoreCase(cell(r, rd.columns(), "Status"))).count();
             tileNodes.set(ready + "/" + total, ready == total ? "all ready" : (total - ready) + " not ready");
+            // Per-node usage table (name · status · CPU% · Mem%) from the same enriched listing.
+            if (rd.rows().isEmpty()) {
+                overviewNodesBox.getChildren().setAll(mutedLabel("No nodes visible."));
+            } else {
+                overviewNodesBox.getChildren().setAll(
+                        rd.rows().stream().map(r -> overviewNodeRow(r, rd.columns())).toList());
+            }
         });
 
         // Namespaces tile (cluster-wide count).
@@ -6711,19 +6759,7 @@ public class MainView extends BorderPane {
                 return;
             }
             buildCapacityMeters(cap);
-        });
-
-        // Per-node usage table (name · status · CPU% · Mem%), from the enriched Nodes listing.
-        runAsync(() -> service.listResource(ctx.name(), ns, ResourceKind.NODES), rd -> {
-            if (gen != overviewGen) {
-                return;
-            }
-            if (rd.rows().isEmpty()) {
-                overviewNodesBox.getChildren().setAll(mutedLabel("No nodes visible."));
-            } else {
-                overviewNodesBox.getChildren().setAll(
-                        rd.rows().stream().map(r -> overviewNodeRow(r, rd.columns())).toList());
-            }
+            recordClusterSample(ctx.name(), cap); // doubles as the chart's first sample
         });
 
         // Health findings → Warnings tile + the unhealthy-pods list.

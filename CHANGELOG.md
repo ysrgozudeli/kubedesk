@@ -3,6 +3,15 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.2] - 2026-11-24
+
+### Changed
+- **Faster, lighter Overview.** Kubernetes connections are now reused per context instead of being rebuilt
+  (kubeconfig parse, TLS handshake, exec-auth plugin) on every call; the cluster-wide pod list used for
+  resource requests is cached for a minute; the Overview no longer fetches nodes and capacity twice on load;
+  the live CPU/memory charts update incrementally instead of rebuilding every sample; and metrics sampling
+  pauses while the window is minimised.
+
 ## [1.29.1] - 2026-11-23
 
 ### Changed
