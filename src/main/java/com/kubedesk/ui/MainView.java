@@ -6707,8 +6707,11 @@ public class MainView extends BorderPane {
             int pending = hs.phaseCounts().getOrDefault("Pending", 0);
             int failed = hs.phaseCounts().getOrDefault("Failed", 0)
                     + hs.phaseCounts().getOrDefault("Unknown", 0);
+            int notReady = hs.phaseCounts().getOrDefault("Not ready", 0);
             tilePods.set(running + "/" + total,
-                    failed > 0 ? failed + " failing" : (pending > 0 ? pending + " pending" : "all running"));
+                    failed > 0 ? failed + " failing"
+                            : notReady > 0 ? notReady + " not ready"
+                            : (pending > 0 ? pending + " pending" : "all running"));
         });
 
         // Deployments tile: how many are fully available.
@@ -8013,7 +8016,10 @@ public class MainView extends BorderPane {
                 col.setStyle("-fx-alignment: CENTER;");
             }
             if (isStatusColumn(name)) {
-                col.setCellFactory(c -> statusChipCell());
+                final int readyIdx = cols.indexOf("Ready");
+                col.setCellFactory(c -> statusChipCell(readyIdx));
+            } else if (name.equals("Ready")) {
+                col.setCellFactory(c -> readyChipCell(cols.indexOf("Status")));
             }
             if (isAgeColumn(name)) {
                 col.setComparator(AGE_COMPARATOR);
@@ -8134,7 +8140,7 @@ public class MainView extends BorderPane {
     }
 
     /** A table cell that draws the value as a coloured status chip. */
-    private TableCell<List<String>, String> statusChipCell() {
+    private TableCell<List<String>, String> statusChipCell(int readyIdx) {
         return new TableCell<>() {
             @Override protected void updateItem(String value, boolean empty) {
                 super.updateItem(value, empty);
@@ -8144,7 +8150,61 @@ public class MainView extends BorderPane {
                 } else {
                     setText(value);
                     getStyleClass().add("chip");
-                    getStyleClass().add(chipClassFor(value));
+                    String cls = chipClassFor(value);
+                    // "Running" with containers not ready (failing readiness probe) is not healthy.
+                    if (readyIdx >= 0 && cls.equals("chip-ok") && value.equalsIgnoreCase("Running")
+                            && getTableRow() != null && getTableRow().getItem() instanceof List<?> row
+                            && readyIdx < row.size()) {
+                        String ready = readyChipClass(String.valueOf(row.get(readyIdx)));
+                        if (!ready.equals("chip-ok")) {
+                            cls = ready;
+                        }
+                    }
+                    getStyleClass().add(cls);
+                }
+            }
+        };
+    }
+
+    /** "n/m" ready counts: green when all ready, amber when partly, red when none (neutral if m is 0). */
+    private static String readyChipClass(String value) {
+        String[] parts = value == null ? new String[0] : value.trim().split("/");
+        if (parts.length != 2) {
+            return "chip-neutral";
+        }
+        try {
+            int have = Integer.parseInt(parts[0].trim());
+            int want = Integer.parseInt(parts[1].trim());
+            if (want == 0 || have >= want) {
+                return want == 0 ? "chip-neutral" : "chip-ok";
+            }
+            return have == 0 ? "chip-bad" : "chip-warn";
+        } catch (NumberFormatException e) {
+            return "chip-neutral";
+        }
+    }
+
+    /** The Ready column (e.g. 1/2) as a health-coloured chip. */
+    private TableCell<List<String>, String> readyChipCell(int statusIdx) {
+        return new TableCell<>() {
+            @Override protected void updateItem(String value, boolean empty) {
+                super.updateItem(value, empty);
+                getStyleClass().removeAll("chip", "chip-ok", "chip-warn", "chip-bad", "chip-neutral");
+                if (empty || value == null) {
+                    setText(null);
+                } else {
+                    setText(value);
+                    getStyleClass().add("chip");
+                    String cls = readyChipClass(value);
+                    // Finished pods (Completed/Succeeded) legitimately show 0/n — don't flag them.
+                    if (statusIdx >= 0 && getTableRow() != null && getTableRow().getItem() instanceof List<?> row
+                            && statusIdx < row.size()) {
+                        String st = String.valueOf(row.get(statusIdx)).toLowerCase();
+                        if (st.contains("completed") || st.contains("succeeded")) {
+                            cls = "chip-neutral";
+                        }
+                    }
+                    getStyleClass().add(cls);
                 }
             }
         };
@@ -8219,6 +8279,9 @@ public class MainView extends BorderPane {
 
     private String ringColorFor(String phase) {
         String p = phase.toLowerCase();
+        if (p.contains("not ready")) {
+            return "#f97316"; // orange: running but not ready
+        }
         if (p.contains("running") || p.contains("succeeded")) {
             return "#16a34a"; // green
         }

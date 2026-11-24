@@ -3,6 +3,17 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.3] - 2026-11-24
+
+### Fixed
+- **Pods that are Running but not Ready no longer look healthy.** A pod whose containers fail their readiness
+  probe (e.g. `0/1 Running`) was shown with a green "Running" chip. The **Ready** column is now a coloured chip
+  (green all ready, amber partly ready, red none ready; finished Completed/Succeeded pods stay neutral), and the
+  **Status** chip of a Running pod takes that colour when it isn't fully ready. Ready chips also apply to
+  Deployments, StatefulSets and other kinds with an `n/m` Ready column.
+- The Overview's pod-health donut and **Pods** tile counted such pods as running. They now get their own orange
+  **Not ready** slice, and the tile reports e.g. "2 not ready".
+
 ## [1.29.2] - 2026-11-24
 
 ### Changed

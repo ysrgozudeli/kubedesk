@@ -302,6 +302,12 @@ public class Fabric8ClusterService implements ClusterService {
             for (Pod p : pods) {
                 String phase = p.getStatus() != null && p.getStatus().getPhase() != null
                         ? p.getStatus().getPhase() : "Unknown";
+                // "Running" with a container that isn't ready (failing readiness probe) isn't healthy.
+                if ("Running".equals(phase) && p.getStatus().getContainerStatuses() != null
+                        && p.getStatus().getContainerStatuses().stream()
+                        .anyMatch(cs -> !Boolean.TRUE.equals(cs.getReady()))) {
+                    phase = "Not ready";
+                }
                 counts.merge(phase, 1, Integer::sum);
             }
             return new HealthSummary(counts, pods.size());
