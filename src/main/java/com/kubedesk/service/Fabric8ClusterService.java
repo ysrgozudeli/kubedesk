@@ -2046,6 +2046,8 @@ public class Fabric8ClusterService implements ClusterService {
             }
             checkOrphanServices(client, namespace, f);
             checkNodes(client, f);
+            f.addAll(com.kubedesk.service.crd.CertManager.healthFindings(client, namespace));
+            f.addAll(com.kubedesk.service.crd.ExternalSecretsApi.healthFindings(client, namespace));
 
             // Most severe first, then by kind and name for stability.
             f.sort(Comparator.comparingInt((HealthFinding h) ->

@@ -3,6 +3,17 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.30.1] - 2026-11-27
+
+### Added
+- **Health scan covers cert-manager and External Secrets.** Certificates that are not Ready (or can never be,
+  because their Issuer is missing), already expired, or expire within 14 days; Issuers / ClusterIssuers that
+  aren't Ready; ExternalSecrets that fail to sync; and SecretStores / ClusterSecretStores that aren't Ready.
+  Only runs when the CRDs are installed.
+- **"not found" on dead references.** In the Status tab, a Certificate / CertRequest whose Issuer doesn't exist,
+  or an ExternalSecret whose store doesn't exist, now says so (and isn't a clickable link) instead of leaving you
+  to guess why it isn't Ready.
+
 ## [1.30.0] - 2026-11-27
 
 ### Added

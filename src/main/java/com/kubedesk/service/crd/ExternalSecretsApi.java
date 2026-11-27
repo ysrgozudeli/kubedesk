@@ -1,5 +1,6 @@
 package com.kubedesk.service.crd;
 
+import com.kubedesk.service.Dtos;
 import com.kubedesk.service.Dtos.CrdCondition;
 import com.kubedesk.service.Dtos.CrdDetails;
 import com.kubedesk.service.Dtos.CrdRelation;
@@ -114,8 +115,10 @@ public final class ExternalSecretsApi {
         String store = Json.str(r, "spec", "secretStoreRef", "name");
         if (!store.isBlank()) {
             boolean cluster = "ClusterSecretStore".equals(Json.str(r, "spec", "secretStoreRef", "kind"));
+            boolean found = CrdSupport.exists(client, cluster ? CLUSTER_SECRET_STORE : SECRET_STORE,
+                    cluster ? "" : ns, store);
             rel.add(new CrdRelation("Reads from", cluster ? "ClusterSecretStore" : "SecretStore",
-                    cluster ? "" : ns, store, ""));
+                    cluster ? "" : ns, store, found ? "" : "not found"));
         }
 
         String target = targetName(r);
@@ -146,6 +149,62 @@ public final class ExternalSecretsApi {
             rel.add(new CrdRelation("Bulk import (dataFrom)", "", "", remote, ""));
         }
         return new CrdDetails(conditions(r), rel);
+    }
+
+    /**
+     * Health-scan findings for External Secrets objects in {@code namespace} (plus ClusterSecretStores):
+     * ExternalSecrets that fail to sync (or point at a missing store) and stores that aren't Ready.
+     */
+    public static List<Dtos.HealthFinding> healthFindings(KubernetesClient client, String namespace) {
+        List<Dtos.HealthFinding> out = new ArrayList<>();
+        if (!CrdSupport.groupAvailable(client, GROUP)) {
+            return out;
+        }
+        try {
+            for (var es : CrdSupport.items(client, EXTERNAL_SECRET, namespace)) {
+                if (!"False".equals(ready(es))) {
+                    continue;
+                }
+                String detail = reasonMessage(es);
+                String store = Json.str(es, "spec", "secretStoreRef", "name");
+                if (!store.isBlank()) {
+                    boolean cluster = "ClusterSecretStore".equals(Json.str(es, "spec", "secretStoreRef", "kind"));
+                    if (!CrdSupport.exists(client, cluster ? CLUSTER_SECRET_STORE : SECRET_STORE,
+                            cluster ? "" : namespace, store)) {
+                        detail = (cluster ? "ClusterSecretStore " : "SecretStore ") + store + " not found. " + detail;
+                    }
+                }
+                out.add(new Dtos.HealthFinding(Dtos.HealthSeverity.CRITICAL, ResourceKind.EXTERNALSECRETS,
+                        name(es), "Sync failed", detail));
+            }
+            for (var st : CrdSupport.items(client, SECRET_STORE, namespace)) {
+                storeFinding(st, ResourceKind.SECRETSTORES, out);
+            }
+            for (var st : CrdSupport.items(client, CLUSTER_SECRET_STORE, "")) {
+                storeFinding(st, ResourceKind.CLUSTERSECRETSTORES, out);
+            }
+        } catch (Exception ignored) {
+            // an operator hiccup must not break the rest of the scan
+        }
+        return out;
+    }
+
+    private static void storeFinding(GenericKubernetesResource st, ResourceKind kind, List<Dtos.HealthFinding> out) {
+        if ("False".equals(ready(st))) {
+            out.add(new Dtos.HealthFinding(Dtos.HealthSeverity.CRITICAL, kind, name(st), "Not Ready",
+                    reasonMessage(st)));
+        }
+    }
+
+    private static String reasonMessage(GenericKubernetesResource r) {
+        for (Map<String, Object> c : Json.maps(r, "status", "conditions")) {
+            if ("Ready".equals(c.get("type"))) {
+                String reason = Json.str(c.get("reason"));
+                String msg = Json.str(c.get("message"));
+                return reason.isBlank() ? msg : msg.isBlank() ? reason : reason + ": " + msg;
+            }
+        }
+        return "";
     }
 
     private static CrdDetails inspectStore(KubernetesClient client, GenericKubernetesResource r) {

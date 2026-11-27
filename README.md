@@ -338,7 +338,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.30.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
+Shipped through **v1.30.1**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a **Helm releases** view with a
@@ -361,7 +361,7 @@ Candidate next:
   attributes) and bracketed paste; double-width (CJK/emoji) characters; mouse reporting for `vim`/`htop`;
   reflow on resize; a copy-selection toolbar button.
 - **Gateway API, next:** health-scan checks (no address, unresolved backends, missing TLS secret), `ReferenceGrant` /
-  `TLSRoute` / `TCPRoute`. cert-manager and External Secrets shipped on the same module (read-only); next for them are health-scan checks (certificate not ready / expiring, ExternalSecret sync errors) and "not found" hints on dead issuer / store references.
+  `TLSRoute` / `TCPRoute`. cert-manager and External Secrets shipped on the same module (read-only); their Status tabs flag a missing issuer / store ("not found") and the health scan reports certificates that are not Ready or expire within 14 days and ExternalSecrets that fail to sync.
 - Generic CRD support and macOS signing/notarization.
 
 ## 📖 Guides

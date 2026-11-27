@@ -3412,7 +3412,7 @@ public class MainView extends BorderPane {
                 ResourceKind target = r.kind().isBlank() ? null : resourceKindForEventKind(r.kind());
                 boolean sameNs = r.namespace().isBlank() || r.namespace().equals(currentNs);
                 javafx.scene.Node nameNode;
-                if (target != null && sameNs && kindAvailable(target)) {
+                if (target != null && sameNs && kindAvailable(target) && !"not found".equals(r.info())) {
                     javafx.scene.control.Hyperlink link = new javafx.scene.control.Hyperlink(
                             r.kind() + "  " + r.name());
                     link.setOnAction(ev -> openDetails(target, r.name(), null, overviewTab));

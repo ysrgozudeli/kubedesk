@@ -1,5 +1,6 @@
 package com.kubedesk.service.crd;
 
+import com.kubedesk.service.Dtos;
 import com.kubedesk.service.Dtos.CrdCondition;
 import com.kubedesk.service.Dtos.CrdDetails;
 import com.kubedesk.service.Dtos.CrdRelation;
@@ -128,12 +129,9 @@ public final class CertManager {
         List<CrdRelation> rel = new ArrayList<>();
         String ns = r.getMetadata().getNamespace();
 
-        String issuer = Json.str(r, "spec", "issuerRef", "name");
-        String issuerKind = Json.str(r, "spec", "issuerRef", "kind");
-        if (!issuer.isBlank()) {
-            boolean cluster = "ClusterIssuer".equals(issuerKind);
-            rel.add(new CrdRelation("Issued by", cluster ? "ClusterIssuer" : "Issuer",
-                    cluster ? "" : ns, issuer, ""));
+        CrdRelation issuedBy = issuerRelation(client, r);
+        if (issuedBy != null) {
+            rel.add(issuedBy);
         }
 
         String secretName = Json.str(r, "spec", "secretName");
@@ -175,11 +173,9 @@ public final class CertManager {
     private static CrdDetails inspectRequest(KubernetesClient client, GenericKubernetesResource r) {
         List<CrdRelation> rel = new ArrayList<>();
         String ns = r.getMetadata().getNamespace();
-        String issuer = Json.str(r, "spec", "issuerRef", "name");
-        if (!issuer.isBlank()) {
-            boolean cluster = "ClusterIssuer".equals(Json.str(r, "spec", "issuerRef", "kind"));
-            rel.add(new CrdRelation("Issued by", cluster ? "ClusterIssuer" : "Issuer",
-                    cluster ? "" : ns, issuer, ""));
+        CrdRelation issuedBy = issuerRelation(client, r);
+        if (issuedBy != null) {
+            rel.add(issuedBy);
         }
         if (r.getMetadata().getOwnerReferences() != null) {
             r.getMetadata().getOwnerReferences().stream()
@@ -187,6 +183,92 @@ public final class CertManager {
                     .ifPresent(o -> rel.add(new CrdRelation("Requested for", "Certificate", ns, o.getName(), "")));
         }
         return new CrdDetails(conditions(r), rel);
+    }
+
+    /** Relation to the Issuer/ClusterIssuer a resource points at, flagged when that issuer doesn't exist. */
+    private static CrdRelation issuerRelation(KubernetesClient client, GenericKubernetesResource r) {
+        String name = Json.str(r, "spec", "issuerRef", "name");
+        if (name.isBlank()) {
+            return null;
+        }
+        String ns = r.getMetadata().getNamespace();
+        boolean cluster = "ClusterIssuer".equals(Json.str(r, "spec", "issuerRef", "kind"));
+        boolean found = CrdSupport.exists(client, cluster ? CLUSTER_ISSUER : ISSUER, cluster ? "" : ns, name);
+        return new CrdRelation("Issued by", cluster ? "ClusterIssuer" : "Issuer", cluster ? "" : ns, name,
+                found ? "" : "not found");
+    }
+
+    /**
+     * Health-scan findings for cert-manager objects in {@code namespace} (plus ClusterIssuers): certificates
+     * that aren't Ready or expire within 14 days, and issuers that aren't Ready.
+     */
+    public static List<Dtos.HealthFinding> healthFindings(KubernetesClient client, String namespace) {
+        List<Dtos.HealthFinding> out = new ArrayList<>();
+        if (!CrdSupport.groupAvailable(client, GROUP)) {
+            return out;
+        }
+        try {
+            for (var c : CrdSupport.items(client, CERTIFICATE, namespace)) {
+                String n = name(c);
+                var conds = Json.maps(c, "status", "conditions");
+                if ("False".equals(ready(c))) {
+                    boolean issuing = "True".equals(Json.condition(conds, "Issuing"));
+                    CrdRelation issuedBy = issuerRelation(client, c);
+                    boolean issuerMissing = issuedBy != null && "not found".equals(issuedBy.info());
+                    String detail = reasonMessage(conds, "Ready");
+                    if (issuerMissing) {
+                        detail = issuedBy.kind() + " " + issuedBy.name() + " not found. " + detail;
+                    }
+                    boolean transientState = issuing && !issuerMissing;
+                    out.add(new Dtos.HealthFinding(
+                            transientState ? Dtos.HealthSeverity.WARNING : Dtos.HealthSeverity.CRITICAL,
+                            ResourceKind.CERTIFICATES, n, transientState ? "Issuing" : "Not Ready", detail));
+                    continue;
+                }
+                String notAfter = Json.str(c, "status", "notAfter");
+                if (!notAfter.isBlank()) {
+                    try {
+                        Duration left = Duration.between(Instant.now(), Instant.parse(notAfter));
+                        if (left.isNegative()) {
+                            out.add(new Dtos.HealthFinding(Dtos.HealthSeverity.CRITICAL, ResourceKind.CERTIFICATES,
+                                    n, "Expired", "Certificate expired on " + notAfter));
+                        } else if (left.toDays() < 14) {
+                            out.add(new Dtos.HealthFinding(Dtos.HealthSeverity.WARNING, ResourceKind.CERTIFICATES,
+                                    n, "Expiring soon", "Expires in " + expires(c) + " (" + notAfter + ")"));
+                        }
+                    } catch (Exception ignored) {
+                        // unparseable timestamp: skip the expiry check
+                    }
+                }
+            }
+            for (var i : CrdSupport.items(client, ISSUER, namespace)) {
+                issuerFinding(i, ResourceKind.ISSUERS, out);
+            }
+            for (var i : CrdSupport.items(client, CLUSTER_ISSUER, "")) {
+                issuerFinding(i, ResourceKind.CLUSTERISSUERS, out);
+            }
+        } catch (Exception ignored) {
+            // a cert-manager hiccup must not break the rest of the scan
+        }
+        return out;
+    }
+
+    private static void issuerFinding(GenericKubernetesResource i, ResourceKind kind, List<Dtos.HealthFinding> out) {
+        if ("False".equals(ready(i))) {
+            out.add(new Dtos.HealthFinding(Dtos.HealthSeverity.CRITICAL, kind, name(i), "Not Ready",
+                    reasonMessage(Json.maps(i, "status", "conditions"), "Ready")));
+        }
+    }
+
+    private static String reasonMessage(List<Map<String, Object>> conds, String type) {
+        for (Map<String, Object> c : conds) {
+            if (type.equals(c.get("type"))) {
+                String reason = Json.str(c.get("reason"));
+                String msg = Json.str(c.get("message"));
+                return reason.isBlank() ? msg : msg.isBlank() ? reason : reason + ": " + msg;
+            }
+        }
+        return "";
     }
 
     private static void addInfo(List<CrdRelation> rel, String label, String value) {

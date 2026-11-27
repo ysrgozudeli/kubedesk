@@ -96,6 +96,18 @@ public final class CrdSupport {
         return kind.namespaced() ? op.inNamespace(namespace).withName(name).get() : op.withName(name).get();
     }
 
+    /**
+     * Whether the object exists. Any error (RBAC, API hiccup) counts as "exists", so we never claim an
+     * object is missing when we simply couldn't check.
+     */
+    public static boolean exists(KubernetesClient client, CrdKind kind, String namespace, String name) {
+        try {
+            return get(client, kind, namespace, name) != null;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
     public static Watch watch(KubernetesClient client, CrdKind kind, String namespace,
                               Watcher<GenericKubernetesResource> watcher) {
         var op = op(client, kind);
