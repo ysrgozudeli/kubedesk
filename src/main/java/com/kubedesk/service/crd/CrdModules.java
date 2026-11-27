@@ -21,7 +21,8 @@ public final class CrdModules {
         static {
             ALL.putAll(GatewayApi.kinds());
             ALL.putAll(SealedSecretsApi.kinds());
-            // future modules: ALL.putAll(CertManager.kinds()); …
+            ALL.putAll(CertManager.kinds());
+            ALL.putAll(ExternalSecretsApi.kinds());
         }
     }
 

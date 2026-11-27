@@ -226,7 +226,9 @@ public class Fabric8ClusterService implements ClusterService {
             case CRONJOBS -> cronJobs(client, namespace);
             case SERVICES -> services(client, namespace);
             case INGRESSES -> ingresses(client, namespace);
-            case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS ->
+            case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS,
+                CERTIFICATES, CERTIFICATEREQUESTS, ISSUERS, CLUSTERISSUERS,
+                EXTERNALSECRETS, SECRETSTORES, CLUSTERSECRETSTORES ->
                     com.kubedesk.service.crd.CrdSupport.list(client, kind.crd(), namespace);
             case CONFIGMAPS -> configMaps(client, namespace);
             case SECRETS -> secrets(client, namespace);
@@ -335,7 +337,9 @@ public class Fabric8ClusterService implements ClusterService {
                 case CRONJOBS -> client.batch().v1().cronjobs().inNamespace(namespace).withName(name).get();
                 case SERVICES -> client.services().inNamespace(namespace).withName(name).get();
                 case INGRESSES -> client.network().v1().ingresses().inNamespace(namespace).withName(name).get();
-                case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS ->
+                case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS,
+                CERTIFICATES, CERTIFICATEREQUESTS, ISSUERS, CLUSTERISSUERS,
+                EXTERNALSECRETS, SECRETSTORES, CLUSTERSECRETSTORES ->
                         com.kubedesk.service.crd.CrdSupport.get(client, kind.crd(), namespace, name);
                 case CONFIGMAPS -> client.configMaps().inNamespace(namespace).withName(name).get();
                 case SECRETS -> client.secrets().inNamespace(namespace).withName(name).get();
@@ -908,7 +912,9 @@ public class Fabric8ClusterService implements ClusterService {
                         .watch(triggerWatcher(onChange, onClosed));
                 case INGRESSES -> client.network().v1().ingresses().inNamespace(namespace)
                         .watch(triggerWatcher(onChange, onClosed));
-                case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS ->
+                case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS,
+                CERTIFICATES, CERTIFICATEREQUESTS, ISSUERS, CLUSTERISSUERS,
+                EXTERNALSECRETS, SECRETSTORES, CLUSTERSECRETSTORES ->
                         com.kubedesk.service.crd.CrdSupport.watch(client, kind.crd(), namespace,
                                 this.<GenericKubernetesResource>triggerWatcher(onChange, onClosed));
                 case CONFIGMAPS -> client.configMaps().inNamespace(namespace)
@@ -1047,7 +1053,9 @@ public class Fabric8ClusterService implements ClusterService {
                 case CRONJOBS -> client.batch().v1().cronjobs().inNamespace(namespace).withName(name).delete();
                 case SERVICES -> client.services().inNamespace(namespace).withName(name).delete();
                 case INGRESSES -> client.network().v1().ingresses().inNamespace(namespace).withName(name).delete();
-                case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS ->
+                case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS,
+                CERTIFICATES, CERTIFICATEREQUESTS, ISSUERS, CLUSTERISSUERS,
+                EXTERNALSECRETS, SECRETSTORES, CLUSTERSECRETSTORES ->
                         throw new ClusterException(kind.label() + " are read-only in KubeDesk.");
                 case CONFIGMAPS -> client.configMaps().inNamespace(namespace).withName(name).delete();
                 case SECRETS -> client.secrets().inNamespace(namespace).withName(name).delete();
@@ -1718,7 +1726,9 @@ public class Fabric8ClusterService implements ClusterService {
             case CRONJOBS -> "CronJob";
             case SERVICES -> "Service";
             case INGRESSES -> "Ingress";
-            case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS -> kind.crd().kind();
+            case GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, SEALEDSECRETS,
+                CERTIFICATES, CERTIFICATEREQUESTS, ISSUERS, CLUSTERISSUERS,
+                EXTERNALSECRETS, SECRETSTORES, CLUSTERSECRETSTORES -> kind.crd().kind();
             case CONFIGMAPS -> "ConfigMap";
             case SECRETS -> "Secret";
             case PVCS -> "PersistentVolumeClaim";

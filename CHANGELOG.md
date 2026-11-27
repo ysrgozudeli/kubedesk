@@ -3,6 +3,22 @@
 All notable changes to KubeDesk are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.30.0] - 2026-11-27
+
+### Added
+- **cert-manager support (read-only).** Certificates, CertRequests, Issuers and ClusterIssuers appear under
+  **Config**, only on clusters that have the cert-manager CRDs. Certificates list with Ready, Secret, Issuer and
+  time to expiry. The **Status** tab shows every condition with its reason and message (e.g. "Issuing
+  certificate as Secret does not exist"), the issuer and the Secret holding the key pair (with its key count),
+  not-before / expires / renews-at, revision and DNS names.
+- **External Secrets Operator support (read-only).** ExternalSecrets, SecretStores and ClusterSecretStores
+  appear under **Config**, only when `external-secrets.io` is served (both `v1` and `v1beta1`). ExternalSecrets
+  list with Ready, store, target Secret, refresh interval and last sync. The **Status** tab shows the sync
+  condition and message, the store it reads from, the Secret it creates (key count, or "not created yet"),
+  last refresh and the key mappings. Secret values are never read.
+- Delete and editing are off for these kinds, like the other CRD-backed views. Both modules are built on the
+  shared CRD layer, so further families plug in the same way.
+
 ## [1.29.3] - 2026-11-24
 
 ### Fixed

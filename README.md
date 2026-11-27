@@ -76,7 +76,9 @@ Prefer to build it yourself? See [Build from source](#-build-from-source).
   **Gateway API** (GatewayClasses, Gateways, HTTPRoutes, GRPCRoutes), read-only, shown only on clusters that have
   the CRDs, with a **Status** tab: conditions (Accepted / Programmed / ResolvedRefs, with reason + message)
   and clickable relations (a Gateway's attached routes, listeners and TLS secrets; a route's parent gateways
-  and backends).
+  and backends). Likewise **cert-manager** (Certificates, CertRequests, Issuers, ClusterIssuers; expiry, renewal,
+  issuer and key-pair Secret) and **External Secrets** (ExternalSecrets, SecretStores, ClusterSecretStores; sync
+  status, store and target Secret) under **Config**, read-only and shown only when their CRDs exist.
 - **All-namespaces view** — pick **`✿ All namespaces`** to list a kind across every namespace in one
   table (a leading **Namespace** column), each namespace queried individually so it stays within
   namespace-scoped RBAC. Read-only in this mode (pick a row's namespace to act).
@@ -336,7 +338,7 @@ of creating a release.
 
 ## 🗺️ Roadmap
 
-Shipped through **v1.29.3**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
+Shipped through **v1.30.0**: 13 resource kinds (incl. ReplicaSets), an **all-namespaces view**, live watches, details panel
 (exec + logs + live metrics), pod diagnostics, live log follow + detachable log windows, management
 actions (incl. pod restart), Create/Apply with lint + dry-run, a **Sealed Secrets generator** (no `kubeseal`),
 port-forwarding, topology view, health scan, Events view, a **Helm releases** view with a
@@ -359,7 +361,7 @@ Candidate next:
   attributes) and bracketed paste; double-width (CJK/emoji) characters; mouse reporting for `vim`/`htop`;
   reflow on resize; a copy-selection toolbar button.
 - **Gateway API, next:** health-scan checks (no address, unresolved backends, missing TLS secret), `ReferenceGrant` /
-  `TLSRoute` / `TCPRoute`. Other CRD families (cert-manager, External Secrets) plug into the same module.
+  `TLSRoute` / `TCPRoute`. cert-manager and External Secrets shipped on the same module (read-only); next for them are health-scan checks (certificate not ready / expiring, ExternalSecret sync errors) and "not found" hints on dead issuer / store references.
 - Generic CRD support and macOS signing/notarization.
 
 ## 📖 Guides

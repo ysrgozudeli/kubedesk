@@ -26,6 +26,15 @@ public enum ResourceKind {
     SECRETS("Config", "Secrets", true, "", "secrets"),
     // Sealed Secrets (read-only, CRD-backed — shown only when the controller's CRD exists; see service.crd.SealedSecretsApi)
     SEALEDSECRETS("Config", "SealedSecrets", true, "bitnami.com", "sealedsecrets", true),
+    // cert-manager (read-only, CRD-backed; see service.crd.CertManager)
+    CERTIFICATES("Config", "Certificates", true, "cert-manager.io", "certificates", true),
+    CERTIFICATEREQUESTS("Config", "CertRequests", true, "cert-manager.io", "certificaterequests", true),
+    ISSUERS("Config", "Issuers", true, "cert-manager.io", "issuers", true),
+    CLUSTERISSUERS("Config", "ClusterIssuers", false, "cert-manager.io", "clusterissuers", true),
+    // External Secrets Operator (read-only, CRD-backed; see service.crd.ExternalSecretsApi)
+    EXTERNALSECRETS("Config", "ExternalSecrets", true, "external-secrets.io", "externalsecrets", true),
+    SECRETSTORES("Config", "SecretStores", true, "external-secrets.io", "secretstores", true),
+    CLUSTERSECRETSTORES("Config", "ClusterSecretStores", false, "external-secrets.io", "clustersecretstores", true),
     PVCS("Storage", "PVCs", true, "", "persistentvolumeclaims"),
     NODES("Cluster", "Nodes", false, "", "nodes");
 
